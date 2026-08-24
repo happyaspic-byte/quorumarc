@@ -5,6 +5,8 @@ members = [
     "apps/quorumarc-witness",
     "crates/quorumarc-core",
     "crates/quorumarc-sim",
+    "crates/quorumarc-store",
+    "crates/quorumarc-wire",
 ]
 
 [workspace.package]

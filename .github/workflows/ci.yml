@@ -16,6 +16,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.1
         with:
           components: rustfmt, clippy
+      # Temporary while Gate 1A dependencies are first resolved on this branch.
+      # The generated lockfile is committed and this step removed before merge.
+      - name: Resolve Gate 1A dependency lock
+        run: cargo generate-lockfile
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Lints
