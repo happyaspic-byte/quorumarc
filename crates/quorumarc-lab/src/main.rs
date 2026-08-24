@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::Duration;
@@ -74,10 +74,24 @@ fn run_witness(mut options: ParsedOptions) -> Result<(), CliError> {
     if !actual.ip().is_loopback() {
         return Err(CliError::NonLoopback(actual));
     }
-    fs::write(&ready_file, actual.to_string())
-        .map_err(|error| CliError::io("write witness ready file", error))?;
+    publish_ready_file(&ready_file, actual)?;
     let config = WitnessServerConfig::new(IO_TIMEOUT, max_connections).map_err(CliError::boxed)?;
     serve_witness(listener, &mut actor, &TestPeerKeys, config).map_err(CliError::boxed)
+}
+
+fn publish_ready_file(path: &Path, address: SocketAddr) -> Result<(), CliError> {
+    let mut temporary_name = path.as_os_str().to_os_string();
+    temporary_name.push(format!(".tmp.{}", std::process::id()));
+    let temporary_path = PathBuf::from(temporary_name);
+    match fs::remove_file(&temporary_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(CliError::io("remove stale witness ready temp file", error)),
+    }
+    fs::write(&temporary_path, address.to_string())
+        .map_err(|error| CliError::io("write witness ready temp file", error))?;
+    fs::rename(&temporary_path, path)
+        .map_err(|error| CliError::io("publish witness ready file", error))
 }
 
 fn run_candidate(mut options: ParsedOptions) -> Result<(), CliError> {

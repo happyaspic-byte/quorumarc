@@ -166,7 +166,7 @@ fn conflicting_binding_digest_is_refused_after_restart() {
 }
 
 #[test]
-fn key_rotation_cannot_resign_an_already_voted_epoch() {
+fn key_rotation_preserves_the_durable_proposal_identity() {
     let directory = value_or_abort(TestDirectory::new("key-rotation"));
     let request = binding("node-a", 10);
     let mut first = value_or_abort(WitnessVoteActor::open(
@@ -184,9 +184,13 @@ fn key_rotation_cannot_resign_an_already_voted_epoch() {
         directory.path(),
         FileBackend,
     ));
-    let refused = rotated.handle_vote(&request);
-    assert_eq!(refused.code(), VoteReasonCode::RefusedConflictSameEpoch);
-    assert!(refused.signed_vote().is_none());
+    let granted = rotated.handle_vote(&request);
+    assert_eq!(granted.code(), VoteReasonCode::GrantedAlreadyDurable);
+    assert_eq!(granted.durable_generation(), Some(1));
+    let Some(vote) = granted.signed_vote() else {
+        std::process::abort();
+    };
+    assert_eq!(vote.key_id().as_str(), "key-2");
 }
 
 #[test]

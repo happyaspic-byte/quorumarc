@@ -13,6 +13,8 @@ on:
       - Cargo.lock
       - "apps/**"
       - "crates/**"
+      - "docs/**"
+      - README.md
       - .github/workflows/extended-safety.yml
 
 permissions:
@@ -50,6 +52,8 @@ jobs:
             echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
             echo "commit=${GITHUB_SHA}"
             echo "runner=${RUNNER_OS}-${RUNNER_ARCH}"
+            echo "runner_image=${ImageOS:-unknown}-${ImageVersion:-unknown}"
+            sha256sum Cargo.lock .github/workflows/extended-safety.yml
             rustc --version --verbose
             cargo --version --verbose
             cargo llvm-cov --version
@@ -59,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          cargo test --locked --workspace --all-targets 2>&1 \
+          cargo test --locked --workspace --all-targets -- --nocapture 2>&1 \
             | tee safety-artifacts/workspace-tests.log
 
       - name: Deeper deterministic authority model
@@ -74,16 +78,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           : > safety-artifacts/process-lab-repetitions.log
-          seeds=(104729 130363 155921 181081 205759 231481 257053 282617 308003 333667 359357 384961)
-          iteration=0
-          for seed in "${seeds[@]}"; do
-            iteration=$((iteration + 1))
+          for iteration in $(seq 1 16); do
             {
-              echo "iteration=${iteration} seed_label=${seed} suite=deterministic-process-lab"
-              QUORUMARC_TEST_ITERATION="${iteration}" \
-                QUORUMARC_TEST_SEED_LABEL="${seed}" \
-                cargo test --locked -p quorumarc-lab --tests -- \
-                  --nocapture --test-threads=1
+              echo "iteration=${iteration} suite=parallel-process-lab"
+              cargo test --locked -p quorumarc-lab --tests -- --nocapture
             } 2>&1 | tee -a safety-artifacts/process-lab-repetitions.log
           done
 
@@ -95,13 +93,12 @@ jobs:
           for iteration in $(seq 1 16); do
             {
               echo "iteration=${iteration} suite=durable-store-crash-recovery"
-              QUORUMARC_TEST_ITERATION="${iteration}" \
-                cargo test --locked -p quorumarc-store --tests -- \
-                  --nocapture --test-threads=1
+              cargo test --locked -p quorumarc-store --tests -- \
+                --nocapture --test-threads=1
             } 2>&1 | tee -a safety-artifacts/store-crash-recovery-repetitions.log
           done
 
-      - name: Bounded malformed promotion parser suite
+      - name: Bounded deterministic malformed-input campaign
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -112,6 +109,8 @@ jobs:
             unknown_trailing_field_is_rejected
             malformed_utf8_identifier_is_rejected
             oversized_wire_objects_are_rejected_before_parsing
+            bounded_structural_malformed_campaign_never_panics_or_accepts
+            bounded_changed_byte_campaign_never_authenticates
           )
           for case_name in "${cases[@]}"; do
             {
@@ -126,7 +125,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked --workspace --all-targets --no-report
+          cargo llvm-cov --locked --workspace --all-targets --no-report 2>&1 \
+            | tee safety-artifacts/coverage/coverage-tests.log
           cargo llvm-cov report --lcov \
             --output-path safety-artifacts/coverage/lcov.info
           cargo llvm-cov report --json \
@@ -134,11 +134,28 @@ jobs:
           cargo llvm-cov report --summary-only 2>&1 \
             | tee safety-artifacts/coverage/summary.txt
 
+      - name: Build auditable x86_64 Ubuntu release binaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo build --locked --workspace --release
+          mkdir -p safety-artifacts/release
+          for binary in quorumarc-agent quorumarc-witness quorumarc-lab quorumarc-sim; do
+            test -x "target/release/${binary}"
+            cp "target/release/${binary}" safety-artifacts/release/
+          done
+          sha256sum safety-artifacts/release/* \
+            | tee safety-artifacts/release/SHA256SUMS
+          file safety-artifacts/release/quorumarc-* \
+            | tee safety-artifacts/release/file-types.log
+          ldd safety-artifacts/release/quorumarc-agent \
+            | tee safety-artifacts/release/dynamic-dependencies.log
+
       - name: Upload extended safety evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: extended-safety-${{ github.run_id }}-${{ github.run_attempt }}
           path: safety-artifacts
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30

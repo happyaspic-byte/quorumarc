@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_store::{
-    ActivationReceipt, DurableAuthorityStore, FaultInjectingBackend, FaultMode, FaultOperation,
-    FaultRule, FileBackend, LeaseBounds, PromotionRecord, StateRoot, StoreError, StorePaths,
-    TransitionOutcome, VoteRecord,
+    ActivationReceipt, Corruption, DurableAuthorityStore, FaultInjectingBackend, FaultMode,
+    FaultOperation, FaultRule, FileBackend, LeaseBounds, PromotionRecord, StateRoot, StoreError,
+    StorePaths, TransitionOutcome, VoteRecord,
 };
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -51,10 +51,15 @@ fn sample_vote(
     Ok(VoteRecord::new(epoch, candidate, digest)?)
 }
 
-fn sample_promotion(epoch: u64, digest: [u8; 32]) -> Result<PromotionRecord, Box<dyn Error>> {
+fn sample_promotion(
+    epoch: u64,
+    proposal_digest: [u8; 32],
+    signed_envelope_digest: [u8; 32],
+) -> Result<PromotionRecord, Box<dyn Error>> {
     Ok(PromotionRecord::new(
         epoch,
-        digest,
+        proposal_digest,
+        signed_envelope_digest,
         LeaseBounds::new(100, 1_000)?,
         41,
         StateRoot::new([9; 32]),
@@ -64,13 +69,25 @@ fn sample_promotion(epoch: u64, digest: [u8; 32]) -> Result<PromotionRecord, Box
 #[test]
 fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("restart")?;
-    let digest = [7; 32];
+    let proposal_digest = [7; 32];
+    let signed_envelope_digest = [8; 32];
     let generation = {
         let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
         store.allocate_incarnation(12)?;
-        store.record_vote(sample_vote(5, "node-a", digest)?)?;
-        store.record_promotion(sample_promotion(5, digest)?)?;
-        let activation = ActivationReceipt::new(5, "node-a", 12, digest, 120, 1_000)?;
+        store.record_vote(sample_vote(5, "node-a", proposal_digest)?)?;
+        store.record_promotion(sample_promotion(
+            5,
+            proposal_digest,
+            signed_envelope_digest,
+        )?)?;
+        let activation = ActivationReceipt::new(
+            5,
+            "node-a",
+            12,
+            signed_envelope_digest,
+            120,
+            1_000,
+        )?;
         let receipt = store.record_activation(activation)?;
         assert_eq!(receipt.outcome(), TransitionOutcome::Committed);
         receipt.generation()
@@ -93,8 +110,15 @@ fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
         recovered
             .state()
             .last_promotion()
-            .map(PromotionRecord::digest),
-        Some(&digest)
+            .map(PromotionRecord::proposal_digest),
+        Some(&proposal_digest)
+    );
+    assert_eq!(
+        recovered
+            .state()
+            .last_promotion()
+            .map(PromotionRecord::signed_envelope_digest),
+        Some(&signed_envelope_digest)
     );
     assert_eq!(
         recovered
@@ -285,11 +309,62 @@ fn promotion_requires_matching_durable_vote() -> Result<(), Box<dyn Error>> {
     store.allocate_incarnation(1)?;
     store.record_vote(sample_vote(2, "node-a", [1; 32])?)?;
     let error = store
-        .record_promotion(sample_promotion(2, [2; 32])?)
+        .record_promotion(sample_promotion(2, [2; 32], [3; 32])?)
         .err()
         .ok_or("mismatched promotion unexpectedly succeeded")?;
     assert!(matches!(error, StoreError::VoteDigestMismatch { epoch: 2 }));
     assert!(store.state().last_promotion().is_none());
+    Ok(())
+}
+
+#[test]
+fn activation_requires_final_signed_envelope_digest() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::create("activation-final-digest")?;
+    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let proposal_digest = [4; 32];
+    let signed_envelope_digest = [5; 32];
+    store.allocate_incarnation(9)?;
+    store.record_vote(sample_vote(12, "node-a", proposal_digest)?)?;
+    store.record_promotion(sample_promotion(
+        12,
+        proposal_digest,
+        signed_envelope_digest,
+    )?)?;
+
+    let mismatched = ActivationReceipt::new(12, "node-a", 9, proposal_digest, 120, 1_000)?;
+    let error = store
+        .record_activation(mismatched)
+        .err()
+        .ok_or("proposal digest unexpectedly activated as a final envelope")?;
+    assert!(matches!(error, StoreError::ActivationMismatch));
+    assert!(store.state().activation_receipt().is_none());
+    Ok(())
+}
+
+#[test]
+fn old_and_unknown_journal_versions_fail_closed() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::create("unsupported-version")?;
+    let paths = StorePaths::new(directory.path());
+    {
+        let mut store = DurableAuthorityStore::open(paths.clone(), FileBackend)?;
+        store.allocate_incarnation(1)?;
+    }
+    let current = fs::read(paths.committed())?;
+    for version in [1_u16, 3_u16, u16::MAX] {
+        let mut changed = current.clone();
+        let version_bytes = changed
+            .get_mut(8..10)
+            .ok_or("journal frame was unexpectedly shorter than its header")?;
+        version_bytes.copy_from_slice(&version.to_le_bytes());
+        fs::write(paths.committed(), changed)?;
+        let error = DurableAuthorityStore::open(paths.clone(), FileBackend)
+            .err()
+            .ok_or("unsupported journal version unexpectedly recovered")?;
+        assert!(matches!(
+            error,
+            StoreError::Corrupt(Corruption::UnsupportedVersion)
+        ));
+    }
     Ok(())
 }
 

@@ -5,13 +5,17 @@
 The Rust libraries and safe-default command shells are **IMPLEMENTED**. The
 agent reports status and refuses `promote`/`activate`; the witness reports
 status and refuses `vote`/`certify`. Automatic promotion is disabled by
-construction. Installing these binaries does not install an HA service.
+construction. The agent also implements a bounded, strict, flat TOML-like
+configuration parser for `status --config`, `health --config`, and
+`run --config`; this is inspection input, not an activation path. Installing
+these binaries does not install an HA service.
 
 An offline installer, Debian package, signed release bundle, SBOM/provenance
-pipeline, application configuration loader, and long-running daemon are
-**NOT-IMPLEMENTED**. No offline procedure is **CI-VERIFIED** by this document.
-Host independence, real fencing, storage durability, and I/O-bound effect
-enforcement are **PHYSICAL-REQUIRED**.
+pipeline, general TOML/production service configuration, configuration
+migration, dedicated validation command, and long-running agent/witness daemon
+are **NOT-IMPLEMENTED**. No offline procedure is **CI-VERIFIED** by this
+document. Host independence, real fencing, storage durability, and I/O-bound
+effect enforcement are **PHYSICAL-REQUIRED**.
 
 This repository does not vendor crates or the Rust toolchain. Before an offline
 transfer, a connected preparation machine must produce and verify a complete
@@ -122,9 +126,33 @@ sudo install -o root -g root -m 0755 \
 
 Expected status output says the EffectGate or voting is disabled. Do not wrap
 the refusal commands in scripts that reinterpret exit code 78 as success, and
-do not patch the binaries to enable promotion. The TOML and systemd material in
-[operations](OPERATIONS.md) is explicitly illustrative because no configuration
-parser or daemon consumes it yet.
+do not patch the binaries to enable promotion. The strict agent configuration
+subset in [operations](OPERATIONS.md) is consumed by the current agent; tables,
+arrays, general TOML syntax, unknown fields, duplicate singleton fields,
+non-UTF-8 input, and files larger than 65,536 bytes are refused. Even
+`automatic_promotion = true` changes only status/refusal context and cannot
+open the EffectGate. The systemd material remains illustrative because no
+long-running daemon or automatic activation path consumes it.
+
+For an offline inspection of a prepared configuration, use the exact subset
+documented in the operations guide and review the structured result:
+
+```bash
+/usr/local/bin/quorumarc-agent status --config /etc/quorumarc/agent.conf
+/usr/local/bin/quorumarc-agent health --config /etc/quorumarc/agent.conf
+```
+
+`status` remains a safe diagnostic even when configuration is missing or
+invalid; its structured reason code must be checked. `health` intentionally
+reports not ready and exits non-zero because the complete authority and
+EffectGate path is unavailable. `run --config` can inspect configured proof and
+store consistency, but it always ends in a fail-closed refusal. There is no
+standalone configuration-validation or activation command.
+
+Do not install `quorumarc-lab` as an operational service. Its loopback witness
+and candidate modes use deterministic public test identities and keys solely
+for hosted process tests. Likewise, `quorumarc-rpo0` is a library test workload,
+not an installed network service.
 
 ## Update and rollback
 

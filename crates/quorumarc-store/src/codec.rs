@@ -8,7 +8,7 @@ use crate::model::{
 
 const MAGIC: &[u8; 8] = b"QARCJNL1";
 const TRAILER: &[u8; 8] = b"QARCEND1";
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 const HEADER_LENGTH: usize = 24;
 const CHECKSUM_LENGTH: usize = 4;
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
@@ -99,7 +99,8 @@ pub(crate) fn encode(state: &AuthorityState, generation: u64) -> Vec<u8> {
         Some(promotion) => {
             payload.push(1);
             push_u64(&mut payload, promotion.epoch());
-            payload.extend_from_slice(promotion.digest());
+            payload.extend_from_slice(promotion.proposal_digest());
+            payload.extend_from_slice(promotion.signed_envelope_digest());
             push_u64(&mut payload, promotion.lease().not_before_ms());
             push_u64(&mut payload, promotion.lease().expires_at_ms());
             push_u64(&mut payload, promotion.commit_index());
@@ -214,14 +215,16 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(AuthorityState, u64), Corruption> 
     };
     let last_promotion = if reader.read_presence()? {
         let epoch = reader.read_u64()?;
-        let digest = reader.read_array_32()?;
+        let proposal_digest = reader.read_array_32()?;
+        let signed_envelope_digest = reader.read_array_32()?;
         let not_before_ms = reader.read_u64()?;
         let expires_at_ms = reader.read_u64()?;
         let commit_index = reader.read_u64()?;
         let state_root = StateRoot::new(reader.read_array_32()?);
         Some(PromotionRecord::from_validated(
             epoch,
-            digest,
+            proposal_digest,
+            signed_envelope_digest,
             LeaseBounds::from_validated(not_before_ms, expires_at_ms),
             commit_index,
             state_root,

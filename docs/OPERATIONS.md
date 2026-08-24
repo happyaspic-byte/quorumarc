@@ -69,9 +69,10 @@ The public keys above are well-formed test-vector values for parser examples;
 never treat their corresponding private material as operational credentials. A
 data-role `run` additionally requires `store_dir`, `proof_path`, and sufficient
 configured verification keys to inspect their consistency. Passing all of
-those checks still ends with `RUNTIME_AUTHORITY_PATH_UNAVAILABLE`, leaves the
-EffectGate closed, and exits with a refusal because final proof-digest,
-policy/time, and enforcement integration is incomplete. A `witness` role is
+those checks still ends with `ACTIVATION_CONTROL_PLANE_UNAVAILABLE`, leaves the
+EffectGate closed, and exits with a refusal because trusted time, fencing,
+lease activation, and enforced EffectGate integration are incomplete. Proposal
+and final signed-envelope digests are inspected separately. A `witness` role is
 also refused by the node agent's `run` command.
 
 The standalone `quorumarc-witness` refusal shell does not consume this agent

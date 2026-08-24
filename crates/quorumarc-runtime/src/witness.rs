@@ -7,11 +7,8 @@ use quorumarc_store::{
     DurableAuthorityStore, StorageBackend, StoreError, TransitionOutcome, VoteRecord,
 };
 use quorumarc_wire::{
-    CanonicalId, EnvelopeError, PROTOCOL_VERSION, QuorumBinding, SignedVote, SigningKey,
+    CanonicalId, PROTOCOL_VERSION, QuorumBinding, SignedVote, SigningKey,
 };
-use sha2::{Digest, Sha256};
-
-const BINDING_DIGEST_DOMAIN: &[u8] = b"quorumarc/witness-binding/sha256/v1\0";
 
 /// Immutable admission rules enforced before the lab witness votes.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,11 +283,10 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
             return VoteReply::refused(VoteReasonCode::RefusedLeaseTooLong);
         }
 
-        let proposal_digest =
-            match binding_digest(binding, &self.policy.witness_id, &self.policy.key_id) {
-                Ok(digest) => digest,
-                Err(_) => return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding),
-            };
+        let proposal_digest = match binding.proposal_digest() {
+            Ok(digest) => digest,
+            Err(_) => return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding),
+        };
         let record = match VoteRecord::new(
             binding.epoch,
             binding.candidate_node_id.as_str(),
@@ -348,38 +344,6 @@ fn binding_is_structurally_valid(binding: &QuorumBinding) -> bool {
         && binding.state_root.iter().any(|byte| *byte != 0)
         && binding.durable_commit >= binding.required_commit
         && binding.lease_expires_at_ms > binding.lease_not_before_ms
-}
-
-fn binding_digest(
-    binding: &QuorumBinding,
-    witness_id: &CanonicalId,
-    key_id: &CanonicalId,
-) -> Result<[u8; 32], EnvelopeError> {
-    let mut hasher = Sha256::new();
-    hasher.update(BINDING_DIGEST_DOMAIN);
-    hasher.update(binding.protocol_version.to_be_bytes());
-    hasher.update(binding.message_id.as_bytes());
-    hash_id(&mut hasher, &binding.workload_id)?;
-    hash_id(&mut hasher, &binding.candidate_node_id)?;
-    hasher.update(binding.candidate_incarnation.to_be_bytes());
-    hasher.update(binding.epoch.to_be_bytes());
-    hasher.update(binding.policy_hash);
-    hasher.update(binding.required_commit.to_be_bytes());
-    hasher.update(binding.durable_commit.to_be_bytes());
-    hasher.update(binding.state_root);
-    hasher.update(binding.lease_not_before_ms.to_be_bytes());
-    hasher.update(binding.lease_expires_at_ms.to_be_bytes());
-    hash_id(&mut hasher, witness_id)?;
-    hash_id(&mut hasher, key_id)?;
-    Ok(hasher.finalize().into())
-}
-
-fn hash_id(hasher: &mut Sha256, identifier: &CanonicalId) -> Result<(), EnvelopeError> {
-    let length =
-        u16::try_from(identifier.as_str().len()).map_err(|_| EnvelopeError::IdentifierTooLong)?;
-    hasher.update(length.to_be_bytes());
-    hasher.update(identifier.as_str().as_bytes());
-    Ok(())
 }
 
 fn map_store_error(error: &StoreError) -> VoteReasonCode {

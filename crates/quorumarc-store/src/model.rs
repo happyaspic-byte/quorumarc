@@ -115,7 +115,8 @@ impl VoteRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromotionRecord {
     epoch: u64,
-    digest: [u8; 32],
+    proposal_digest: [u8; 32],
+    signed_envelope_digest: [u8; 32],
     lease: LeaseBounds,
     commit_index: u64,
     state_root: StateRoot,
@@ -125,7 +126,8 @@ impl PromotionRecord {
     /// Creates a complete promotion record.
     pub fn new(
         epoch: u64,
-        digest: [u8; 32],
+        proposal_digest: [u8; 32],
+        signed_envelope_digest: [u8; 32],
         lease: LeaseBounds,
         commit_index: u64,
         state_root: StateRoot,
@@ -135,7 +137,8 @@ impl PromotionRecord {
         }
         Ok(Self {
             epoch,
-            digest,
+            proposal_digest,
+            signed_envelope_digest,
             lease,
             commit_index,
             state_root,
@@ -148,10 +151,16 @@ impl PromotionRecord {
         self.epoch
     }
 
-    /// Digest of the complete promotion envelope.
+    /// Digest of the pre-certificate quorum proposal accepted by voters.
     #[must_use]
-    pub const fn digest(&self) -> &[u8; 32] {
-        &self.digest
+    pub const fn proposal_digest(&self) -> &[u8; 32] {
+        &self.proposal_digest
+    }
+
+    /// Digest of the complete candidate-signed promotion envelope.
+    #[must_use]
+    pub const fn signed_envelope_digest(&self) -> &[u8; 32] {
+        &self.signed_envelope_digest
     }
 
     /// Lease bound into the promotion digest.
@@ -174,14 +183,16 @@ impl PromotionRecord {
 
     pub(crate) const fn from_validated(
         epoch: u64,
-        digest: [u8; 32],
+        proposal_digest: [u8; 32],
+        signed_envelope_digest: [u8; 32],
         lease: LeaseBounds,
         commit_index: u64,
         state_root: StateRoot,
     ) -> Self {
         Self {
             epoch,
-            digest,
+            proposal_digest,
+            signed_envelope_digest,
             lease,
             commit_index,
             state_root,
@@ -247,7 +258,7 @@ impl ActivationReceipt {
         self.incarnation
     }
 
-    /// Promotion digest authorized for activation.
+    /// Final candidate-signed envelope digest authorized for activation.
     #[must_use]
     pub const fn promotion_digest(&self) -> &[u8; 32] {
         &self.promotion_digest
@@ -356,7 +367,7 @@ impl AuthorityState {
             if promotion.epoch == 0
                 || promotion.epoch > self.highest_epoch
                 || vote.epoch != promotion.epoch
-                || vote.proposal_digest != promotion.digest
+                || vote.proposal_digest != promotion.proposal_digest
                 || promotion.lease.not_before_ms >= promotion.lease.expires_at_ms
                 || promotion.commit_index > self.commit_index
             {
@@ -380,9 +391,9 @@ impl AuthorityState {
                 || receipt.epoch != self.highest_epoch
                 || vote.epoch != receipt.epoch
                 || vote.candidate != receipt.holder
-                || vote.proposal_digest != promotion.digest
+                || vote.proposal_digest != promotion.proposal_digest
                 || receipt.incarnation != self.incarnation
-                || receipt.promotion_digest != promotion.digest
+                || receipt.promotion_digest != promotion.signed_envelope_digest
                 || receipt.activated_at_ms < promotion.lease.not_before_ms
                 || receipt.expires_at_ms != promotion.lease.expires_at_ms
                 || receipt.activated_at_ms >= receipt.expires_at_ms

@@ -129,6 +129,7 @@ fn acknowledged_generations_recover_exactly_across_fixed_seed_campaign() -> Test
         for iteration in 0..ACKNOWLEDGED_ITERATIONS {
             let epoch = 1_000 + (seed_index as u64 * 100) + iteration;
             let digest = random.array_32();
+            let signed_envelope_digest = random.array_32();
             let root = StateRoot::new(random.array_32());
             let vote = VoteRecord::new(epoch, "node-a", digest)?;
 
@@ -170,6 +171,7 @@ fn acknowledged_generations_recover_exactly_across_fixed_seed_campaign() -> Test
             let promotion = PromotionRecord::new(
                 epoch,
                 digest,
+                signed_envelope_digest,
                 LeaseBounds::new(lease_start, lease_end)?,
                 commit_index,
                 root,
@@ -186,7 +188,7 @@ fn acknowledged_generations_recover_exactly_across_fixed_seed_campaign() -> Test
                 epoch,
                 "node-a",
                 incarnation,
-                digest,
+                signed_envelope_digest,
                 lease_start + 1,
                 lease_end,
             )?;
@@ -200,10 +202,7 @@ fn acknowledged_generations_recover_exactly_across_fixed_seed_campaign() -> Test
 
             let activation_retry = store.record_activation(activation)?;
             assert_eq!(activation_retry.generation(), expected_generation);
-            assert_eq!(
-                activation_retry.outcome(),
-                TransitionOutcome::AlreadyDurable
-            );
+            assert_eq!(activation_retry.outcome(), TransitionOutcome::AlreadyDurable);
         }
     }
     Ok(())
@@ -282,6 +281,7 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             let epoch = random.next_u64() % 10_000 + 2;
             let incarnation = random.next_u64() % 10_000 + 1;
             let digest = random.array_32();
+            let signed_envelope_digest = random.array_32();
             let state_root = StateRoot::new(random.array_32());
             let lease_start = random.next_u64() % 1_000_000 + 1_000;
             let lease_end = lease_start + 1_000;
@@ -289,18 +289,20 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
                 epoch,
                 "node-a",
                 incarnation,
-                digest,
+                signed_envelope_digest,
                 lease_start + 1,
                 lease_end,
             )?;
 
             let (before_generation, before_state) = {
-                let mut bootstrap = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+                let mut bootstrap =
+                    DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
                 bootstrap.allocate_incarnation(incarnation)?;
                 bootstrap.record_vote(VoteRecord::new(epoch, "node-a", digest)?)?;
                 bootstrap.record_promotion(PromotionRecord::new(
                     epoch,
                     digest,
+                    signed_envelope_digest,
                     LeaseBounds::new(lease_start, lease_end)?,
                     41,
                     state_root,
@@ -335,7 +337,10 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             let mut recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
             if fault_case.rename_was_visible {
                 assert_eq!(recovered.generation(), before_generation + 1);
-                assert_eq!(recovered.state().activation_receipt(), Some(&activation));
+                assert_eq!(
+                    recovered.state().activation_receipt(),
+                    Some(&activation)
+                );
             } else {
                 assert_eq!(recovered.generation(), before_generation);
                 assert_eq!(recovered.state(), &before_state);
@@ -353,8 +358,11 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             let final_state = recovered.state().clone();
             drop(recovered);
 
-            let mut recovered =
-                recover_exact(directory.path(), before_generation + 1, &final_state)?;
+            let mut recovered = recover_exact(
+                directory.path(),
+                before_generation + 1,
+                &final_state,
+            )?;
             let exact_vote = VoteRecord::new(epoch, "node-a", digest)?;
             let vote_retry = recovered.record_vote(exact_vote)?;
             assert_eq!(vote_retry.outcome(), TransitionOutcome::AlreadyDurable);
@@ -394,6 +402,7 @@ fn corrupt_and_truncated_committed_frames_fail_closed_across_fixed_seeds() -> Te
         let epoch = random.next_u64() % 10_000 + 1;
         let incarnation = random.next_u64() % 10_000 + 1;
         let digest = random.array_32();
+        let signed_envelope_digest = random.array_32();
         let state_root = StateRoot::new(random.array_32());
         let lease_start = random.next_u64() % 1_000_000 + 1_000;
         let lease_end = lease_start + 1_000;
@@ -404,6 +413,7 @@ fn corrupt_and_truncated_committed_frames_fail_closed_across_fixed_seeds() -> Te
             source.record_promotion(PromotionRecord::new(
                 epoch,
                 digest,
+                signed_envelope_digest,
                 LeaseBounds::new(lease_start, lease_end)?,
                 73,
                 state_root,
@@ -412,7 +422,7 @@ fn corrupt_and_truncated_committed_frames_fail_closed_across_fixed_seeds() -> Te
                 epoch,
                 "node-a",
                 incarnation,
-                digest,
+                signed_envelope_digest,
                 lease_start + 1,
                 lease_end,
             )?)?;

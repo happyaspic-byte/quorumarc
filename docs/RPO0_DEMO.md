@@ -1,91 +1,150 @@
-# RPO-0 demonstration plan
+# RPO-0 demonstration workload
 
 ## Current status
 
-The RPO-0 demonstration workload is **NOT-IMPLEMENTED**. There is no replicated
-counter/key-value service, workload WAL, dual-node durable acknowledgement path,
-client protocol, recovery command, or three-process campaign in this repository.
-Accordingly there is no **CI-VERIFIED** RPO-0 result.
+`quorumarc-rpo0` is an **IMPLEMENTED** library for a deliberately small
+monotonic-counter workload. It provides:
 
-The core proof types and canonical envelope bind required commit, candidate
-durable commit, and state root (**IMPLEMENTED**). The authority store can retain
-one commit/root, and the lab-only in-memory effect actor deduplicates operation
-IDs during one process lifetime (**IMPLEMENTED**, but **SIMULATED** as an
-external effect). Neither capability makes acknowledged workload data durable.
-The in-memory actor loses its records on restart and is not the demo WAL.
+- a fixed-schema, checksummed write-ahead log (WAL) and strict recovery;
+- a coordinator that returns an acknowledgement only after two distinctly
+  identified `ReplicaSink` instances return matching durable receipts;
+- an on-disk `FileReplica` that validates the existing WAL, appends the exact
+  canonical record, calls `sync_all` on the file, and syncs its parent
+  directory before returning;
+- stable 16-byte operation IDs, exact-retry deduplication, conflicting-reuse
+  refusal, and recovery of the deduplication table from the WAL;
+- deterministic commit indexes and SHA-256 state roots exposed as
+  `WorkloadProgress`; and
+- in-memory fault injection plus automated tests for acknowledgement,
+  recovery, corruption, truncation, stale/out-of-order requests, invalid
+  receipts, missing replicas, identity collision, and duplicate operations.
 
-Physical power, storage-cache, controller, and independent-host behavior is
-**PHYSICAL-REQUIRED**. A GitHub-hosted process test, once built, would still be
+This is not yet an end-to-end replicated service. A client protocol, data-node
+network transport, concurrent-writer exclusion, checkpointing, a recovery CLI,
+and a multi-host workload daemon are **NOT-IMPLEMENTED**. The two replica sinks
+are ordinary library arguments and may be two files or in-memory fixtures in
+one process. A distinct replica ID does not prove a distinct disk, machine, or
+failure domain. `FileReplica` deliberately provides no cross-process fencing or
+file lock.
+
+The counter can report the commit index and state root that a promotion proof
+would need to bind, but no current service durably couples that progress to the
+authority store, canonical promotion envelope, witness decision, or
+EffectGate. Consequently the repository does not claim end-to-end RPO 0,
+automatic recovery, or workload failover. No exact CI run is linked from this
+document, so the implementation and its tests are not labelled
+**CI-VERIFIED** here.
+
+Physical power, storage-cache, controller, independent-host, and network
+behavior is **PHYSICAL-REQUIRED**. Hosted-runner process tests remain
 software-only evidence on one runner.
 
-## Narrow meaning of the future claim
+## Narrow meaning of the target claim
 
-For this demo only, `RPO 0` will mean:
+For this named demo only, `RPO 0` is intended to mean:
 
 > Every operation for which the demo client receives a success acknowledgement
 > is recoverable from either surviving data node after any one fault inside the
 > explicitly tested crash/storage model.
 
-It will not mean that every submitted or in-flight request succeeded. It will
-not cover arbitrary databases, filesystems, virtual machines, queues, devices,
-client sessions, or malicious/Byzantine faults. Loss of a data node must stop
-success acknowledgements rather than silently weaken the two-copy policy.
+The implemented library establishes a narrower building block: when
+`ReplicatedCounter::apply` returns success, two distinct sinks have returned
+receipts for the same canonical WAL record, commit index, and checksum, and the
+unit tests recover the acknowledged state from either sink. It does not yet
+establish that the sinks are independent nodes or that a network client
+received the acknowledgement.
 
-## Required demo design
+The eventual claim will not mean that every submitted or in-flight request
+succeeded. It will not cover arbitrary databases, filesystems, virtual
+machines, queues, devices, client sessions, or malicious/Byzantine faults.
+Loss of a data node must stop success acknowledgements rather than silently
+weaken the two-copy policy.
 
-The Gate 1A.2 target is a deliberately small counter or key/value state machine:
+## Implemented library semantics
 
-1. A client supplies a stable, non-zero 128-bit operation ID and an operation.
-2. The active data node rejects conflicting reuse of an operation ID.
-3. Both data nodes append a framed record containing operation ID, sequence,
-   previous state/root, operation, and checksum to their local WAL.
-4. Each data node makes the record durable according to the documented local
-   store contract before reporting durable success.
-5. The active acknowledges success only after both data-node durable results
-   bind the same index and resulting state root.
-6. Retries with the same ID and identical operation return the original result;
-   reuse with different content is refused and self-fences the authority path.
-7. Checkpointing never removes WAL needed to recover the latest acknowledged
-   index on either node.
-8. Promotion authority binds at least the last acknowledged commit and its
-   state root. A candidate behind that commit or holding a different root is
-   refused.
+The current counter path behaves as follows:
 
-The witness does not store recoverable workload data in this design, so its
-vote cannot replace the second durable data copy.
+1. A caller supplies a stable 16-byte operation ID, its observed commit index,
+   and a non-zero increment.
+2. Exact reuse of an already applied ID returns the stored acknowledgement
+   without another append. Reuse with different input is refused.
+3. Stale or future commit expectations are refused before replica I/O.
+4. The counter creates one canonical WAL record containing the next commit
+   index, operation ID, previous value, increment, resulting value, version,
+   lengths, and CRC.
+5. The left and right sinks must have different replica IDs. Each validates its
+   existing WAL before appending.
+6. Success is returned only after both receipts bind the expected replica ID,
+   commit index, and record checksum. Any append uncertainty or invalid receipt
+   poisons that in-memory writer so later writes remain refused until explicit
+   recovery.
+7. Recovery accepts only a complete, checksum-valid, contiguous WAL with
+   consistent value transitions and unique operation IDs. Two recovered copies
+   must be exactly equal before `ReplicatedCounter::from_recovered` reopens the
+   logical writer.
+
+The current writes to the two sinks are serial, not an atomic distributed
+transaction. If the first append succeeds and the second fails, the writer
+returns no acknowledgement and enters the uncertain state. An operator or
+future service must reconcile the replica prefixes safely; the library does
+not truncate, roll back, or guess.
+
+## Missing service and promotion integration
+
+The complete Gate 1A demonstration still needs to:
+
+1. expose a bounded authenticated client/data-node protocol with stable
+   request IDs and an acknowledgement trace;
+2. run each durable sink on an independently controlled data-node process;
+3. prevent concurrent or stale processes from writing either WAL;
+4. reconcile an unacknowledged one-sided append without losing a possibly
+   committed operation;
+5. durably couple the jointly acknowledged commit/root to the authority store;
+6. bind that exact progress into the final signed promotion envelope and refuse
+   a lagging or divergent candidate;
+7. open the EffectGate only after the complete durable authority decision; and
+8. define checkpoint, backup, node replacement, and key/policy transitions.
+
+The witness stores no recoverable workload data, so its vote cannot replace
+the second durable data copy.
 
 ## Acknowledgement and recovery oracle
 
-The client trace must distinguish `submitted`, `acknowledged`, `refused`, and
-`unknown because the connection failed`. After every injected fault, recovery
-must replay each WAL to a valid prefix and report its highest commit/root and
-operation-ID result table. The acceptance oracle compares only acknowledged
-operations:
+The future client trace must distinguish `submitted`, `acknowledged`,
+`refused`, and `unknown because the connection failed`. After every injected
+fault, recovery must replay each WAL to a valid prefix and report its highest
+commit/root and operation-ID result table. The acceptance oracle compares only
+acknowledged operations:
 
-- every acknowledged operation appears exactly once in recovered logical state;
+- every acknowledged operation appears exactly once in recovered logical
+  state;
 - no two different results exist for one operation ID;
-- the recovered root at each compared commit is identical on both valid copies;
-- a promoted candidate is at or above the authority-required commit and matches
-  its root; and
+- the recovered root at each compared commit is identical on both valid
+  copies;
+- a promoted candidate is at or above the authority-required commit and
+  matches its root; and
 - when two-copy durability is unavailable, no new success acknowledgement is
   observed.
 
 An operation whose response was lost may have committed. The client must retry
-the same operation ID to resolve that ambiguity; it must not issue a replacement
-ID and then call a duplicate result data loss.
+the same operation ID to resolve that ambiguity; it must not issue a
+replacement ID and then call a duplicate result data loss.
 
-## Required software campaign
+## Remaining software campaign
 
-Before any GitHub-hosted demonstration is reported, automated tests must cover:
+The existing unit tests exercise the library contract and its local fault
+fixtures. Before a GitHub-hosted end-to-end RPO demonstration is reported, an
+automated process campaign must additionally cover:
 
-- fresh start and clean restart on each data node;
+- fresh start and clean restart of two independent data-node processes;
 - crash before append, during a partial append, after append but before sync,
-  after local sync, after peer sync, and before/after client response;
-- duplicate requests before and after restart;
+  after each local sync, and before/after the client response;
+- duplicate requests before and after process restart;
 - operation-ID reuse with different content;
 - truncated, corrupt, reordered, and unexpected-version WAL frames;
 - one data node unavailable, slow, or returning a durability error;
 - candidate lag and same-index state-root mismatch;
+- safe reconciliation of a one-sided unacknowledged WAL append;
 - promotion/restart from the last jointly durable acknowledged index; and
 - repeated failover/failback with a replayable seed and exact acknowledged set.
 
@@ -95,16 +154,19 @@ and pass/fail oracle. A green unit test alone is not a physical RPO claim.
 
 ## Exit boundaries
 
-- **IMPLEMENTED exit:** demo service, WAL/recovery, stable client protocol,
-  dual-durable ACK coordinator, and promotion binding are present and reviewed.
+- **IMPLEMENTED now:** counter state machine, WAL codec/recovery, file and
+  in-memory replica sinks, dual-receipt acknowledgement, recovered dedupe, and
+  promotion-progress output.
+- **IMPLEMENTED service exit:** authenticated client/data-node service,
+  independently hosted sinks, safe prefix reconciliation, and durable
+  promotion/EffectGate integration are present and reviewed.
 - **CI-VERIFIED exit:** the exact commit has a linked successful run of the full
   software campaign with retained summaries/traces.
-- **SIMULATED label:** all user-space crashes, partial writes, delays, and
-  partitions on a hosted runner keep this label.
+- **SIMULATED label:** user-space crashes, partial writes, delays, and partitions
+  on a hosted runner keep this label.
 - **PHYSICAL-REQUIRED exit:** independent A/B hosts are tested with real power,
   storage, NIC/switch, clock/pause, and selected fence/effect adapters.
 
 Even after these exits, the result is evidence for this named demonstration
 workload only and is not a production availability or arbitrary-application
 RPO guarantee.
-

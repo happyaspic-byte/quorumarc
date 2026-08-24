@@ -2,176 +2,211 @@
 
 ## Status and claim boundary
 
-QuorumArc starts from **Gate 0**: an in-memory promotion-proof validator, a
-logical fail-closed EffectGate, and a deterministic compact-state simulator.
-The Gate 1A feature branch now also contains canonical signed-envelope,
-durable-store, witness-runtime, RPO-0 demonstration, and real-process lab
-building blocks. These components do not yet form an automatic two-node
-failover service. Nothing in this document changes that claim.
+Gate 1A is an **incomplete foundation**, not an automatic HA product. The branch
+contains a canonical signed envelope, durable authority store, Witness actor,
+bounded framing, test EffectGate, RPO-0 demonstration workload, safe-default
+CLIs, and focused process/fault tests. Those pieces do not yet form a complete
+Node A/Node B/Witness promotion transaction.
 
-Gate 1A is an incremental engineering program for exercising the authority path
-with real processes on a GitHub-hosted Ubuntu runner. A substage is complete only
-after its code, tests, and successful GitHub Actions run are linked from the
-change that claims completion. A design document, compiling module, or isolated
-unit test is not completion evidence.
+In particular, no current test starts two agent services, elects one Active,
+opens a generation-scoped externally effective gate, kills that Active, and
+proves safe workload recovery on the other agent. Therefore the project does
+not claim completed failover, failback, zero downtime, or production RPO 0.
 
-The GitHub lab is deliberately not called production HA. Its participants share
-one virtual machine, kernel, clock, power source, and underlying storage. It can
-test protocol behavior and crash recovery, but it cannot establish independence
-of physical failure domains or the correctness of real fencing hardware.
+The GitHub-hosted lab also shares one virtual machine, kernel, clock, power
+source, and storage stack. It can validate software components and controlled
+process faults; it cannot establish physical failure-domain independence or
+the correctness of real fence hardware.
 
-### Implemented and verified boundary
+## Evidence snapshot
 
-- A GitHub-hosted runner has executed a Witness as a child process and exchanged
-  authenticated, bounded protocol frames over a real localhost TCP socket. The
-  lab covers durable retry after `SIGKILL`, same-epoch conflicting-candidate
-  refusal, stale-epoch replay refusal, malformed and oversized frames,
-  unauthenticated requests, and disconnect-before-request. This evidence is in
-  [workflow run 32706670597](https://github.com/happyaspic-byte/quorumarc/actions/runs/32706670597).
-- The `quorumarc-agent` and `quorumarc-witness` command-line programs are
-  safe-default inspection and refusal shells. They can report health/status,
-  inspect snapshots or proofs without becoming an active writer, and exercise
-  selected failure paths. They deliberately refuse activation, automatic
-  promotion, and network voting because the complete authority transaction is
-  not connected.
-- Canonical wire, durable-store, witness-runtime, and demonstration RPO-0
-  modules have focused tests. Their presence does not mean that the complete
-  Node A/Node B/Witness lifecycle or workload failover path has been integrated.
+The following facts must not be conflated:
 
-Not yet complete are automatic promotion, a physical fence adapter, the full
-25-scenario failure campaign, coverage exit thresholds, and p50/p95/p99
-failover or write-latency measurements. No production-readiness, zero-downtime,
-or physical-fencing claim follows from the current GitHub evidence.
+| Evidence class | Current evidence | Claim limit |
+|---|---|---|
+| Implemented in source | Wire, store, runtime, demo workload, process harness, and refusal CLIs are present | Presence or compilation is not an end-to-end PASS |
+| Historical compact-model validation | Extended Safety run #3, depth 12: 143,439 unique states, 836,424 transitions, 0 model invariant violations | Applies only to that model revision and its assumptions |
+| Historical coverage measurement | Workspace line coverage 69.28% | The 80% workspace target is not met |
+| Current candidate tests | Focused safety-path tests, a bounded Witness clean-exit case, and deterministic malformed-wire campaigns are present | The exact count and result require a successful workflow for the exact commit |
+| GitHub-hosted process scope | A real Witness child process communicates over localhost TCP; tests exercise bounded input, authenticated requests, durable voting, retry, restart, conflicts, and selected pause/kill cases | This is not a three-role Active/Standby failover result |
+| Required scenario campaign | Individual model, component, or process analogues cover parts of the matrix | None of the 25 rows has a global end-to-end PASS result |
+| Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |
+
+Run numbers without an exact commit and artifact are historical diagnostics,
+not current exit evidence. The final candidate must record its own successful
+workflow URL, commit SHA, test inventory, model report, coverage report, and
+scenario artifacts.
+
+## Implementation classification
+
+### Implemented components
+
+- A deterministic, length-bounded promotion envelope and domain-separated
+  Ed25519 signature verification with strict version and trailing-byte checks.
+- A checksummed authority journal with atomic replacement, durable generation,
+  restart recovery, single-vote enforcement, and declared storage fault points.
+- A durable Witness actor, bounded frames, idempotent request IDs, and a
+  generation-scoped test EffectGate sink.
+- A WAL-backed monotonic-counter demonstration that requires two distinct
+  durable replicas before acknowledging an operation and deduplicates stable
+  operation IDs.
+- A localhost TCP Witness process harness with deterministic cases for kill,
+  restart, conflict, stale epoch, malformed/authentication failures, bounded
+  clean exit, concurrency, and pause/resume behavior.
+- Safe-default `quorumarc-agent` and `quorumarc-witness` command shells for
+  status, health, inspection, and bounded failure simulation.
+
+### Verified only within a limited class
+
+- The compact model checks its stated invariants under one serial metadata view
+  and one trusted logical clock, at the exact explored depth.
+- Unit and integration tests check component contracts and selected process
+  behavior on a shared runner.
+- Crash campaigns check the declared file-store API fault points, not arbitrary
+  controller, filesystem, firmware, or total trusted-copy rollback behavior.
+- The test EffectGate records logical effects; it is not nftables, eBPF,
+  storage-reservation, VIP, BMC, PDU, or device enforcement.
+
+### Not implemented or not integrated
+
+- One restart-safe authority transaction joining the now-separated proposal and
+  final-envelope digests to trusted time, fencing, durable activation, and
+  EffectGate opening.
+- Identical long-running Node A and Node B services with consensus-derived roles.
+- Automatic first election, Active failure detection, safe promotion, failback,
+  and externally observable workload recovery.
+- Real fencing and real effect adapters.
+- A global PASS for all 25 required failure scenarios.
+- Coverage gates at 80% workspace and 90% critical safety paths.
+- p50/p95/p99 failover and RPO-0 write latency from an integrated flow.
+
+### Requires future physical validation
+
+- Independent power, NIC, switch, storage, and clock failure domains.
+- BMC/Redfish, PDU, storage-reservation, or equivalent fencing with read-back.
+- VIP/endpoint movement, client-observed outage, ARP/ND convergence, and load.
+- Ordinary Ubuntu data hosts plus a genuinely independent Witness host/device.
 
 ## Goal
 
 Run Node A, Node B, and a non-workload Witness as independently addressable
-processes. Promotion remains fail-closed unless one canonical, signed envelope
-binds all of the following evidence:
+processes. Promotion must remain fail-closed unless one canonical, signed
+envelope binds all of the following evidence:
 
 - workload, candidate node, and candidate boot incarnation;
 - epoch, protocol version, message ID, and policy hash;
-- quorum votes and their voter identities;
+- quorum votes and voter identities;
 - fence receipt or a conservatively expired authority lease;
 - required and candidate durable commit indexes plus state root;
 - health attestation and exact lease bounds.
 
-The authority decision must be durable before the test EffectGate can open. A
+The authority decision must be durable before the EffectGate can open. A
 missing key, unknown version, ambiguous durable record, replay, state mismatch,
-or unavailable witness must result in a typed refusal and a closed gate.
+or unavailable Witness must result in a typed refusal and a closed gate.
+
+## Current promotion-integration blocker
+
+The earlier proposal/final-digest dependency cycle is resolved in source. A
+domain-separated digest covers the complete canonical quorum binding before
+votes exist. The Witness persists that proposal digest; a promotion record in
+authority journal format v2 persists both that value and the digest of the
+complete signed envelope. Promotion recovery matches vote to proposal, while
+activation matches its receipt to the final signed-envelope digest. Format v1
+is deliberately rejected rather than ambiguously migrated.
+
+This is still only durable material validation. There is no integrated
+three-role control plane that obtains the proof, validates trusted time and
+real fencing, durably activates a lease, and opens an enforced EffectGate. The
+agent therefore continues to refuse `run` with
+`ACTIVATION_CONTROL_PLANE_UNAVAILABLE` after successful inspection.
 
 ## Incremental delivery
 
-### Gate 1A.0 — signed durable-authority smoke
+### Gate 1A.0 — signed durable-authority components
 
-The component pieces below are implemented and tested in isolation or in the
-limited Witness process lab. The end-to-end authority transaction is not a
-completed capability claim.
+**Status: component foundation implemented; integrated activation incomplete.**
 
-1. Define a length-bounded, deterministic canonical promotion envelope.
+1. Define a length-bounded deterministic promotion envelope.
 2. Sign a domain-separated digest with a reviewed standard signature library.
 3. Verify signer identity, key status, complete-envelope binding, and version.
-4. Persist highest epoch, incarnation, vote, proof digest, lease, durable state,
-   and activation receipt using an atomic crash-recoverable store.
+4. Persist epoch, incarnation, vote, proof digest, lease, durable state, and
+   activation receipt using an atomic crash-recoverable store.
 5. Refuse same-epoch double voting and rolled-back or corrupt state.
-6. Exercise `stage -> durable confirmation -> activate -> effect` with a test
-   sink; inject failure before and after every persistence boundary.
+6. Keep every failure path closed until a complete authority transaction is
+   durably verified.
 
-Gate 1A.0 exits only when restart tests show that an acknowledged vote or
-authority record cannot be forgotten, malformed inputs fail closed, and the
-existing Gate 0 invariants remain green.
-
-One integration blocker remains: a durable `VoteRecord` binds a
-`proposal_digest` before the quorum certificate exists, while the final signed
-promotion-envelope digest includes the resulting certificate. Treating those
-two digests as the same value creates a dependency cycle: votes would need to
-sign a final digest that itself depends on those votes. The current Witness
-runtime therefore uses a distinct proposal-binding digest and the agent keeps
-promotion closed. Before activation can be enabled, the wire protocol and
-durable schema must explicitly define and persist both the pre-certificate
-proposal binding and final certified-envelope digest, with verification across
-restart.
+The component source supports these pieces, but Gate 1A.0 cannot claim an exit
+until the exact candidate has a linked green run and the durable material is
+joined to the missing activation control plane without weakening fail-closed
+behavior.
 
 ### Gate 1A.1 — three-process control plane
 
-- **Partial only:** the current real-process TCP lab exercises a Witness child
-  process and a client harness; it is not yet a complete Node A/Node B/Witness
-  control plane.
+**Status: partial Witness process lab only.**
+
 - Run identical agent binaries for Node A and Node B, plus a Witness that can
   vote but cannot host or activate a workload.
 - Authenticate peers, bound messages, use explicit versions and request IDs,
   and make retries idempotent.
 - Add process lifecycle, delay, duplication, reordering, partition, pause, and
-  restart controls to a deterministic user-space fault proxy or equivalent.
-- Record every safety decision with stable reason codes and a replayable seed.
+  restart controls to a deterministic fault proxy or equivalent.
+- Record every safety decision with stable reason codes and replayable seeds.
+
+The existing client-to-Witness localhost tests do not satisfy this substage.
 
 ### Gate 1A.2 — RPO-0 demonstration workload
 
-- **Component implemented, authority integration incomplete:** the WAL-backed
-  demonstration enforces two distinct durable replicas before acknowledgement,
-  but its commit index and state root are not yet carried through an automatic
-  failover transaction.
-- Add a small counter or key/value workload with a checksummed write-ahead log.
-- Acknowledge a write only after both data nodes have made it durable.
-- Bind the committed index and state root into promotion authority.
-- Deduplicate retries with a stable operation ID.
-- Stop acknowledging writes when the two-copy durability contract cannot be
-  maintained; do not silently weaken the policy for availability.
+**Status: component implemented; authority/failover integration incomplete.**
 
-This workload is evidence for the QuorumArc protocol. It is not a general-purpose
-database or a claim that arbitrary applications automatically achieve RPO 0.
+- Acknowledge an operation only after both data replicas durably record it.
+- Bind commit index and state root into promotion authority.
+- Deduplicate retries with a stable operation ID.
+- Stop acknowledging writes when the two-copy contract cannot be maintained.
+- Recover every acknowledged operation after a single data-node loss.
+
+The small monotonic-counter workload is protocol evidence, not a general
+database and not proof that arbitrary applications achieve RPO 0.
 
 ### Gate 1A.3 — repeatable safety campaign
 
-- **Not complete:** focused process-lab cases are automated, but the required
-  25-scenario matrix, coverage thresholds, and timing distributions are not.
-- Automate the 25 scenarios in [the failure matrix](FAILURE_MATRIX.md).
-- Retain seeds and traces for failures and upload bounded artifacts from CI.
-- Add malformed-input, crash-recovery, multi-seed, and bounded fuzz campaigns.
-- Measure logical failover and write latency without weakening lease or fencing
-  requirements to meet a latency target.
+**Status: partial component/model/process cases; no global scenario PASS.**
 
-## Validation classes
+- Automate the 25 rows in [the failure matrix](FAILURE_MATRIX.md) against the
+  integrated three-role lifecycle.
+- Retain seeds and traces and upload bounded artifacts.
+- Run malformed-input, crash-recovery, multi-seed, and bounded fuzz campaigns.
+- Measure logical failover and write latency without weakening lease or fencing.
+- Raise measured coverage through meaningful safety-path tests; do not lower
+  the 80% workspace or 90% critical-path targets to declare success.
 
-| Class | What it can establish | What it cannot establish |
-|---|---|---|
-| Gate 0 model | Safety of the compact explored state machine at the reported depth | Concurrent independent views, real storage, real networking, physical fencing |
-| GitHub-hosted 1A | Wire compatibility, authenticated process interaction, idempotency, file-store crash recovery, controlled fault schedules | Independent machines, power/NIC/switch faults, BMC/PDU behavior, hardware clock bounds |
-| Future physical lab | Two-host behavior, real NIC/switch paths, actual endpoint movement, measured outage, selected fence adapters | Production readiness without longer campaigns, supported hardware matrix, and independent review |
+## Authority transaction required for activation
 
-Results must always name their class. A user-space simulated partition must not
-be reported as a switch failure, and killing a process must not be reported as
-power fencing.
+1. **Recover:** load durable state; ambiguity enters a blocked repair state.
+2. **Catch up:** candidate reaches the required commit and exact state root.
+3. **Fence or wait:** prove fencing or wait through the old lease and guard.
+4. **Vote:** each voter durably records its proposal-bound vote before reply.
+5. **Certify:** assemble and verify the complete signed promotion envelope.
+6. **Commit:** durably record the epoch, final digest, and lease.
+7. **Activate:** open only the matching generation-scoped EffectGate.
+8. **Receipt:** durably record an inspectable activation receipt.
 
-## Authority transaction
-
-1. **Recover:** load durable authority state; any ambiguity enters a blocked
-   state that requires repair or operator intervention.
-2. **Catch up:** candidate reaches the proof's required commit and state root.
-3. **Fence or wait:** obtain authoritative fencing evidence or wait through the
-   old authority lease plus its safety guard.
-4. **Vote:** every voter durably records its vote before replying.
-5. **Certify:** form and verify the complete signed promotion envelope.
-6. **Commit:** durably record the new epoch, proof digest, and lease.
-7. **Activate:** open only the generation-scoped test EffectGate.
-8. **Receipt:** append an activation receipt that can be inspected and replayed.
-
-No direct `closed -> open` transition is valid. A crash at any point must recover
-to a state that either finishes the same idempotent transaction or stays closed.
+No direct `closed -> open` transition is valid. A crash at any point must
+recover by completing the same idempotent transaction or remaining closed.
 
 ## CI evidence required for an exit claim
 
 - exact commit SHA and successful workflow URL;
-- Rust format, Clippy with warnings denied, and all workspace tests;
-- Gate 0 regression report with explored depth, states, transitions, and
-  single-writer violations;
-- scenario-by-scenario Gate 1A result with seed and validation class;
+- format, Clippy with warnings denied, and locked workspace tests;
+- model depth, states, transitions, and violation count;
+- scenario-by-scenario result with seed and validation class;
 - crash-recovery and malformed-envelope summaries;
-- measured coverage and latency only when produced by the linked run;
-- dependency/security scan result and any accepted exceptions;
+- actual coverage and latency produced by the linked run;
+- dependency/security scan result and accepted exceptions;
 - explicit residual limitations.
 
-Until those artifacts exist, status remains **planned or under development**.
+A source test count is not a successful test count. A historical workflow is
+not evidence for a later tree. Until all items are linked, Gate 1A remains under
+development.
 
 ## Explicitly outside Gate 1A
 
@@ -181,9 +216,8 @@ Until those artifacts exist, status remains **planned or under development**.
 - Byzantine-fault-tolerant consensus;
 - proof of clock bounds across independent hosts;
 - an availability or downtime service-level agreement;
-- production deployment on a public-repository self-hosted runner;
-- any modification of `r8-protocol` or use of R8 as authority, quorum, or
-  fencing.
+- a public-repository self-hosted runner;
+- modification of `r8-protocol` or use of R8 as authority, quorum, or fencing.
 
 The physical continuation is described in [the lab setup](LAB_SETUP.md), and
-known gaps are maintained in [known limitations](KNOWN_LIMITATIONS.md).
+residual gaps are maintained in [known limitations](KNOWN_LIMITATIONS.md).

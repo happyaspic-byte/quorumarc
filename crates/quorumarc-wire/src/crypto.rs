@@ -3,13 +3,15 @@ use sha2::{Digest, Sha256};
 
 use crate::EnvelopeError;
 use crate::codec::{
-    encode_fence_statement, encode_outer_signature_statement, encode_vote_statement,
+    encode_fence_statement, encode_outer_signature_statement, encode_quorum_binding_statement,
+    encode_vote_statement,
 };
 use crate::model::{
     CanonicalId, FenceMechanism, FenceReceipt, PromotionEnvelope, QuorumBinding, SignedVote,
 };
 
 const VOTE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/quorum-vote/ed25519/v1\0";
+const PROPOSAL_DIGEST_DOMAIN: &[u8] = b"quorumarc/quorum-binding-proposal/sha256/v1\0";
 const FENCE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/fence-receipt/ed25519/v1\0";
 const ENVELOPE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/promotion-envelope/ed25519/v1\0";
 const ENVELOPE_DIGEST_DOMAIN: &[u8] = b"quorumarc/promotion-envelope/sha256/v1\0";
@@ -25,6 +27,21 @@ pub trait VerificationKeyResolver {
         principal: &CanonicalId,
         key_id: &CanonicalId,
     ) -> Option<ed25519_dalek::VerifyingKey>;
+}
+
+impl QuorumBinding {
+    /// Returns the canonical proposal digest persisted before any voter signs.
+    ///
+    /// The digest covers only this complete binding under a dedicated domain;
+    /// voter identities, key identifiers, signatures, certificate ordering,
+    /// and the final candidate-signed envelope cannot affect it.
+    pub fn proposal_digest(&self) -> Result<[u8; 32], EnvelopeError> {
+        let statement = encode_quorum_binding_statement(self)?;
+        let mut hasher = Sha256::new();
+        hasher.update(PROPOSAL_DIGEST_DOMAIN);
+        hasher.update(&statement);
+        Ok(hasher.finalize().into())
+    }
 }
 
 impl SignedVote {

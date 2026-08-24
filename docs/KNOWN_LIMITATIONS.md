@@ -2,13 +2,24 @@
 
 ## Current repository status
 
-The completed baseline is Gate 0. It validates promotion evidence in memory,
-models logical EffectGate transitions, and explores a deliberately compact,
-single-view state space. Gate 1A adds tested wire, durable-store,
-witness-runtime, and demonstration RPO-0 components. A GitHub-hosted test also
-runs a Witness child process and exchanges authenticated frames over a real
-localhost TCP connection, including a `SIGKILL` and durable restart case. This
-is a limited process lab, not a complete three-role failover system.
+The completed safety baseline is Gate 0: in-memory promotion validation, logical
+EffectGate transitions, and a deliberately compact single-view model. Gate 1A
+adds a substantial **component foundation**—wire, durable store, Witness
+runtime, RPO-0 demonstration, process harness, and refusal CLIs—but does not yet
+connect those pieces into a complete three-role failover system.
+
+No current test starts Node A and Node B as authority participants, elects one
+Active, opens its externally effective gate, fails it, and safely activates the
+other while recovering the acknowledged workload. Consequently, automatic
+promotion, Active failover/failback, and end-to-end RPO-0 are not implemented
+claims.
+
+The localhost process lab runs a real Witness child and exchanges authenticated,
+bounded frames. It includes focused kill/restart, conflict, replay, concurrency,
+pause/resume, and bounded clean-exit behavior. These are Witness-path analogues,
+not Active/Standby scenarios. A separately closed test EffectGate proves those
+test paths do not themselves grant authority; it does not prove an integrated
+promotion lifecycle.
 
 The agent and witness CLIs are intentionally safe-default inspection and refusal
 shells. They report status and health, inspect selected artifacts, and simulate
@@ -17,27 +28,40 @@ externally effective writer, provide a production voting endpoint, or execute
 physical fencing. Their refusal behavior is part of the present safety boundary,
 not a missing-success test to bypass.
 
-The public repository and green workflows are useful reproducibility evidence,
-but neither is a certification, formal proof, independent audit, or
-production-readiness claim. The full 25-scenario campaign, coverage targets,
-and p50/p95/p99 failover and write-latency measurements have not yet been
-completed.
+The public repository and workflow artifacts are useful reproducibility
+evidence, but neither is a certification, formal proof, independent audit, or
+production-readiness claim. None of the 25 required scenarios has a global
+end-to-end PASS. p50/p95/p99 failover and write-latency measurements for an
+integrated flow do not exist.
+
+## Evidence classification and current measurements
+
+| Class | What currently exists | Limitation |
+|---|---|---|
+| Candidate tests | Focused safety-path tests, a bounded Witness clean-exit case, and deterministic malformed-wire campaigns are present | Exact current-tree count and results require a successful workflow for the exact commit |
+| Historical compact model | Extended Safety run #3 explored depth 12: 143,439 states, 836,424 transitions, 0 model invariant violations | Applies only to that exact model revision and assumptions |
+| Historical coverage | Workspace line coverage measured 69.28% | The 80% workspace target is unmet; 90% critical-path compliance is not established |
+| GitHub-hosted process | Client plus Witness child on localhost TCP | Shared host and no Node A/Node B activation or failover |
+| Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
+
+A source count, old workflow number, or green badge must not be substituted for
+the exact final commit's successful run and artifact. Coverage targets must be
+met by meaningful tests, not lowered or described as passing when they are not.
 
 ## Current promotion-integration blocker
 
-The durable vote is made before a quorum certificate can be assembled, so its
-`VoteRecord` binds a pre-certificate `proposal_digest`. The final signed
-promotion-envelope digest includes the certificate produced from those votes.
-Requiring the vote's proposal digest to equal that final digest creates a cycle:
-the final digest depends on vote signatures that would themselves have to sign
-that final digest.
+The earlier proposal/final-digest cycle is resolved in source. The wire crate
+computes a domain-separated digest of the canonical pre-certificate quorum
+binding. The Witness persists it before releasing a vote. Authority journal
+format v2 stores that proposal digest separately from the digest of the final
+signed envelope; promotion and activation recovery compare the appropriate
+values. Format v1 is rejected fail-closed and has no automatic migration.
 
-The Witness runtime currently avoids pretending this cycle is solved by using a
-distinct proposal-binding digest. Full promotion persistence and activation stay
-disabled. The protocol and durable schema must first distinguish, bind, and
-persist both the pre-certificate proposal digest and the final certified
-envelope digest, then verify the relationship during replay and crash recovery.
-Until that work is integrated, the safe-default agent refuses `run` activation.
+This does not create an activation path. Trusted time, real fencing, lease
+activation, and an enforced EffectGate are not connected through identical
+Node A/B services and the Witness. The safe-default agent can inspect both
+digests but still refuses `run` with
+`ACTIVATION_CONTROL_PLANE_UNAVAILABLE`.
 
 ## Gate 0 limitations
 
@@ -163,8 +187,9 @@ Do not describe the current or GitHub-only build as:
 
 ## Path to reducing these limitations
 
-1. Resolve the proposal/final-digest distinction and complete a restart-safe,
-   signed durable-authority transaction without weakening the CLI refusals.
+1. Integrate the separated proposal/final-digest durable material with trusted
+   time, fencing, lease activation, and the EffectGate without weakening the
+   CLI refusals.
 2. Integrate identical Node A/B agents, the Witness, RPO-0 commit evidence, and
    the EffectGate into one automatic-promotion lab path.
 3. Complete all three-process scenarios in `FAILURE_MATRIX.md` with replayable

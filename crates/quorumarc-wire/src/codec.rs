@@ -136,6 +136,15 @@ pub(crate) fn encode_vote_statement(
     writer.finish(MAX_ENVELOPE_SIZE)
 }
 
+pub(crate) fn encode_quorum_binding_statement(
+    binding: &QuorumBinding,
+) -> Result<Vec<u8>, EnvelopeError> {
+    binding.validate()?;
+    let mut writer = Writer::new();
+    encode_binding(&mut writer, binding)?;
+    writer.finish(MAX_ENVELOPE_SIZE)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_fence_statement(
     binding: &QuorumBinding,

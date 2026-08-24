@@ -4,11 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_core::{
     AuthorityState, CommitIndex, EffectGate, Epoch, FenceMechanism, FenceReceipt,
-    GateRecoveryState, GateState, HealthAttestation, Incarnation, LeaseGrant, NodeId, PolicyHash,
-    PromotionProof, QuorumCertificate, SafetyPolicy, SelfFenceReason, StateEvidence, StateRoot,
-    TrustedClock, ValidatedPromotion, WorkloadId, validate_promotion,
+    GateError, GateRecoveryState, GateState, HealthAttestation, Incarnation, LeaseGrant, NodeId,
+    PolicyHash, PromotionProof, QuorumCertificate, SafetyPolicy, SelfFenceReason, StateEvidence,
+    StateRoot, TrustedClock, ValidatedPromotion, WorkloadId, validate_promotion,
 };
-use quorumarc_runtime::{EffectEmitError, EffectOutcome, EffectReasonCode, TestEffectActor};
+use quorumarc_runtime::{
+    EffectEmitError, EffectOutcome, EffectReasonCode, MAX_TEST_EFFECT_SIZE, TestEffectActor,
+};
 
 const NOW: u64 = 20_000;
 
@@ -209,4 +211,251 @@ fn exact_retry_after_lease_expiry_is_refused_and_self_fenced() {
         ))
     );
     assert_eq!(actor.records().len(), 1);
+}
+
+#[test]
+fn operation_and_payload_limits_are_checked_before_any_effect() {
+    let (mut closed, _) = actor();
+    assert_eq!(
+        closed.emit([0; 16], node("node-a"), Epoch(1), b"ignored"),
+        Err(EffectEmitError::ZeroOperationId)
+    );
+    let oversized = vec![7; MAX_TEST_EFFECT_SIZE + 1];
+    assert_eq!(
+        closed.emit([7; 16], node("node-a"), Epoch(1), &oversized),
+        Err(EffectEmitError::PayloadTooLarge {
+            actual: MAX_TEST_EFFECT_SIZE + 1,
+            maximum: MAX_TEST_EFFECT_SIZE,
+        })
+    );
+    assert_eq!(closed.records().len(), 0);
+
+    let (mut live, _) = actor();
+    activate(&mut live);
+    let maximum = vec![9; MAX_TEST_EFFECT_SIZE];
+    assert_eq!(
+        live.emit([8; 16], node("node-a"), Epoch(1), &maximum),
+        Ok(EffectOutcome::Recorded)
+    );
+    let Some(record) = live.records().next() else {
+        std::process::abort();
+    };
+    assert_eq!(record.operation_id(), &[8; 16]);
+    assert_eq!(record.holder(), &node("node-a"));
+    assert_eq!(record.epoch(), Epoch(1));
+    assert_eq!(record.payload(), maximum.as_slice());
+}
+
+#[test]
+fn new_effect_requires_exact_live_holder_and_epoch() {
+    let (mut actor, _) = actor();
+    activate(&mut actor);
+
+    assert_eq!(
+        actor.emit([9; 16], node("node-b"), Epoch(1), b"wrong holder"),
+        Err(EffectEmitError::Gate(GateError::WrongCandidate))
+    );
+    assert_eq!(
+        actor.emit([10; 16], node("node-a"), Epoch(0), b"stale epoch"),
+        Err(EffectEmitError::Gate(GateError::StaleAuthorization))
+    );
+    assert_eq!(actor.records().len(), 0);
+    assert_eq!(
+        actor.emit([11; 16], node("node-a"), Epoch(1), b"bound"),
+        Ok(EffectOutcome::Recorded)
+    );
+}
+
+#[test]
+fn rollback_before_a_new_effect_self_fences_without_recording() {
+    let (mut actor, clock) = actor();
+    activate(&mut actor);
+    clock.set(NOW - 1);
+
+    assert_eq!(
+        actor.emit([12; 16], node("node-a"), Epoch(1), b"must not escape"),
+        Err(EffectEmitError::Gate(GateError::ClockRollback))
+    );
+    assert_eq!(actor.records().len(), 0);
+    assert_eq!(
+        actor.gate_state(),
+        &GateState::SelfFenced {
+            last_epoch: Epoch(1),
+            reason: SelfFenceReason::SafetyFault,
+        }
+    );
+}
+
+#[test]
+fn actor_preserves_durable_transition_order_and_exact_record() {
+    let (mut later_actor, later_clock) = actor();
+    later_clock.set(NOW + 1);
+    let later_record = value_or_abort(later_actor.stage(authorization()));
+
+    let (mut actor, _) = actor();
+    assert_eq!(actor.activate(), Err(GateError::NotPrepared));
+    assert_eq!(
+        actor.confirm_persisted(&later_record),
+        Err(GateError::NotStaged)
+    );
+    let exact_record = value_or_abort(actor.stage(authorization()));
+    assert_eq!(
+        actor.confirm_persisted(&later_record),
+        Err(GateError::PersistenceMismatch)
+    );
+    assert!(matches!(actor.gate_state(), GateState::Staged { .. }));
+    assert!(actor.confirm_persisted(&exact_record).is_ok());
+    assert!(actor.activate().is_ok());
+    assert_eq!(actor.tick(), Ok(false));
+    actor.close();
+    assert_eq!(
+        actor.emit([13; 16], node("node-a"), Epoch(1), b"closed"),
+        Err(EffectEmitError::Gate(GateError::GateClosed))
+    );
+    assert_eq!(actor.records().len(), 0);
+}
+
+#[test]
+fn every_operation_identity_binding_conflict_self_fences() {
+    let conflicts = [
+        (node("node-b"), Epoch(1), &b"same"[..]),
+        (node("node-a"), Epoch(2), &b"same"[..]),
+        (node("node-a"), Epoch(1), &b"different"[..]),
+    ];
+
+    for (holder, epoch, payload) in conflicts {
+        let (mut actor, _) = actor();
+        activate(&mut actor);
+        assert_eq!(
+            actor.emit([14; 16], node("node-a"), Epoch(1), b"same"),
+            Ok(EffectOutcome::Recorded)
+        );
+        assert_eq!(
+            actor.emit([14; 16], holder, epoch, payload),
+            Err(EffectEmitError::OperationIdConflict)
+        );
+        assert!(matches!(
+            actor.gate_state(),
+            GateState::SelfFenced {
+                reason: SelfFenceReason::SafetyFault,
+                ..
+            }
+        ));
+        assert_eq!(actor.records().len(), 1);
+    }
+}
+
+#[test]
+fn refusal_reason_codes_are_stable_for_all_gate_failures() {
+    let gate_cases = [
+        (
+            GateError::GateBindingMismatch,
+            EffectReasonCode::GateBindingMismatch,
+            "EFFECT_REFUSED_GATE_BINDING_MISMATCH",
+        ),
+        (
+            GateError::WrongCandidate,
+            EffectReasonCode::WrongHolder,
+            "EFFECT_REFUSED_WRONG_HOLDER",
+        ),
+        (
+            GateError::IncarnationMismatch,
+            EffectReasonCode::IncarnationMismatch,
+            "EFFECT_REFUSED_INCARNATION_MISMATCH",
+        ),
+        (
+            GateError::StaleAuthorization,
+            EffectReasonCode::StaleEpoch,
+            "EFFECT_REFUSED_STALE_EPOCH",
+        ),
+        (
+            GateError::AlreadyOpen,
+            EffectReasonCode::AlreadyOpen,
+            "EFFECT_REFUSED_ALREADY_OPEN",
+        ),
+        (
+            GateError::NotStaged,
+            EffectReasonCode::NotStaged,
+            "EFFECT_REFUSED_NOT_STAGED",
+        ),
+        (
+            GateError::PersistenceMismatch,
+            EffectReasonCode::PersistenceMismatch,
+            "EFFECT_REFUSED_PERSISTENCE_MISMATCH",
+        ),
+        (
+            GateError::NotPrepared,
+            EffectReasonCode::NotPrepared,
+            "EFFECT_REFUSED_NOT_PREPARED",
+        ),
+        (
+            GateError::LeaseNotStarted,
+            EffectReasonCode::LeaseNotStarted,
+            "EFFECT_REFUSED_LEASE_NOT_STARTED",
+        ),
+        (
+            GateError::LeaseExpired,
+            EffectReasonCode::LeaseExpired,
+            "EFFECT_REFUSED_LEASE_EXPIRED",
+        ),
+        (
+            GateError::GateClosed,
+            EffectReasonCode::GateClosed,
+            "EFFECT_REFUSED_GATE_CLOSED",
+        ),
+        (
+            GateError::ClockRollback,
+            EffectReasonCode::ClockRollback,
+            "EFFECT_REFUSED_CLOCK_ROLLBACK",
+        ),
+    ];
+
+    for (gate_error, expected, spelling) in gate_cases {
+        let reason = EffectEmitError::Gate(gate_error).reason_code();
+        assert_eq!(reason, expected);
+        assert_eq!(reason.as_str(), spelling);
+    }
+
+    let direct_cases = [
+        (
+            EffectEmitError::ZeroOperationId,
+            EffectReasonCode::ZeroOperationId,
+            "EFFECT_REFUSED_ZERO_OPERATION_ID",
+        ),
+        (
+            EffectEmitError::PayloadTooLarge {
+                actual: MAX_TEST_EFFECT_SIZE + 1,
+                maximum: MAX_TEST_EFFECT_SIZE,
+            },
+            EffectReasonCode::PayloadTooLarge,
+            "EFFECT_REFUSED_PAYLOAD_TOO_LARGE",
+        ),
+        (
+            EffectEmitError::OperationIdConflict,
+            EffectReasonCode::OperationIdConflict,
+            "EFFECT_REFUSED_OPERATION_ID_CONFLICT",
+        ),
+    ];
+    for (error, expected, spelling) in direct_cases {
+        let reason = error.reason_code();
+        assert_eq!(reason, expected);
+        assert_eq!(reason.as_str(), spelling);
+    }
+}
+
+#[test]
+fn actor_tick_self_fences_exactly_at_lease_expiry() {
+    let (mut actor, clock) = actor();
+    activate(&mut actor);
+    clock.set(NOW + 99);
+    assert_eq!(actor.tick(), Ok(false));
+    clock.set(NOW + 100);
+    assert_eq!(actor.tick(), Ok(true));
+    assert_eq!(
+        actor.gate_state(),
+        &GateState::SelfFenced {
+            last_epoch: Epoch(1),
+            reason: SelfFenceReason::LeaseExpired,
+        }
+    );
 }

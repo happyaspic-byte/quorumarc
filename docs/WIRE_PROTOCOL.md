@@ -17,10 +17,19 @@ This document uses the following labels literally:
 
 The canonical envelope and signature code is **IMPLEMENTED** in
 `quorumarc-wire`. Bounded stream framing and a single-process witness vote actor
-are **IMPLEMENTED** in `quorumarc-runtime`. A network listener, peer handshake,
-request/response message set, transport authentication, three-process agent
-protocol, and automatic promotion service are **NOT-IMPLEMENTED**. Network and
-hardware failure claims remain **PHYSICAL-REQUIRED** where identified in
+are **IMPLEMENTED** in `quorumarc-runtime`. `quorumarc-lab` also implements a
+narrow, fixed-schema candidate-to-witness vote exchange over bounded loopback
+TCP: the candidate signs each request, the witness resolves the admitted
+candidate key, records an accepted vote durably before replying, and echoes a
+request ID in a strict response. Its deterministic identities and keys are
+test fixtures.
+
+That loopback exchange is not the deployment control plane. General network
+listeners, mutual transport authentication, encryption, a peer handshake,
+Node A/B replication traffic, retry/backoff policy, membership discovery, full
+promotion-proof assembly, and automatic promotion remain
+**NOT-IMPLEMENTED**. Network and hardware failure claims remain
+**PHYSICAL-REQUIRED** where identified in
 [the failure matrix](FAILURE_MATRIX.md).
 
 ## Canonical scalar encoding
@@ -128,16 +137,20 @@ Ed25519 signing:
 
 | Object | Domain | Statement |
 |---|---|---|
+| Proposal digest | `quorumarc/quorum-binding-proposal/sha256/v1\0` | Canonical quorum binding only; independent of voter, key ID, signature, and certificate ordering |
 | Vote | `quorumarc/quorum-vote/ed25519/v1\0` | Canonical quorum binding, voter ID, key ID |
 | Fence | `quorumarc/fence-receipt/ed25519/v1\0` | Binding, target, verifier/key IDs, mechanism, observation, evidence digest |
 | Outer envelope | `quorumarc/promotion-envelope/ed25519/v1\0` | `u32` envelope length, canonical envelope, signer ID, key ID |
+| Lab vote request | `quorumarc/lab-vote-request/ed25519/v1\0` | Request ID, canonical quorum binding, candidate key ID |
 
 The durable/audit envelope digest is SHA-256 over
 `quorumarc/promotion-envelope/sha256/v1\0` followed by the complete canonical
-signed frame. The witness actor uses a separate
-`quorumarc/witness-binding/sha256/v1\0` domain for its durable vote record.
-Changing an identifier, key ID, state root, lease bound, message ID, or other
-bound field changes the signed statement.
+signed frame. The Witness durably records the proposal digest above before
+releasing a vote. Authority journal format v2 later records both the proposal
+digest and the final signed-envelope digest. Changing a field in the quorum
+binding changes the proposal digest and every vote statement; changing a voter,
+key ID, signature, or certificate ordering leaves the proposal digest unchanged
+but changes the final signed-envelope digest.
 
 ## Stream frame
 
@@ -151,7 +164,54 @@ This frame does not identify message type and authenticates nothing. Callers
 must set a maximum appropriate to the expected payload (65,536 bytes is enough
 for a signed promotion envelope), apply timeouts and connection limits, decode
 the payload, verify signatures, authorize identities, and durably reject
-replays. Those connection and service controls are **NOT-IMPLEMENTED**.
+replays.
+
+The loopback lab service supplies only a narrow subset of those controls: a
+4,096-byte frame maximum, non-zero read/write timeouts, an optional bounded
+connection count, one request and one response per connection, loopback-only
+addresses, strict request/response decoding, candidate-request signature
+verification, and durable witness vote handling. It does not make the generic
+frame self-authenticating or provide a production transport.
+
+## Loopback witness vote exchange
+
+`quorumarc-lab` runs a witness and candidate as separate processes connected by
+a real TCP socket, but deliberately refuses non-loopback addresses. This path
+uses deterministic public test fixtures and proves process/framing/durability
+behavior on one host; it does not prove independent failure domains.
+
+`VoteRequest` has a fixed schema containing:
+
+1. magic `QARCVRQ\0`;
+2. protocol version (`u16`, exactly `1`);
+3. a non-zero 16-byte request ID;
+4. the complete canonical quorum binding;
+5. candidate key ID; and
+6. a 64-byte Ed25519 candidate signature over the lab-request domain.
+
+The witness resolves the key by candidate identity plus key ID before invoking
+the durable vote actor. Unknown/retired keys or an invalid signature receive an
+explicit authentication refusal and cannot change durable state. Malformed,
+oversized, truncated, or disconnected requests are closed without invoking the
+actor. Valid requests still pass the actor's workload, policy, candidate,
+lease, epoch, double-vote, and durable-store checks; connectivity alone never
+grants authority.
+
+`VoteResponse` has magic `QARCVRS\0`, version, the echoed request ID, a stable
+decision code, and optional durable generation plus `VoteProof`. A grant must
+contain both optional values; a refusal must contain neither. `VoteProof`
+exposes the witness voter ID, key ID, and raw Ed25519 vote signature produced by
+the actor. The response wrapper itself is not signed, and the candidate client
+currently checks only strict response shape and request-ID correlation. The
+transport deliberately does not reconstruct a received `SignedVote`, verify a
+complete certificate, assemble a final promotion envelope, or open an
+EffectGate. A successful response is witness evidence only, never full
+authority.
+
+The current loopback client performs one bounded attempt. Automatic retry,
+backoff, reconnect-state validation, multiplexing, TLS/mTLS, response-wrapper
+authentication, remote admission, and production key provisioning are
+**NOT-IMPLEMENTED**.
 
 ## Interoperability rule
 
@@ -160,5 +220,6 @@ implementation is interoperable only if it produces byte-for-byte identical
 objects and refuses the same non-canonical forms. Any schema extension requires
 a new explicitly supported protocol version; appending fields to version 1 is
 invalid. No rolling mixed-version protocol or compatibility negotiation is
-implemented.
-
+implemented. The `quorumarc-lab` request/response codec is a deterministic
+test protocol, not a commitment to expose that loopback schema as the future
+production peer protocol.

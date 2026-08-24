@@ -208,7 +208,6 @@ dependencies = [
  "quorumarc-core",
  "quorumarc-store",
  "quorumarc-wire",
- "sha2",
 ]
 
 [[package]]

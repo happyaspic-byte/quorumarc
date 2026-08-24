@@ -54,6 +54,13 @@ struct WitnessChild {
 
 impl WitnessChild {
     fn spawn(directory: &TestDirectory) -> io::Result<Self> {
+        Self::spawn_with_connection_limit(directory, None)
+    }
+
+    fn spawn_with_connection_limit(
+        directory: &TestDirectory,
+        max_connections: Option<u64>,
+    ) -> io::Result<Self> {
         let ready_file = directory.path().join("witness.ready");
         match fs::remove_file(&ready_file) {
             Ok(()) => {}
@@ -61,29 +68,35 @@ impl WitnessChild {
             Err(error) => return Err(error),
         }
         let store = directory.path().join("store");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-lab"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_quorumarc-lab"));
+        command
             .arg("witness")
             .arg("--store")
             .arg(store)
             .arg("--ready-file")
             .arg(&ready_file)
             .arg("--listen")
-            .arg("127.0.0.1:0")
+            .arg("127.0.0.1:0");
+        if let Some(limit) = max_connections {
+            command.arg("--max-connections").arg(limit.to_string());
+        }
+        let mut child = command
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()?;
 
+        let mut saw_invalid_ready_file = false;
         for _ in 0..250 {
             match fs::read_to_string(&ready_file) {
-                Ok(text) => {
-                    let address = SocketAddr::from_str(text.trim()).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid witness ready address")
-                    })?;
-                    return Ok(Self {
-                        child: Some(child),
-                        address,
-                    });
-                }
+                Ok(text) => match SocketAddr::from_str(text.trim()) {
+                    Ok(address) => {
+                        return Ok(Self {
+                            child: Some(child),
+                            address,
+                        });
+                    }
+                    Err(_) => saw_invalid_ready_file = true,
+                },
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
@@ -94,10 +107,12 @@ impl WitnessChild {
         }
         let _kill_result = child.kill();
         let _wait_result = child.wait();
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "witness readiness timed out",
-        ))
+        let message = if saw_invalid_ready_file {
+            "witness readiness timed out after an invalid publication"
+        } else {
+            "witness readiness timed out"
+        };
+        Err(io::Error::new(io::ErrorKind::TimedOut, message))
     }
 
     const fn address(&self) -> SocketAddr {
@@ -114,6 +129,14 @@ impl WitnessChild {
             let _status = child.wait()?;
         }
         Ok(())
+    }
+
+    fn wait_for_exit(&mut self) -> io::Result<std::process::ExitStatus> {
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("witness process is not running"))?;
+        child.wait()
     }
 }
 
@@ -187,6 +210,23 @@ fn durable_vote_retry_and_conflict_survive_witness_sigkill_restart() {
 }
 
 #[test]
+fn bounded_witness_exits_cleanly_after_one_authenticated_request() {
+    let directory = value_or_abort(TestDirectory::new("bounded-exit"));
+    let mut witness = value_or_abort(WitnessChild::spawn_with_connection_limit(
+        &directory,
+        Some(1),
+    ));
+    let request = signed_request("node-a", 23, 4, 4);
+
+    let response = value_or_abort(request_vote(witness.address(), &request, IO_TIMEOUT));
+    assert_eq!(response.code(), DecisionCode::GrantedDurablyRecorded);
+    assert_eq!(response.durable_generation(), Some(1));
+    assert!(response.vote().is_some());
+    let status = value_or_abort(witness.wait_for_exit());
+    assert!(status.success());
+}
+
+#[test]
 fn malformed_oversized_disconnected_and_unauthenticated_peers_never_advance_vote() {
     let directory = value_or_abort(TestDirectory::new("bad-input"));
     let witness = value_or_abort(WitnessChild::spawn(&directory));
@@ -194,7 +234,7 @@ fn malformed_oversized_disconnected_and_unauthenticated_peers_never_advance_vote
     send_oversized_header(witness.address());
     send_framed_and_require_close(witness.address(), b"not-a-vote-request");
     let disconnected = value_or_abort(TcpStream::connect_timeout(&witness.address(), IO_TIMEOUT));
-    value_or_abort(disconnected.shutdown(Shutdown::Both));
+    shutdown_allowing_peer_close(&disconnected, Shutdown::Both);
 
     let request = signed_request("node-a", 7, 3, 1);
     let mut tampered = value_or_abort(request.to_canonical_bytes());
@@ -261,7 +301,7 @@ fn send_oversized_header(address: SocketAddr) {
     value_or_abort(stream.set_read_timeout(Some(IO_TIMEOUT)));
     let declared = value_or_abort(u32::try_from(MAX_LAB_FRAME_SIZE + 1));
     value_or_abort(stream.write_all(&declared.to_be_bytes()));
-    value_or_abort(stream.shutdown(Shutdown::Write));
+    shutdown_allowing_peer_close(&stream, Shutdown::Write);
     require_closed_without_payload(&mut stream);
 }
 
@@ -270,26 +310,49 @@ fn send_framed_and_require_close(address: SocketAddr, payload: &[u8]) {
     value_or_abort(stream.set_read_timeout(Some(IO_TIMEOUT)));
     let codec = value_or_abort(FrameCodec::new(MAX_LAB_FRAME_SIZE));
     value_or_abort(codec.write_frame(&mut stream, payload));
-    value_or_abort(stream.shutdown(Shutdown::Write));
+    shutdown_allowing_peer_close(&stream, Shutdown::Write);
     require_closed_without_payload(&mut stream);
+}
+
+fn shutdown_allowing_peer_close(stream: &TcpStream, direction: Shutdown) {
+    loop {
+        match stream.shutdown(direction) {
+            Ok(()) => return,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if is_peer_closed(error.kind()) => return,
+            Err(error) => {
+                eprintln!("failed to shut down malformed peer connection: {error:?}");
+                std::process::abort();
+            }
+        }
+    }
+}
+
+const fn is_peer_closed(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+    )
 }
 
 fn require_closed_without_payload(stream: &mut TcpStream) {
     let mut byte = [0_u8; 1];
-    match stream.read(&mut byte) {
-        Ok(0) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
-            ) => {}
-        Ok(read) => {
-            eprintln!("malformed peer unexpectedly returned {read} payload byte(s)");
-            std::process::abort();
-        }
-        Err(error) => {
-            eprintln!("malformed peer did not close cleanly: {error:?}");
-            std::process::abort();
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => return,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if is_peer_closed(error.kind()) => return,
+            Ok(read) => {
+                eprintln!("malformed peer unexpectedly returned {read} payload byte(s)");
+                std::process::abort();
+            }
+            Err(error) => {
+                eprintln!("malformed peer did not close cleanly: {error:?}");
+                std::process::abort();
+            }
         }
     }
 }

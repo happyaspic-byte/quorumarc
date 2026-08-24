@@ -235,7 +235,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
                 epoch: promotion.epoch(),
             });
         }
-        if vote.proposal_digest() != promotion.digest() {
+        if vote.proposal_digest() != promotion.proposal_digest() {
             return Err(StoreError::VoteDigestMismatch {
                 epoch: promotion.epoch(),
             });
@@ -295,7 +295,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
             || receipt.epoch() != promotion.epoch()
             || receipt.holder() != vote.candidate()
             || receipt.incarnation() != self.state.incarnation
-            || receipt.promotion_digest() != promotion.digest()
+            || receipt.promotion_digest() != promotion.signed_envelope_digest()
             || receipt.activated_at_ms() < promotion.lease().not_before_ms()
             || receipt.expires_at_ms() != promotion.lease().expires_at_ms()
         {

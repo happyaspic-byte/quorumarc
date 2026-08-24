@@ -3,9 +3,9 @@
 //! This binary can inspect durable authority state and signed promotion
 //! envelopes, but inspection never grants authority. The current laboratory
 //! agent intentionally has no adapter capable of opening external effects.
-//! The durable store currently binds the pre-certificate proposal digest, not
-//! the final signed-envelope digest, so `run` remains fail-closed even after a
-//! successful consistency inspection.
+//! `run` remains fail-closed after successful consistency inspection because
+//! trusted time, fencing, lease activation, and an enforced EffectGate control
+//! plane are not implemented by this laboratory binary.
 
 #![forbid(unsafe_code)]
 
@@ -545,7 +545,7 @@ fn health(config_path: Option<&Path>) -> CliReport {
                 ("status", "safe-degraded".to_owned()),
                 (
                     "reason_code",
-                    "AUTHORITY_PREREQUISITES_UNAVAILABLE".to_owned(),
+                    "ACTIVATION_CONTROL_PLANE_UNAVAILABLE".to_owned(),
                 ),
                 ("node_id", config.node_id.as_str().to_owned()),
                 ("epoch", summary.epoch.to_string()),
@@ -608,9 +608,9 @@ fn run(options: RunOptions) -> CliReport {
     };
     CliReport::refusal(
         "run",
-        "RUNTIME_AUTHORITY_PATH_UNAVAILABLE",
+        "ACTIVATION_CONTROL_PLANE_UNAVAILABLE",
         format!(
-            "material inspection passed for epoch {} incarnation {} commit {}; automatic promotion is {promotion_mode}, but the final proof digest, local policy, trusted time, and enforced EffectGate are not durably integrated",
+            "material inspection passed for epoch {} incarnation {} commit {}, including proposal and final envelope digests; automatic promotion is {promotion_mode}, but trusted time, fencing, lease activation, and an enforced EffectGate control plane are unavailable",
             summary.epoch, summary.incarnation, summary.commit_index
         ),
         EXIT_CONFIG,
@@ -880,33 +880,58 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
             EXIT_DATA,
         ));
     }
+    let proposal_digest = envelope
+        .quorum_certificate
+        .binding
+        .proposal_digest()
+        .map_err(|error| {
+            Failure::new(
+                "PROPOSAL_DIGEST_FAILED",
+                error.to_string(),
+                EXIT_DATA,
+            )
+        })?;
     let final_digest = signed
         .digest()
         .map_err(|error| Failure::new("PROOF_DIGEST_FAILED", error.to_string(), EXIT_DATA))?;
-    Err(unsupported_digest_binding(
+    verify_material_digests(
         vote.proposal_digest(),
-        promotion.digest(),
+        promotion.proposal_digest(),
+        promotion.signed_envelope_digest(),
+        &proposal_digest,
         &final_digest,
-    ))
+    )?;
+    Ok(MaterialSummary {
+        epoch: envelope.epoch,
+        incarnation: envelope.candidate_incarnation,
+        commit_index: envelope.durable_commit,
+    })
 }
 
-fn unsupported_digest_binding(
-    proposal_digest: &[u8; 32],
-    promotion_digest: &[u8; 32],
-    final_digest: &[u8; 32],
-) -> Failure {
-    let relation = if proposal_digest == final_digest && promotion_digest == final_digest {
-        "legacy-schema-collapses-proposal-and-final-digest"
-    } else {
-        "durable-proposal-digest-differs-from-final-envelope-digest"
-    };
-    Failure::new(
-        "PROPOSAL_FINAL_DIGEST_BINDING_UNIMPLEMENTED",
-        format!(
-            "{relation}; activation requires separately persisted proposal-binding and final certified-envelope digests"
-        ),
-        EXIT_CONFIG,
-    )
+fn verify_material_digests(
+    durable_vote_proposal: &[u8; 32],
+    durable_promotion_proposal: &[u8; 32],
+    durable_signed_envelope: &[u8; 32],
+    computed_proposal: &[u8; 32],
+    computed_signed_envelope: &[u8; 32],
+) -> Result<(), Failure> {
+    if durable_vote_proposal != computed_proposal
+        || durable_promotion_proposal != computed_proposal
+    {
+        return Err(Failure::new(
+            "PROPOSAL_BINDING_DIGEST_MISMATCH",
+            "durable vote or promotion proposal digest does not match the canonical quorum binding",
+            EXIT_DATA,
+        ));
+    }
+    if durable_signed_envelope != computed_signed_envelope {
+        return Err(Failure::new(
+            "FINAL_ENVELOPE_DIGEST_MISMATCH",
+            "durable signed-envelope digest does not match the inspected proof",
+            EXIT_DATA,
+        ));
+    }
+    Ok(())
 }
 
 fn recover_store_snapshot(path: &Path) -> Result<RecoveredAuthority, Failure> {
@@ -1472,29 +1497,47 @@ mod tests {
     }
 
     #[test]
-    fn proposal_and_final_digest_schema_never_authorizes_activation() {
-        let collapsed = unsupported_digest_binding(&[7; 32], &[7; 32], &[7; 32]);
-        assert_eq!(
-            collapsed.reason,
-            "PROPOSAL_FINAL_DIGEST_BINDING_UNIMPLEMENTED"
-        );
-        assert!(
-            collapsed
-                .detail
-                .contains("legacy-schema-collapses-proposal-and-final-digest")
-        );
+    fn proposal_and_final_digest_bindings_are_checked_independently() {
+        assert!(verify_material_digests(
+            &[5; 32],
+            &[5; 32],
+            &[9; 32],
+            &[5; 32],
+            &[9; 32],
+        )
+        .is_ok());
 
-        let distinct = unsupported_digest_binding(&[5; 32], &[5; 32], &[9; 32]);
-        assert_eq!(
-            distinct.reason,
-            "PROPOSAL_FINAL_DIGEST_BINDING_UNIMPLEMENTED"
+        let proposal_mismatch = verify_material_digests(
+            &[5; 32],
+            &[7; 32],
+            &[9; 32],
+            &[5; 32],
+            &[9; 32],
         );
-        assert!(
-            distinct
-                .detail
-                .contains("durable-proposal-digest-differs-from-final-envelope-digest")
+        assert!(matches!(
+            proposal_mismatch,
+            Err(Failure {
+                reason: "PROPOSAL_BINDING_DIGEST_MISMATCH",
+                exit_code: EXIT_DATA,
+                ..
+            })
+        ));
+
+        let final_mismatch = verify_material_digests(
+            &[5; 32],
+            &[5; 32],
+            &[7; 32],
+            &[5; 32],
+            &[9; 32],
         );
-        assert_eq!(distinct.exit_code, EXIT_CONFIG);
+        assert!(matches!(
+            final_mismatch,
+            Err(Failure {
+                reason: "FINAL_ENVELOPE_DIGEST_MISMATCH",
+                exit_code: EXIT_DATA,
+                ..
+            })
+        ));
     }
 
     #[test]

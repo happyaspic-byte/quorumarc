@@ -183,6 +183,34 @@ mod tests {
     }
 
     #[test]
+    fn proposal_digest_is_deterministic_and_independent_of_voter_and_key() {
+        let proposal = binding();
+        let first = result_or_abort(proposal.proposal_digest());
+        let second = result_or_abort(proposal.proposal_digest());
+        assert_eq!(first, second);
+
+        let candidate_vote = result_or_abort(SignedVote::sign(
+            &proposal,
+            id("node-a"),
+            id("candidate-key"),
+            &SigningKey::from_bytes(&CANDIDATE_SEED),
+        ));
+        let witness_vote = result_or_abort(SignedVote::sign(
+            &proposal,
+            id("witness"),
+            id("witness-key"),
+            &SigningKey::from_bytes(&WITNESS_SEED),
+        ));
+        assert_ne!(candidate_vote.voter_id(), witness_vote.voter_id());
+        assert_ne!(candidate_vote.key_id(), witness_vote.key_id());
+        assert_eq!(result_or_abort(proposal.proposal_digest()), first);
+
+        let mut changed = proposal;
+        changed.lease_expires_at_ms = changed.lease_expires_at_ms.saturating_add(1);
+        assert_ne!(result_or_abort(changed.proposal_digest()), first);
+    }
+
+    #[test]
     fn every_required_signature_verifies() {
         assert_eq!(signed_envelope().verify(&TestResolver::all()), Ok(()));
     }

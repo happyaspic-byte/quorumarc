@@ -22,16 +22,17 @@ One committed snapshot contains:
 - the highest accepted or voted epoch;
 - the durable process incarnation;
 - the last vote (epoch, candidate, proposal digest);
-- the last promotion (epoch, signed-envelope digest, lease, commit, state root);
+- the last promotion (epoch, proposal digest, final signed-envelope digest,
+  lease, commit, state root);
 - current durable workload commit and state root; and
 - the last activation receipt (epoch, holder, incarnation, promotion digest,
   activation time, expiry).
 
 Transitions reject stale incarnations and epochs, same-epoch double votes,
-promotions without a matching durable vote/digest, commit regression, a changed
-root at the same commit, and activation that does not exactly match the current
-vote, promotion, incarnation, digest, and lease. Exact retries are idempotent
-and return the existing durable generation.
+promotions without a matching durable vote/proposal digest, commit regression,
+a changed root at the same commit, and activation that does not exactly match
+the current vote, promotion, incarnation, final signed-envelope digest, and
+lease. Exact retries are idempotent and return the existing durable generation.
 
 This is bounded anti-replay state, not a history. Despite the filename
 `authority.journal`, the implementation replaces one complete snapshot; it
@@ -66,11 +67,17 @@ must not infer failure from the absence of an acknowledgement.
 
 ## Frame and recovery rules
 
-The internal store frame is version 1, little-endian, and limited to 1 MiB. It
+The internal store frame is version 2, little-endian, and limited to 1 MiB. It
 contains magic `QARCJNL1`, format version, zero reserved header field,
 generation, payload length, payload, IEEE CRC-32, and trailer `QARCEND1`.
 CRC-32 detects accidental damage; it is not authentication and does not resist
 malicious replacement.
+
+Format v2 adds separate proposal and final signed-envelope digests to promotion
+state. A v1 frame or any other unsupported version is rejected fail-closed;
+there is no automatic migration. Operators must not edit a v1 frame or change
+its version field. A future migration tool needs a separately reviewed,
+closed-gate procedure and coherent proof/workload evidence.
 
 Open reads only `authority.journal`, validates the whole frame and state
 invariants, then removes any staging file. Bad magic/version/reserved fields,
@@ -128,4 +135,3 @@ literal hardware claims, **PHYSICAL-REQUIRED** tests.
 
 Detailed operator procedures and their current limitations are in
 [operations](OPERATIONS.md).
-

@@ -21,7 +21,7 @@ jobs:
       - name: Lints
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Tests
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets -- --nocapture
       - name: Gate 0 deterministic model
         run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
   supply-chain:

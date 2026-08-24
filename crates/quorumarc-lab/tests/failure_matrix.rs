@@ -81,20 +81,21 @@ impl WitnessChild {
             .arg("--listen")
             .arg("127.0.0.1:0")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()?;
 
+        let mut saw_invalid_ready_file = false;
         for _ in 0..250 {
             match fs::read_to_string(&ready_file) {
-                Ok(text) => {
-                    let address = SocketAddr::from_str(text.trim()).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid witness ready address")
-                    })?;
-                    return Ok(Self {
-                        child: Some(child),
-                        address,
-                    });
-                }
+                Ok(text) => match SocketAddr::from_str(text.trim()) {
+                    Ok(address) => {
+                        return Ok(Self {
+                            child: Some(child),
+                            address,
+                        });
+                    }
+                    Err(_) => saw_invalid_ready_file = true,
+                },
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
@@ -105,10 +106,12 @@ impl WitnessChild {
         }
         let _kill_result = child.kill();
         let _wait_result = child.wait();
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "witness readiness timed out",
-        ))
+        let message = if saw_invalid_ready_file {
+            "witness readiness timed out after an invalid publication"
+        } else {
+            "witness readiness timed out"
+        };
+        Err(io::Error::new(io::ErrorKind::TimedOut, message))
     }
 
     const fn address(&self) -> SocketAddr {
