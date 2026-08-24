@@ -1,0 +1,16 @@
+[package]
+name = "quorumarc-sim"
+description = "Deterministic Gate 0 fault-schedule explorer for QuorumArc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+quorumarc-core = { path = "../quorumarc-core" }
+
+[lints]
+workspace = true

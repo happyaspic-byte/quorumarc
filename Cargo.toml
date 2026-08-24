@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/quorumarc-agent",
+    "apps/quorumarc-witness",
+    "crates/quorumarc-core",
+    "crates/quorumarc-sim",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["QuorumArc Contributors"]
+license-file = "LICENSE"
+repository = "https://github.com/happyaspic-byte/quorumarc"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

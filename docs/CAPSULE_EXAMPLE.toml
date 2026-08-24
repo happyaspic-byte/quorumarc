@@ -1,0 +1,27 @@
+schema_version = "0.1-draft"
+workload_id = "orders-api"
+continuity_level = "L1"
+rpo = "restart-only"
+rto_target_ms = 5000
+automatic_promotion = false
+
+[policy]
+quorum = 2
+voters = ["node-a", "node-b", "witness-a"]
+candidates = ["node-a", "node-b"]
+required_witness = "witness-a"
+max_lease_ms = 1000
+lease_guard_ms = 250
+
+[[effects]]
+kind = "network-vip"
+identifier = "192.0.2.10/32"
+fence_adapter = "disabled-in-gate-0"
+
+[[state]]
+kind = "service-config"
+source = "/etc/orders-api"
+durability = "restart-only"
+
+[health]
+checks = ["process-ready", "dependency-ready", "state-root-verified"]
