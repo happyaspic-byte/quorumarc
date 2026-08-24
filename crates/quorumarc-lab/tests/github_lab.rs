@@ -126,11 +126,11 @@ impl Drop for WitnessChild {
     }
 }
 
-fn value_or_abort<T, E>(result: Result<T, E>) -> T {
-    let Ok(value) = result else {
-        std::process::abort();
-    };
-    value
+fn value_or_abort<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!("lab test prerequisite failed: {error:?}"),
+    }
 }
 
 fn signed_request(candidate: &str, epoch: u64, message_byte: u8, request_byte: u8) -> VoteRequest {
@@ -273,7 +273,8 @@ fn require_closed_without_payload(stream: &mut TcpStream) {
                 error.kind(),
                 io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
             ) => {}
-        Ok(_) | Err(_) => std::process::abort(),
+        Ok(read) => panic!("malformed peer unexpectedly returned {read} payload byte(s)"),
+        Err(error) => panic!("malformed peer did not close cleanly: {error:?}"),
     }
 }
 

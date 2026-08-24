@@ -14,8 +14,8 @@ use quorumarc_core::{
     TrustedClock, WorkloadId,
 };
 use quorumarc_lab::{
-    ClientError, DecisionCode, RequestId, TEST_KEY_ID, TEST_POLICY_HASH, TestPeerKeys, VoteRequest,
-    VoteResponse, lab_binding, request_vote,
+    ClientError, DecisionCode, RequestId, TEST_KEY_ID, TEST_POLICY_HASH, TestPeerKeys,
+    VoteRequest, VoteResponse, lab_binding, request_vote,
 };
 use quorumarc_runtime::{EffectEmitError, TestEffectActor};
 use quorumarc_wire::CanonicalId;
@@ -163,11 +163,11 @@ impl TrustedClock for FixedClock {
     }
 }
 
-fn value_or_abort<T, E>(result: Result<T, E>) -> T {
-    let Ok(value) = result else {
-        std::process::abort();
-    };
-    value
+fn value_or_abort<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!("failure-matrix prerequisite failed: {error:?}"),
+    }
 }
 
 fn signed_request(candidate: &str, epoch: u64, trace_seed: u8) -> VoteRequest {
@@ -323,7 +323,11 @@ fn trace_s109_simultaneous_same_epoch_candidates_record_exactly_one_durable_gran
     ));
     let mut first_witness = value_or_abort(WitnessChild::spawn(&directory));
     let node_a = signed_request("node-a", 61, SIMULTANEOUS_CANDIDATE_SEED);
-    let node_b = signed_request("node-b", 61, SIMULTANEOUS_CANDIDATE_SEED.saturating_add(1));
+    let node_b = signed_request(
+        "node-b",
+        61,
+        SIMULTANEOUS_CANDIDATE_SEED.saturating_add(1),
+    );
 
     let responses = concurrent_vote_pair(first_witness.address(), node_a.clone(), node_b.clone());
     assert_eq!(
