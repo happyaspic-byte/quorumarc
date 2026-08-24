@@ -21,6 +21,7 @@ use quorumarc_wire::{
     MAX_SIGNED_ENVELOPE_SIZE,
 };
 
+const EXIT_NOT_READY: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 const EXIT_DATA: u8 = 65;
 const EXIT_MISSING: u8 = 66;
@@ -63,6 +64,14 @@ impl CliReport {
             stdout: vec![line],
             stderr: Vec::new(),
             exit_code: 0,
+        }
+    }
+
+    fn diagnostic(line: String, code: u8) -> Self {
+        Self {
+            stdout: vec![line],
+            stderr: Vec::new(),
+            exit_code: code,
         }
     }
 
@@ -348,7 +357,10 @@ fn parse_proof_options(options: &[OsString]) -> Result<ProofOptions, Failure> {
         })?;
         match option {
             "--proof" => set_path_once(&mut parsed.proof, value, option)?,
-            "--key" => parsed.keys.push(parse_key_spec(utf8_argument(value, option)?)?),
+            "--key" => {
+                let entry = parse_key_spec(utf8_argument(value, option)?)?;
+                push_unique_key(&mut parsed.keys, entry)?;
+            }
             _ => {
                 return Err(Failure::new(
                     "UNEXPECTED_ARGUMENT",
@@ -508,7 +520,7 @@ fn status(config_path: Option<&Path>) -> CliReport {
 fn health(config_path: Option<&Path>) -> CliReport {
     let Some(path) = config_path else {
         let fields = safe_state_fields("health", "safe-degraded", "CONFIG_MISSING_SAFE_DEFAULT");
-        return CliReport::output(json_record(&fields));
+        return CliReport::diagnostic(json_record(&fields), EXIT_NOT_READY);
     };
     let config = match load_config(path) {
         Ok(config) => config,
@@ -522,7 +534,7 @@ fn health(config_path: Option<&Path>) -> CliReport {
                 ("authority", "denied".to_owned()),
                 ("detail", failure.detail),
             ];
-            return CliReport::output(json_record(&fields));
+            return CliReport::diagnostic(json_record(&fields), EXIT_NOT_READY);
         }
     };
     match inspect_material_consistency(&config) {
@@ -541,7 +553,7 @@ fn health(config_path: Option<&Path>) -> CliReport {
                 ("effect_gate", "closed".to_owned()),
                 ("authority", "denied".to_owned()),
             ];
-            CliReport::output(json_record(&fields))
+            CliReport::diagnostic(json_record(&fields), EXIT_NOT_READY)
         }
         Err(failure) => {
             let fields = [
@@ -554,7 +566,7 @@ fn health(config_path: Option<&Path>) -> CliReport {
                 ("authority", "denied".to_owned()),
                 ("detail", failure.detail),
             ];
-            CliReport::output(json_record(&fields))
+            CliReport::diagnostic(json_record(&fields), EXIT_NOT_READY)
         }
     }
 }
@@ -873,11 +885,37 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
             EXIT_DATA,
         ));
     }
-    Ok(MaterialSummary {
-        epoch: envelope.epoch,
-        incarnation: envelope.candidate_incarnation,
-        commit_index: envelope.durable_commit,
-    })
+    let final_digest = signed.digest().map_err(|error| {
+        Failure::new(
+            "PROOF_DIGEST_FAILED",
+            error.to_string(),
+            EXIT_DATA,
+        )
+    })?;
+    Err(unsupported_digest_binding(
+        vote.proposal_digest(),
+        promotion.digest(),
+        &final_digest,
+    ))
+}
+
+fn unsupported_digest_binding(
+    proposal_digest: &[u8; 32],
+    promotion_digest: &[u8; 32],
+    final_digest: &[u8; 32],
+) -> Failure {
+    let relation = if proposal_digest == final_digest && promotion_digest == final_digest {
+        "legacy-schema-collapses-proposal-and-final-digest"
+    } else {
+        "durable-proposal-digest-differs-from-final-envelope-digest"
+    };
+    Failure::new(
+        "PROPOSAL_FINAL_DIGEST_BINDING_UNIMPLEMENTED",
+        format!(
+            "{relation}; activation requires separately persisted proposal-binding and final certified-envelope digests"
+        ),
+        EXIT_CONFIG,
+    )
 }
 
 fn recover_store_snapshot(path: &Path) -> Result<RecoveredAuthority, Failure> {
@@ -1121,9 +1159,10 @@ fn parse_config_text(text: &str, base: &Path) -> Result<AgentConfig, Failure> {
             }
             "verification_key" => {
                 let value = parse_quoted(raw_value, line_number)?;
-                keys.push(parse_key_spec(&value).map_err(|failure| {
-                    config_error(line_number, failure.detail)
-                })?);
+                let entry = parse_key_spec(&value)
+                    .map_err(|failure| config_error(line_number, failure.detail))?;
+                push_unique_key(&mut keys, entry)
+                    .map_err(|failure| config_error(line_number, failure.detail))?;
             }
             _ => {
                 return Err(config_error(
@@ -1255,6 +1294,23 @@ fn parse_key_spec(value: &str) -> Result<KeyEntry, Failure> {
     })
 }
 
+fn push_unique_key(entries: &mut Vec<KeyEntry>, entry: KeyEntry) -> Result<(), Failure> {
+    if entries.iter().any(|existing| {
+        existing.principal == entry.principal && existing.key_id == entry.key_id
+    }) {
+        return Err(Failure::new(
+            "DUPLICATE_VERIFICATION_KEY",
+            format!(
+                "duplicate verification key identity {}:{}",
+                entry.principal, entry.key_id
+            ),
+            EXIT_CONFIG,
+        ));
+    }
+    entries.push(entry);
+    Ok(())
+}
+
 fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64 {
         return None;
@@ -1371,6 +1427,13 @@ mod tests {
         ))
     }
 
+    fn verification_key_spec(principal: &str, key_id: &str, seed: u8) -> String {
+        let key = quorumarc_wire::SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes();
+        format!("{principal}:{key_id}:{}", hex_encode(&key))
+    }
+
     #[test]
     fn no_arguments_reports_closed_safe_default() {
         let report = execute(Vec::<String>::new());
@@ -1390,7 +1453,7 @@ mod tests {
     #[test]
     fn health_is_never_ready_without_configuration() {
         let report = execute(["health"]);
-        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.exit_code(), EXIT_NOT_READY);
         assert!(report.stdout()[0].contains("\"ready\":\"false\""));
         assert!(report.stdout()[0].contains("\"effect_gate\":\"closed\""));
     }
@@ -1400,6 +1463,60 @@ mod tests {
         let report = execute(["activate"]);
         assert_eq!(report.exit_code(), EXIT_CONFIG);
         assert!(contains_reason(&report, "DIRECT_ACTIVATION_FORBIDDEN"));
+    }
+
+    #[test]
+    fn duplicate_trust_anchor_identity_is_rejected_independent_of_order() {
+        let first = verification_key_spec("node-a", "key-1", 11);
+        let second = verification_key_spec("node-a", "key-1", 17);
+        let options = vec![
+            OsString::from("--key"),
+            OsString::from(&first),
+            OsString::from("--key"),
+            OsString::from(&second),
+        ];
+        let cli_result = parse_proof_options(&options);
+        assert!(matches!(
+            cli_result,
+            Err(failure) if failure.reason == "DUPLICATE_VERIFICATION_KEY"
+        ));
+
+        let config = format!(
+            "node_id = \"node-a\"\nworkload_id = \"orders\"\nrole = \"data\"\nverification_key = \"{first}\"\nverification_key = \"{second}\"\n"
+        );
+        let config_result = parse_config_text(&config, Path::new("."));
+        assert!(matches!(
+            config_result,
+            Err(failure)
+                if failure.reason == "CONFIG_INVALID"
+                    && failure.detail.contains("duplicate verification key identity")
+        ));
+    }
+
+    #[test]
+    fn proposal_and_final_digest_schema_never_authorizes_activation() {
+        let collapsed = unsupported_digest_binding(&[7; 32], &[7; 32], &[7; 32]);
+        assert_eq!(
+            collapsed.reason,
+            "PROPOSAL_FINAL_DIGEST_BINDING_UNIMPLEMENTED"
+        );
+        assert!(
+            collapsed
+                .detail
+                .contains("legacy-schema-collapses-proposal-and-final-digest")
+        );
+
+        let distinct = unsupported_digest_binding(&[5; 32], &[5; 32], &[9; 32]);
+        assert_eq!(
+            distinct.reason,
+            "PROPOSAL_FINAL_DIGEST_BINDING_UNIMPLEMENTED"
+        );
+        assert!(
+            distinct
+                .detail
+                .contains("durable-proposal-digest-differs-from-final-envelope-digest")
+        );
+        assert_eq!(distinct.exit_code, EXIT_CONFIG);
     }
 
     #[test]

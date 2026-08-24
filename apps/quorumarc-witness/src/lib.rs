@@ -10,7 +10,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +23,7 @@ use quorumarc_wire::{MAX_SIGNED_ENVELOPE_SIZE, SignedPromotionEnvelope};
 const EXIT_NOT_READY: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 const EXIT_DATA: u8 = 65;
+const EXIT_MISSING: u8 = 66;
 const EXIT_SOFTWARE: u8 = 70;
 const EXIT_IO: u8 = 74;
 const EXIT_UNAVAILABLE: u8 = 78;
@@ -75,6 +76,21 @@ impl Cli {
     }
 }
 
+impl Command {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Run => "run",
+            Self::Health => "health",
+            Self::InspectProof => "inspect-proof",
+            Self::InspectStore => "inspect-store",
+            Self::SimulateFailure => "simulate-failure",
+            Self::Vote => "vote",
+            Self::Help => "help",
+        }
+    }
+}
+
 /// Parses command arguments without reading files or environment secrets.
 pub fn parse_args<I, S>(arguments: I) -> Result<Cli, CliError>
 where
@@ -105,6 +121,12 @@ where
         proof: None,
     };
     while let Some(option) = arguments.next() {
+        if !option_allowed(command, &option) {
+            return Err(CliError::OptionNotAllowed {
+                command: command.as_str(),
+                option,
+            });
+        }
         let target = match option.as_str() {
             "--config" => &mut cli.config,
             "--key" => &mut cli.key,
@@ -123,6 +145,17 @@ where
     Ok(cli)
 }
 
+fn option_allowed(command: Command, option: &str) -> bool {
+    match command {
+        Command::Status | Command::Run | Command::Health => {
+            matches!(option, "--config" | "--key" | "--store")
+        }
+        Command::InspectProof => option == "--proof",
+        Command::InspectStore => option == "--store",
+        Command::SimulateFailure | Command::Vote | Command::Help => false,
+    }
+}
+
 /// Executes one command and returns its portable process exit code.
 pub fn execute<I, S, O, E>(arguments: I, stdout: &mut O, stderr: &mut E) -> u8
 where
@@ -134,8 +167,8 @@ where
     let cli = match parse_args(arguments) {
         Ok(cli) => cli,
         Err(error) => {
-            let _write_result = writeln!(stderr, "reason=CLI_USAGE_ERROR detail={error}");
-            return EXIT_USAGE;
+            let result = writeln!(stderr, "reason=CLI_USAGE_ERROR detail={error}");
+            return write_error_exit(result, EXIT_USAGE);
         }
     };
     match cli.command {
@@ -146,11 +179,11 @@ where
         Command::InspectStore => inspect_store(&cli, stdout, stderr),
         Command::SimulateFailure => simulate_failure(stdout, stderr),
         Command::Vote => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "refused=true reason={REASON_DIRECT_VOTE_DISABLED} mode=lab"
             );
-            EXIT_UNAVAILABLE
+            write_error_exit(result, EXIT_UNAVAILABLE)
         }
         Command::Help => help(stdout, stderr),
     }
@@ -177,11 +210,11 @@ fn run<E: Write>(cli: &Cli, stderr: &mut E) -> u8 {
     } else {
         REASON_PROTOCOL_UNAVAILABLE
     };
-    let _write_result = writeln!(
+    let result = writeln!(
         stderr,
         "refused=true reason={reason} mode=lab voting=disabled"
     );
-    EXIT_UNAVAILABLE
+    write_error_exit(result, EXIT_UNAVAILABLE)
 }
 
 fn health<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
@@ -210,43 +243,57 @@ fn inspect_proof<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) 
             stdout,
             "proof=not-provided verified=false reason=PROOF_PATH_NOT_CONFIGURED"
         );
-        return write_exit(result, stderr);
+        return write_error_exit(result, EXIT_MISSING);
     };
     let bytes = match read_bounded(path, MAX_SIGNED_ENVELOPE_SIZE) {
         Ok(bytes) => bytes,
         Err(ReadBoundedError::TooLarge { actual, maximum }) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "proof=refused verified=false reason=PROOF_TOO_LARGE actual={actual} maximum={maximum}"
             );
-            return EXIT_DATA;
+            return write_error_exit(result, EXIT_DATA);
         }
         Err(ReadBoundedError::Io(error)) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "proof=refused verified=false reason=PROOF_READ_IO detail={error}"
             );
-            return EXIT_IO;
+            return write_error_exit(result, EXIT_IO);
+        }
+        Err(ReadBoundedError::Missing) => {
+            let result = writeln!(
+                stderr,
+                "proof=refused verified=false reason=PROOF_FILE_MISSING"
+            );
+            return write_error_exit(result, EXIT_MISSING);
+        }
+        Err(ReadBoundedError::InvalidType) => {
+            let result = writeln!(
+                stderr,
+                "proof=refused verified=false reason=PROOF_INVALID_FILE_TYPE"
+            );
+            return write_error_exit(result, EXIT_DATA);
         }
     };
     let signed = match SignedPromotionEnvelope::from_canonical_bytes(&bytes) {
         Ok(signed) => signed,
         Err(error) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "proof=refused verified=false reason=PROOF_MALFORMED detail={error}"
             );
-            return EXIT_DATA;
+            return write_error_exit(result, EXIT_DATA);
         }
     };
     let digest = match signed.digest() {
         Ok(digest) => digest,
         Err(error) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "proof=refused verified=false reason=PROOF_DIGEST_FAILED detail={error}"
             );
-            return EXIT_DATA;
+            return write_error_exit(result, EXIT_DATA);
         }
     };
     let envelope = signed.envelope();
@@ -268,14 +315,14 @@ fn inspect_store<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) 
             stdout,
             "store=not-configured authority=false reason=WITNESS_STORE_NOT_CONFIGURED"
         );
-        return write_exit(result, stderr);
+        return write_error_exit(result, EXIT_MISSING);
     };
     if !directory.is_dir() {
         let result = writeln!(
             stdout,
             "store=missing authority=false reason=WITNESS_STORE_DIRECTORY_MISSING"
         );
-        return write_exit(result, stderr);
+        return write_error_exit(result, EXIT_MISSING);
     }
     let paths = StorePaths::new(directory);
     if !paths.committed().is_file() {
@@ -308,11 +355,11 @@ fn simulate_failure<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
     let codec = match FrameCodec::new(64) {
         Ok(codec) => codec,
         Err(error) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "simulation=failed reason=FRAME_CODEC_CONFIG_ERROR detail={error}"
             );
-            return EXIT_SOFTWARE;
+            return write_error_exit(result, EXIT_SOFTWARE);
         }
     };
     let result = codec.read_frame(&mut Cursor::new([0_u8, 0_u8]));
@@ -326,19 +373,19 @@ fn simulate_failure<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
             write_exit(result, stderr)
         }
         Err(error) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "simulation=failed scenario=truncated-frame reason={} detail={error}",
                 error.reason_code().as_str()
             );
-            EXIT_SOFTWARE
+            write_error_exit(result, EXIT_SOFTWARE)
         }
         Ok(_) => {
-            let _write_result = writeln!(
+            let result = writeln!(
                 stderr,
                 "simulation=failed scenario=truncated-frame reason=FRAME_UNEXPECTEDLY_ADMITTED"
             );
-            EXIT_SOFTWARE
+            write_error_exit(result, EXIT_SOFTWARE)
         }
     }
 }
@@ -367,6 +414,14 @@ fn write_exit<E: Write>(result: io::Result<()>, stderr: &mut E) -> u8 {
     }
 }
 
+fn write_error_exit(result: io::Result<()>, semantic_code: u8) -> u8 {
+    if result.is_ok() {
+        semantic_code
+    } else {
+        EXIT_IO
+    }
+}
+
 fn output_error<E: Write>(error: io::Error, stderr: &mut E) -> u8 {
     let _write_result = writeln!(stderr, "reason=CLI_OUTPUT_IO_ERROR detail={error}");
     EXIT_IO
@@ -378,8 +433,8 @@ fn store_open_error<E: Write>(error: StoreError, stderr: &mut E) -> u8 {
         StoreError::Io { .. } => ("WITNESS_STORE_IO", EXIT_IO),
         _ => ("WITNESS_STORE_INVARIANT", EXIT_SOFTWARE),
     };
-    let _write_result = writeln!(stderr, "store=refused authority=false reason={reason}");
-    code
+    let result = writeln!(stderr, "store=refused authority=false reason={reason}");
+    write_error_exit(result, code)
 }
 
 fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u8 {
@@ -392,6 +447,16 @@ fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u
         InspectStoreError::Read(ReadBoundedError::Io(error)) => {
             ("WITNESS_STORE_IO", error.to_string(), EXIT_IO)
         }
+        InspectStoreError::Read(ReadBoundedError::Missing) => (
+            "WITNESS_STORE_COMMITTED_FRAME_MISSING",
+            "committed frame disappeared during inspection".to_owned(),
+            EXIT_MISSING,
+        ),
+        InspectStoreError::Read(ReadBoundedError::InvalidType) => (
+            "WITNESS_STORE_INVALID_FILE_TYPE",
+            "committed frame must be a regular file".to_owned(),
+            EXIT_DATA,
+        ),
         InspectStoreError::SnapshotIo { operation, error } => (
             "WITNESS_STORE_SNAPSHOT_IO",
             format!("{operation}: {error}"),
@@ -399,11 +464,11 @@ fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u
         ),
         InspectStoreError::Store(error) => return store_open_error(error, stderr),
     };
-    let _write_result = writeln!(
+    let result = writeln!(
         stderr,
         "store=refused authority=false reason={reason} detail={detail}"
     );
-    code
+    write_error_exit(result, code)
 }
 
 fn recover_store_snapshot(
@@ -470,7 +535,17 @@ enum InspectStoreError {
 }
 
 fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ReadBoundedError> {
-    let metadata = fs::metadata(path).map_err(ReadBoundedError::Io)?;
+    let file = fs::File::open(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ReadBoundedError::Missing
+        } else {
+            ReadBoundedError::Io(error)
+        }
+    })?;
+    let metadata = file.metadata().map_err(ReadBoundedError::Io)?;
+    if !metadata.is_file() {
+        return Err(ReadBoundedError::InvalidType);
+    }
     let maximum_u64 = u64::try_from(maximum).map_err(|_| ReadBoundedError::TooLarge {
         actual: u64::MAX,
         maximum: u64::MAX,
@@ -481,7 +556,15 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ReadBoundedError
             maximum: maximum_u64,
         });
     }
-    let bytes = fs::read(path).map_err(ReadBoundedError::Io)?;
+    let capacity = usize::try_from(metadata.len()).map_err(|_| ReadBoundedError::TooLarge {
+        actual: metadata.len(),
+        maximum: maximum_u64,
+    })?;
+    let mut reader = file.take(maximum_u64.saturating_add(1));
+    let mut bytes = Vec::with_capacity(capacity.min(maximum));
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(ReadBoundedError::Io)?;
     if bytes.len() > maximum {
         let actual = u64::try_from(bytes.len()).map_err(|_| ReadBoundedError::TooLarge {
             actual: u64::MAX,
@@ -507,6 +590,8 @@ fn hex(bytes: &[u8]) -> String {
 
 enum ReadBoundedError {
     TooLarge { actual: u64, maximum: u64 },
+    InvalidType,
+    Missing,
     Io(io::Error),
 }
 
@@ -521,6 +606,13 @@ pub enum CliError {
     DuplicateOption(String),
     /// Path-taking option had no following value.
     MissingOptionValue(String),
+    /// An otherwise recognized option has no meaning for this command.
+    OptionNotAllowed {
+        /// Selected command.
+        command: &'static str,
+        /// Rejected option.
+        option: String,
+    },
 }
 
 impl Display for CliError {
@@ -531,6 +623,9 @@ impl Display for CliError {
             Self::DuplicateOption(option) => write!(formatter, "duplicate option: {option}"),
             Self::MissingOptionValue(option) => {
                 write!(formatter, "missing value for option: {option}")
+            }
+            Self::OptionNotAllowed { command, option } => {
+                write!(formatter, "option {option} is not allowed for {command}")
             }
         }
     }
@@ -626,10 +721,10 @@ mod tests {
     #[test]
     fn missing_proof_and_store_paths_are_safe_diagnostics() {
         let (proof_code, proof_stdout, _) = output(&["inspect-proof"]);
-        assert_eq!(proof_code, 0);
+        assert_eq!(proof_code, EXIT_MISSING);
         assert!(proof_stdout.contains("verified=false"));
         let (store_code, store_stdout, _) = output(&["inspect-store"]);
-        assert_eq!(store_code, 0);
+        assert_eq!(store_code, EXIT_MISSING);
         assert!(store_stdout.contains("authority=false"));
     }
 
@@ -676,6 +771,18 @@ mod tests {
         let (missing_code, _, missing_error) = output(&["status", "--store"]);
         assert_eq!(missing_code, EXIT_USAGE);
         assert!(missing_error.contains("missing value"));
+
+        for arguments in [
+            ["status", "--proof", "ignored"],
+            ["run", "--proof", "ignored"],
+            ["inspect-proof", "--key", "ignored"],
+            ["inspect-store", "--config", "ignored"],
+            ["simulate-failure", "--store", "ignored"],
+        ] {
+            let (code, _, error) = output(&arguments);
+            assert_eq!(code, EXIT_USAGE);
+            assert!(error.contains("not allowed"));
+        }
     }
 
     #[test]

@@ -6,58 +6,77 @@ This is a fail-closed lab guide, not a production runbook.
 
 | Class | Current repository state |
 |---|---|
-| **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; single-process durable witness actor library; core logical EffectGate; in-memory test sink; status/refusal command shells |
+| **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; single-process durable witness actor library; core logical EffectGate; in-memory test sink; status/refusal command shells; bounded strict agent configuration subset |
 | **CI-VERIFIED** | Nothing is asserted here without a linked successful run for the exact commit |
 | **SIMULATED** | Deterministic model, injected storage faults, in-process clock/effect fixtures, and future hosted-runner fault analogues |
 | **PHYSICAL-REQUIRED** | Independent failure domains, power/NIC/switch faults, real clock bounds, endpoint movement, actual BMC/PDU/storage/eBPF/device fencing and negative tests |
-| **NOT-IMPLEMENTED** | Agent/witness daemons, live peer protocol, automatic promotion, config loader, admin/status API, real EffectGate/fence adapters, key-management commands, membership changes, backup/restore tooling, RPO-0 workload |
+| **NOT-IMPLEMENTED** | Agent/witness daemons, complete live peer protocol, automatic promotion, general TOML configuration and schema migration, admin/status API, real EffectGate/fence adapters, key-management commands, membership changes, backup/restore tooling |
 
 `quorumarc-agent` always reports `effect_gate=closed` and refuses promotion or
 activation. `quorumarc-witness` reports voting disabled and refuses vote or
-certificate commands. **Automatic promotion is disabled by default and cannot
-be enabled by current configuration.** Do not replace these fail-closed shells
-with an ad-hoc orchestration script.
+certificate commands. **Automatic promotion defaults to disabled.** The agent
+accepts `automatic_promotion = true` as configuration input, but that value only
+changes its status/refusal context: it does not authorize activation, open the
+EffectGate, or make `run` succeed. Do not replace these fail-closed shells with
+an ad-hoc orchestration script.
 
-## Illustrative configuration only
+## Current agent configuration subset
 
-The following is an **EXAMPLE TOML SCHEMA** for design review. No current binary
-parses it, so saving it does not configure QuorumArc.
+`quorumarc-agent status --config PATH`, `health --config PATH`, and
+`run --config PATH` parse a bounded, UTF-8, flat `name = value` file. This is a
+purpose-built TOML-like subset, **not a general TOML parser**. It accepts only
+the fields shown below:
 
 ```toml
-# EXAMPLE ONLY — NOT CONSUMED BY CURRENT BINARIES
-schema_version = 1
-role = "node"
+# Parsed by quorumarc-agent; this example still grants no authority.
 node_id = "node-a"
 workload_id = "demo-counter"
-automatic_promotion = false  # must remain false for Gate 1A setup
-authority_store = "/var/lib/quorumarc/demo-counter/authority"
-max_frame_bytes = 65536
-max_lease_ms = 5000
-
-[identity]
-key_id = "node-a-2026-01"
-private_key = "/etc/quorumarc/keys/node-a-2026-01.key"
-
-[policy]
-policy_hash_hex = "REPLACE_WITH_REVIEWED_64_HEX_DIGITS"
-threshold = 2
-voters = ["node-a", "node-b", "witness-1"]
-candidates = ["node-a", "node-b"]
-
-[peers]
-node_b = "127.0.0.1:7422"
-witness = "127.0.0.1:7423"
-
-[logging]
-target = "journald"
-level = "info"
+role = "data"
+store_dir = "/var/lib/quorumarc/demo-counter/authority"
+proof_path = "/var/lib/quorumarc/demo-counter/promotion-envelope.bin"
+automatic_promotion = false
+verification_key = "node-a:node-a-2026-01:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+verification_key = "witness-1:witness-1-2026-01:3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
 ```
 
-For an eventual witness configuration, use `role = "witness"`, exclude the
-witness from candidates, give it a distinct store/key, and pin the workload,
-candidate set, policy hash, and maximum lease. Loopback peers are suitable only
-for a three-process hosted lab and prove no host independence. Never use
-placeholder hashes or example keys.
+The exact field rules are:
+
+- `node_id` is required exactly once and is a double-quoted canonical ID.
+- `workload_id` is required exactly once and is a double-quoted canonical ID.
+- `role` is required exactly once; its quoted value is `data` or `witness`.
+- `store_dir` is optional and may appear once. It names the directory containing
+  the authority journal; a relative path is resolved relative to the
+  configuration file's parent directory.
+- `proof_path` is optional and may appear once. It names a canonical signed
+  promotion-envelope file; a relative path is resolved the same way.
+- `automatic_promotion` is optional and may appear once. It is the unquoted
+  literal `true` or `false` and defaults to `false`. Even `true` does not enable
+  activation in the current agent.
+- `verification_key` may be repeated. Each double-quoted value has the exact
+  form `principal:key-id:64-hex-public-key`; the first two parts must be
+  canonical IDs and the final part must decode to a valid 32-byte Ed25519 public
+  key. These are verification keys only, not private signing keys.
+
+Blank lines and whole-line comments whose first non-space character is `#` are
+accepted. Other fields, duplicate singleton fields, tables, arrays, escapes,
+embedded quotes, control characters, inline comments, and non-UTF-8 input are
+rejected. String values must use double quotes and cannot be empty. The file
+must be a regular file no larger than 65,536 bytes.
+
+The public keys above are well-formed test-vector values for parser examples;
+never treat their corresponding private material as operational credentials. A
+data-role `run` additionally requires `store_dir`, `proof_path`, and sufficient
+configured verification keys to inspect their consistency. Passing all of
+those checks still ends with `RUNTIME_AUTHORITY_PATH_UNAVAILABLE`, leaves the
+EffectGate closed, and exits with a refusal because final proof-digest,
+policy/time, and enforcement integration is incomplete. A `witness` role is
+also refused by the node agent's `run` command.
+
+The standalone `quorumarc-witness` refusal shell does not consume this agent
+configuration as a production voting-service configuration. Future peer,
+policy, lease, logging, private-key, and membership configuration needs a
+separately versioned and reviewed schema. Loopback peers remain suitable only
+for a hosted process lab and prove no host independence.
 
 Recommended ownership for a future service is root-owned configuration
 (`0640`, service group), a service-account-owned local state directory (`0700`),
@@ -79,7 +98,7 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/quorumarc-agent status
+ExecStart=/usr/local/bin/quorumarc-agent status --config /etc/quorumarc/agent.conf
 User=quorumarc
 Group=quorumarc
 NoNewPrivileges=yes
@@ -141,9 +160,11 @@ frames and activation receipts are state, not log files; never rotate them.
 
 ## Start, stop, and promotion safety
 
-For the present binaries, start means running a status check; stop means no
-QuorumArc process is active. There is no automatic promotion path to operate.
-For any future lab integration, enforce this sequence:
+For the present binaries, start means running a status check or a fail-closed
+`run --config PATH` material inspection; stop means no QuorumArc process is
+active. `run` always refuses activation after inspection. There is no automatic
+promotion path to operate. For any future lab integration, enforce this
+sequence:
 
 1. Begin with `automatic_promotion = false` and every EffectGate closed.
 2. Validate unique identities, store directories, keys, policy hash,
@@ -244,4 +265,3 @@ lease, incomplete fence, or operator uncertainty means no promotion and no
 external effect. Physical-lab procedures are in [lab setup](LAB_SETUP.md), and
 the non-production claim boundary is maintained in
 [known limitations](KNOWN_LIMITATIONS.md).
-
