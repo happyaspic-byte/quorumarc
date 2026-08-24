@@ -1,5 +1,7 @@
 # QuorumArc
 
+[![CI](https://github.com/happyaspic-byte/quorumarc/actions/workflows/ci.yml/badge.svg)](https://github.com/happyaspic-byte/quorumarc/actions/workflows/ci.yml)
+
 QuorumArc is a **proof-carrying continuity fabric** for safe, low-downtime
 failover. It starts from a strict rule: a node cannot become externally active
 because it merely believes the peer is dead. It must first present a verifiable
@@ -70,10 +72,15 @@ See [R8 boundary](docs/R8_BOUNDARY.md).
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets
-cargo run -p quorumarc-sim -- --depth 10
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets
+cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
 ```
+
+The public CI currently verifies 23 tests and explores the deterministic model
+to depth 10: 60,631 unique states, 330,074 applied transitions, and zero
+single-writer violations. These figures describe the documented Gate 0 model
+only; they are not a claim of production correctness.
 
 ## Development gates
 

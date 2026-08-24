@@ -19,8 +19,8 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Lints
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets
       - name: Gate 0 deterministic model
-        run: cargo run -p quorumarc-sim -- --depth 10 --require-safe
+        run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
