@@ -12,9 +12,12 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_runtime::{FrameCodec, FrameReasonCode};
-use quorumarc_store::{DurableAuthorityStore, FileBackend, StoreError, StorePaths};
+use quorumarc_store::{
+    AuthorityState, DurableAuthorityStore, FileBackend, StoreError, StorePaths,
+};
 use quorumarc_wire::{MAX_SIGNED_ENVELOPE_SIZE, SignedPromotionEnvelope};
 
 const EXIT_NOT_READY: u8 = 1;
@@ -23,6 +26,9 @@ const EXIT_DATA: u8 = 65;
 const EXIT_SOFTWARE: u8 = 70;
 const EXIT_IO: u8 = 74;
 const EXIT_UNAVAILABLE: u8 = 78;
+const MAX_STORE_SNAPSHOT_SIZE: usize = 1_048_576;
+const SNAPSHOT_ATTEMPTS: u8 = 32;
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const REASON_CONFIG_MISSING: &str = "RUN_REFUSED_CONFIG_NOT_CONFIGURED";
 const REASON_KEY_MISSING: &str = "RUN_REFUSED_KEY_NOT_CONFIGURED";
@@ -279,15 +285,15 @@ fn inspect_store<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) 
         );
         return write_exit(result, stderr);
     }
-    let store = match DurableAuthorityStore::open(paths, FileBackend) {
-        Ok(store) => store,
-        Err(error) => return store_open_error(error, stderr),
+    let (state, generation) = match recover_store_snapshot(&paths) {
+        Ok(recovered) => recovered,
+        Err(InspectStoreError::Store(error)) => return store_open_error(error, stderr),
+        Err(error) => return store_snapshot_error(error, stderr),
     };
-    let state = store.state();
     let result = writeln!(
         stdout,
         "store=recovered authority=false mode=inspection generation={} highest_epoch={} incarnation={} commit_index={} vote_present={} promotion_present={} activation_present={}",
-        store.generation(),
+        generation,
         state.highest_epoch(),
         state.incarnation(),
         state.commit_index(),
@@ -374,6 +380,93 @@ fn store_open_error<E: Write>(error: StoreError, stderr: &mut E) -> u8 {
     };
     let _write_result = writeln!(stderr, "store=refused authority=false reason={reason}");
     code
+}
+
+fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u8 {
+    let (reason, detail, code) = match error {
+        InspectStoreError::Read(ReadBoundedError::TooLarge { actual, maximum }) => (
+            "WITNESS_STORE_TOO_LARGE",
+            format!("committed frame is {actual} bytes; maximum is {maximum}"),
+            EXIT_DATA,
+        ),
+        InspectStoreError::Read(ReadBoundedError::Io(error)) => {
+            ("WITNESS_STORE_IO", error.to_string(), EXIT_IO)
+        }
+        InspectStoreError::SnapshotIo { operation, error } => (
+            "WITNESS_STORE_SNAPSHOT_IO",
+            format!("{operation}: {error}"),
+            EXIT_IO,
+        ),
+        InspectStoreError::Store(error) => return store_open_error(error, stderr),
+    };
+    let _write_result = writeln!(
+        stderr,
+        "store=refused authority=false reason={reason} detail={detail}"
+    );
+    code
+}
+
+fn recover_store_snapshot(
+    source: &StorePaths,
+) -> Result<(AuthorityState, u64), InspectStoreError> {
+    let bytes = read_bounded(source.committed(), MAX_STORE_SNAPSHOT_SIZE)
+        .map_err(InspectStoreError::Read)?;
+    let snapshot = create_snapshot_directory().map_err(|error| InspectStoreError::SnapshotIo {
+        operation: "create inspection snapshot",
+        error,
+    })?;
+    let snapshot_paths = StorePaths::new(snapshot.path());
+    fs::write(snapshot_paths.committed(), bytes).map_err(|error| {
+        InspectStoreError::SnapshotIo {
+            operation: "write inspection snapshot",
+            error,
+        }
+    })?;
+    let store = DurableAuthorityStore::open(snapshot_paths, FileBackend)
+        .map_err(InspectStoreError::Store)?;
+    Ok((store.state().clone(), store.generation()))
+}
+
+fn create_snapshot_directory() -> io::Result<SnapshotDirectory> {
+    for _attempt in 0..SNAPSHOT_ATTEMPTS {
+        let sequence = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "quorumarc-witness-inspect-{}-{sequence}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(SnapshotDirectory(path)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique inspection snapshot directory",
+    ))
+}
+
+struct SnapshotDirectory(PathBuf);
+
+impl SnapshotDirectory {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SnapshotDirectory {
+    fn drop(&mut self) {
+        let _cleanup_result = fs::remove_dir_all(&self.0);
+    }
+}
+
+enum InspectStoreError {
+    Read(ReadBoundedError),
+    SnapshotIo {
+        operation: &'static str,
+        error: io::Error,
+    },
+    Store(StoreError),
 }
 
 fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ReadBoundedError> {
@@ -538,6 +631,32 @@ mod tests {
         let (store_code, store_stdout, _) = output(&["inspect-store"]);
         assert_eq!(store_code, 0);
         assert!(store_stdout.contains("authority=false"));
+    }
+
+    #[test]
+    fn store_inspection_never_removes_the_live_writer_staging_file() {
+        let source = match create_snapshot_directory() {
+            Ok(directory) => directory,
+            Err(_) => std::process::abort(),
+        };
+        let paths = StorePaths::new(source.path());
+        let mut store = match DurableAuthorityStore::open(paths.clone(), FileBackend) {
+            Ok(store) => store,
+            Err(_) => std::process::abort(),
+        };
+        if store.allocate_incarnation(1).is_err() {
+            std::process::abort();
+        }
+        if fs::write(paths.temporary(), b"live-writer-staging").is_err() {
+            std::process::abort();
+        }
+
+        let path = source.path().to_string_lossy().into_owned();
+        let (code, stdout, stderr) = output(&["inspect-store", "--store", &path]);
+        assert_eq!(code, 0);
+        assert!(stdout.contains("mode=inspection"));
+        assert!(stderr.is_empty());
+        assert_eq!(fs::read(paths.temporary()).ok().as_deref(), Some(b"live-writer-staging".as_slice()));
     }
 
     #[test]
