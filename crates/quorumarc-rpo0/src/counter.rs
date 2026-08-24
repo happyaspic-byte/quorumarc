@@ -218,13 +218,9 @@ impl ReplicatedCounter {
                 });
             }
         };
-        if let Err(error) = validate_receipt(
-            "left",
-            &left_replica_id,
-            &left_receipt,
-            &entry,
-            checksum,
-        ) {
+        if let Err(error) =
+            validate_receipt("left", &left_replica_id, &left_receipt, &entry, checksum)
+        {
             self.uncertain = true;
             return Err(error);
         }
@@ -239,13 +235,9 @@ impl ReplicatedCounter {
                 });
             }
         };
-        if let Err(error) = validate_receipt(
-            "right",
-            &right_replica_id,
-            &right_receipt,
-            &entry,
-            checksum,
-        ) {
+        if let Err(error) =
+            validate_receipt("right", &right_replica_id, &right_receipt, &entry, checksum)
+        {
             self.uncertain = true;
             return Err(error);
         }
@@ -299,11 +291,7 @@ fn validate_receipt(
     Ok(())
 }
 
-fn recovery_receipt(
-    replica_id: &str,
-    commit_index: u64,
-    record_checksum: u32,
-) -> DurableReceipt {
+fn recovery_receipt(replica_id: &str, commit_index: u64, record_checksum: u32) -> DurableReceipt {
     DurableReceipt {
         replica_id: replica_id.to_owned(),
         commit_index,

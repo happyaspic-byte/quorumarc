@@ -16,12 +16,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.1
         with:
           components: rustfmt, clippy
-      # Temporary while the RPO-0 lab crate is first resolved and formatted.
-      # Its generated outputs are committed and this step is removed next.
-      - name: Resolve RPO-0 bootstrap lock
-        run: cargo generate-lockfile
-      - name: Normalize RPO-0 bootstrap sources
-        run: cargo fmt --all
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Lints
@@ -30,13 +24,3 @@ jobs:
         run: cargo test --locked --workspace --all-targets
       - name: Gate 0 deterministic model
         run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
-      - name: Capture RPO-0 bootstrap inputs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: gate1a-rpo0-bootstrap
-          path: |
-            Cargo.lock
-            crates/quorumarc-rpo0
-            crates/quorumarc-runtime
-          retention-days: 1

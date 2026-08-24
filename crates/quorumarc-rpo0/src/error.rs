@@ -94,30 +94,41 @@ impl fmt::Display for Rpo0Error {
             Self::ZeroIncrement => formatter.write_str("counter increment must be positive"),
             Self::CounterOverflow => formatter.write_str("counter would overflow"),
             Self::StaleOperation { expected, actual } => {
-                write!(formatter, "stale operation: expected index {expected}, actual {actual}")
+                write!(
+                    formatter,
+                    "stale operation: expected index {expected}, actual {actual}"
+                )
             }
             Self::OutOfOrderOperation { expected, actual } => write!(
                 formatter,
                 "out-of-order operation: expected index {expected}, actual {actual}"
             ),
             Self::ConflictingDuplicate(operation_id) => {
-                write!(formatter, "operation ID {operation_id} was reused with different content")
+                write!(
+                    formatter,
+                    "operation ID {operation_id} was reused with different content"
+                )
             }
             Self::ReplicaMissing(replica) => {
                 write!(formatter, "required {replica} replica is missing")
             }
             Self::ReplicaUnavailable { replica, source } => {
-                write!(formatter, "{replica} replica did not confirm durability: {source}")
+                write!(
+                    formatter,
+                    "{replica} replica did not confirm durability: {source}"
+                )
             }
             Self::ReplicaIdentityCollision => {
                 formatter.write_str("two durable receipts identified the same replica")
             }
             Self::InvalidDurabilityReceipt(replica) => {
-                write!(formatter, "{replica} replica returned a receipt for different bytes")
+                write!(
+                    formatter,
+                    "{replica} replica returned a receipt for different bytes"
+                )
             }
-            Self::UncertainDurability => formatter.write_str(
-                "durability is uncertain after a replica failure; recovery is required",
-            ),
+            Self::UncertainDurability => formatter
+                .write_str("durability is uncertain after a replica failure; recovery is required"),
             Self::RecoveryMismatch => {
                 formatter.write_str("replicas do not contain identical recovered state")
             }

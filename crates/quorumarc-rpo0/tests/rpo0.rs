@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used)]
 
 use quorumarc_rpo0::{
-    recover_wal, CounterOperation, Fault, MemoryReplica, OperationId, ReplicatedCounter,
-    Rpo0Error, WalCorruption,
+    CounterOperation, Fault, MemoryReplica, OperationId, ReplicatedCounter, Rpo0Error,
+    WalCorruption, recover_wal,
 };
 
 fn operation(id: u8, expected_commit_index: u64, increment: u64) -> CounterOperation {

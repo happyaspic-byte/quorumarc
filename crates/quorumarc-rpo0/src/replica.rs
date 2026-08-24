@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::codec::record_checksum;
-use crate::{recover_wal, ReplicaError, WalEntry};
+use crate::{ReplicaError, WalEntry, recover_wal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableReceipt {

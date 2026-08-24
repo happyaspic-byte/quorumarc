@@ -16,7 +16,7 @@ mod counter;
 mod error;
 mod replica;
 
-pub use codec::{recover_wal, RecoveredCounter, StateRoot, WalEntry};
+pub use codec::{RecoveredCounter, StateRoot, WalEntry, recover_wal};
 pub use counter::{
     AcknowledgedWrite, CounterOperation, OperationId, ReplicatedCounter, WorkloadProgress,
 };
