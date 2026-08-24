@@ -10,9 +10,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-quorumarc-core = { path = "../quorumarc-core" }
-quorumarc-store = { path = "../quorumarc-store" }
-quorumarc-wire = { path = "../quorumarc-wire" }
+quorumarc-core = { version = "=0.1.0", path = "../quorumarc-core" }
+quorumarc-store = { version = "=0.1.0", path = "../quorumarc-store" }
+quorumarc-wire = { version = "=0.1.0", path = "../quorumarc-wire" }
 sha2 = "=0.10.8"
 
 [lints]
