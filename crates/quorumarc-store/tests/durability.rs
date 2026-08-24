@@ -80,14 +80,8 @@ fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
             proposal_digest,
             signed_envelope_digest,
         )?)?;
-        let activation = ActivationReceipt::new(
-            5,
-            "node-a",
-            12,
-            signed_envelope_digest,
-            120,
-            1_000,
-        )?;
+        let activation =
+            ActivationReceipt::new(5, "node-a", 12, signed_envelope_digest, 120, 1_000)?;
         let receipt = store.record_activation(activation)?;
         assert_eq!(receipt.outcome(), TransitionOutcome::Committed);
         receipt.generation()

@@ -1149,24 +1149,14 @@ mod tests {
         };
         wrong_workload.workload = other_workload;
         assert_eq!(
-            validate_promotion(
-                &wrong_workload,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&wrong_workload, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::WorkloadMismatch)
         );
 
         let mut wrong_policy = proof("node-a", 1);
         wrong_policy.policy_hash = PolicyHash::new([8; 32]);
         assert_eq!(
-            validate_promotion(
-                &wrong_policy,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&wrong_policy, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::PolicyHashMismatch)
         );
 
@@ -1195,12 +1185,7 @@ mod tests {
         let mut mixed_epoch = proof("node-a", 1);
         mixed_epoch.health.epoch = Epoch(2);
         assert_eq!(
-            validate_promotion(
-                &mixed_epoch,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&mixed_epoch, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::EpochMismatch)
         );
     }
@@ -1251,12 +1236,7 @@ mod tests {
         let mut non_bootstrap = proof("node-a", 1);
         non_bootstrap.fence.mechanism = FenceMechanism::HardwarePower;
         assert_eq!(
-            validate_promotion(
-                &non_bootstrap,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&non_bootstrap, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::InvalidBootstrap)
         );
 
@@ -1369,13 +1349,7 @@ mod tests {
         let mut exact_boundary = proof("node-a", 1);
         exact_boundary.state.observed_at_ms = NOW - 1_000;
         assert!(
-            validate_promotion(
-                &exact_boundary,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            )
-            .is_ok()
+            validate_promotion(&exact_boundary, &AuthorityState::initial(), &policy(), NOW).is_ok()
         );
 
         let mut too_old = proof("node-a", 1);
@@ -1391,24 +1365,14 @@ mod tests {
         let mut wrong_subject = proof("node-a", 1);
         wrong_subject.health.node = node("node-b");
         assert_eq!(
-            validate_promotion(
-                &wrong_subject,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&wrong_subject, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::HealthSubjectMismatch)
         );
 
         let mut insufficient = proof("node-a", 1);
         insufficient.health.passed_checks = 2;
         assert_eq!(
-            validate_promotion(
-                &insufficient,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&insufficient, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::InsufficientHealthChecks)
         );
     }
@@ -1418,12 +1382,7 @@ mod tests {
         let mut wrong_subject = proof("node-a", 1);
         wrong_subject.lease.holder = node("node-b");
         assert_eq!(
-            validate_promotion(
-                &wrong_subject,
-                &AuthorityState::initial(),
-                &policy(),
-                NOW
-            ),
+            validate_promotion(&wrong_subject, &AuthorityState::initial(), &policy(), NOW),
             Err(ProofError::LeaseSubjectMismatch)
         );
 

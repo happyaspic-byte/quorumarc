@@ -109,17 +109,10 @@ fn signed_fixture() -> Result<SignedPromotionEnvelope, EnvelopeError> {
         key_id.clone(),
         &candidate_key,
     )?;
-    let witness_vote = SignedVote::sign(
-        &binding,
-        witness_id.clone(),
-        key_id.clone(),
-        &witness_key,
-    )?;
-    let quorum_certificate = QuorumCertificate::new(
-        binding.clone(),
-        2,
-        vec![candidate_vote, witness_vote],
-    )?;
+    let witness_vote =
+        SignedVote::sign(&binding, witness_id.clone(), key_id.clone(), &witness_key)?;
+    let quorum_certificate =
+        QuorumCertificate::new(binding.clone(), 2, vec![candidate_vote, witness_vote])?;
     let fence_receipt = FenceReceipt::sign(
         &binding,
         None,
@@ -222,12 +215,7 @@ fn assert_unsigned_rejected(bytes: &[u8], seed: u64, round: usize, case: &str) {
     }
 }
 
-fn assert_not_authenticated(
-    bytes: &[u8],
-    resolver: &TestResolver,
-    seed: u64,
-    round: usize,
-) {
+fn assert_not_authenticated(bytes: &[u8], resolver: &TestResolver, seed: u64, round: usize) {
     let outcome = catch_unwind(|| {
         SignedPromotionEnvelope::from_canonical_bytes(bytes)
             .and_then(|envelope| envelope.verify(resolver))
@@ -322,12 +310,7 @@ fn bounded_structural_malformed_campaign_never_panics_or_accepts() -> Result<(),
             case_count += 1;
 
             let signed_cut = rng.bounded(canonical_signed.len());
-            assert_signed_rejected(
-                &canonical_signed[..signed_cut],
-                seed,
-                round,
-                "truncation",
-            );
+            assert_signed_rejected(&canonical_signed[..signed_cut], seed, round, "truncation");
             case_count += 1;
 
             let mut oversized_inner = canonical_signed.clone();

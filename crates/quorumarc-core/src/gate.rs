@@ -764,13 +764,8 @@ mod tests {
             Err(GateError::GateBindingMismatch)
         );
 
-        let mut wrong_node = EffectGate::recover(
-            node("node-b"),
-            workload(),
-            policy_hash(),
-            recovery,
-            clock,
-        );
+        let mut wrong_node =
+            EffectGate::recover(node("node-b"), workload(), policy_hash(), recovery, clock);
         assert_eq!(
             wrong_node.stage(authorization()),
             Err(GateError::WrongCandidate)
@@ -827,7 +822,10 @@ mod tests {
             incarnation: Incarnation(1),
             last_observed_ms: NOW,
         };
-        assert_eq!(gate.confirm_persisted(&unrelated), Err(GateError::NotStaged));
+        assert_eq!(
+            gate.confirm_persisted(&unrelated),
+            Err(GateError::NotStaged)
+        );
         assert_eq!(gate.activate(), Err(GateError::NotPrepared));
     }
 

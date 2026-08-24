@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use quorumarc_store::{
     DurableAuthorityStore, StorageBackend, StoreError, TransitionOutcome, VoteRecord,
 };
-use quorumarc_wire::{
-    CanonicalId, PROTOCOL_VERSION, QuorumBinding, SignedVote, SigningKey,
-};
+use quorumarc_wire::{CanonicalId, PROTOCOL_VERSION, QuorumBinding, SignedVote, SigningKey};
 
 /// Immutable admission rules enforced before the lab witness votes.
 #[derive(Clone, Debug, Eq, PartialEq)]

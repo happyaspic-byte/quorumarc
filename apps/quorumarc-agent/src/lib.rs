@@ -884,13 +884,7 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
         .quorum_certificate
         .binding
         .proposal_digest()
-        .map_err(|error| {
-            Failure::new(
-                "PROPOSAL_DIGEST_FAILED",
-                error.to_string(),
-                EXIT_DATA,
-            )
-        })?;
+        .map_err(|error| Failure::new("PROPOSAL_DIGEST_FAILED", error.to_string(), EXIT_DATA))?;
     let final_digest = signed
         .digest()
         .map_err(|error| Failure::new("PROOF_DIGEST_FAILED", error.to_string(), EXIT_DATA))?;
@@ -915,8 +909,7 @@ fn verify_material_digests(
     computed_proposal: &[u8; 32],
     computed_signed_envelope: &[u8; 32],
 ) -> Result<(), Failure> {
-    if durable_vote_proposal != computed_proposal
-        || durable_promotion_proposal != computed_proposal
+    if durable_vote_proposal != computed_proposal || durable_promotion_proposal != computed_proposal
     {
         return Err(Failure::new(
             "PROPOSAL_BINDING_DIGEST_MISMATCH",
@@ -1498,22 +1491,10 @@ mod tests {
 
     #[test]
     fn proposal_and_final_digest_bindings_are_checked_independently() {
-        assert!(verify_material_digests(
-            &[5; 32],
-            &[5; 32],
-            &[9; 32],
-            &[5; 32],
-            &[9; 32],
-        )
-        .is_ok());
+        assert!(verify_material_digests(&[5; 32], &[5; 32], &[9; 32], &[5; 32], &[9; 32],).is_ok());
 
-        let proposal_mismatch = verify_material_digests(
-            &[5; 32],
-            &[7; 32],
-            &[9; 32],
-            &[5; 32],
-            &[9; 32],
-        );
+        let proposal_mismatch =
+            verify_material_digests(&[5; 32], &[7; 32], &[9; 32], &[5; 32], &[9; 32]);
         assert!(matches!(
             proposal_mismatch,
             Err(Failure {
@@ -1523,13 +1504,8 @@ mod tests {
             })
         ));
 
-        let final_mismatch = verify_material_digests(
-            &[5; 32],
-            &[5; 32],
-            &[7; 32],
-            &[5; 32],
-            &[9; 32],
-        );
+        let final_mismatch =
+            verify_material_digests(&[5; 32], &[5; 32], &[7; 32], &[5; 32], &[9; 32]);
         assert!(matches!(
             final_mismatch,
             Err(Failure {
