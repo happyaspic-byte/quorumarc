@@ -16,6 +16,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@85c23e28f7ccc75a9a153d45d385d94a85464876 # 1.85.1
         with:
           components: rustfmt, clippy
+      # Temporary for the first isolated lab resolution. The resulting lock
+      # and rustfmt output are committed, then these bootstrap steps are removed.
+      - name: Resolve process-lab bootstrap lock
+        run: cargo generate-lockfile
+      - name: Normalize process-lab bootstrap sources
+        run: cargo fmt --all
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Lints
@@ -24,6 +30,15 @@ jobs:
         run: cargo test --locked --workspace --all-targets
       - name: Gate 0 deterministic model
         run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
+      - name: Capture process-lab bootstrap inputs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate1a-process-lab-bootstrap
+          path: |
+            Cargo.lock
+            crates/quorumarc-lab
+          retention-days: 1
 
   supply-chain:
     runs-on: ubuntu-latest
