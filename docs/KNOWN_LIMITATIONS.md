@@ -38,9 +38,9 @@ integrated flow do not exist.
 
 | Class | What currently exists | Limitation |
 |---|---|---|
-| Candidate tests | Focused safety-path tests, a bounded Witness clean-exit case, and deterministic malformed-wire campaigns are present | Exact current-tree count and results require a successful workflow for the exact commit |
-| Historical compact model | Extended Safety run #3 explored depth 12: 143,439 states, 836,424 transitions, 0 model invariant violations | Applies only to that exact model revision and assumptions |
-| Historical coverage | Workspace line coverage measured 69.28% | The 80% workspace target is unmet; 90% critical-path compliance is not established |
+| Linked workspace tests | Extended Safety run #6 on `0424290`: 153 passed, 0 failed, 0 ignored; 16 process-lab and 16 store-recovery repetitions completed | These are component/process results, not global scenario PASS results |
+| Linked compact model | Extended Safety run #6 explored depth 12: 143,439 states, 836,424 transitions, 0 model invariant violations | Applies only to that exact model revision and assumptions |
+| Linked coverage | Workspace line coverage measured 76.05% | The 80% workspace target is unmet; 90% aggregate critical-path compliance is not established |
 | GitHub-hosted process | Client plus Witness child on localhost TCP | Shared host and no Node A/Node B activation or failover |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 

@@ -25,9 +25,9 @@ The following facts must not be conflated:
 | Evidence class | Current evidence | Claim limit |
 |---|---|---|
 | Implemented in source | Wire, store, runtime, demo workload, process harness, and refusal CLIs are present | Presence or compilation is not an end-to-end PASS |
-| Historical compact-model validation | Extended Safety run #3, depth 12: 143,439 unique states, 836,424 transitions, 0 model invariant violations | Applies only to that model revision and its assumptions |
-| Historical coverage measurement | Workspace line coverage 69.28% | The 80% workspace target is not met |
-| Current candidate tests | Focused safety-path tests, a bounded Witness clean-exit case, and deterministic malformed-wire campaigns are present | The exact count and result require a successful workflow for the exact commit |
+| Linked compact-model validation | Extended Safety run #6 on `0424290`, depth 12: 143,439 unique states, 836,424 transitions, 0 model invariant violations | Applies only to that model revision and its assumptions |
+| Linked coverage measurement | Extended Safety run #6 workspace line coverage 76.05% | The 80% workspace target is not met; aggregate critical-path compliance is not established |
+| Linked workspace tests | Extended Safety run #6: 153 passed, 0 failed, 0 ignored | Component/process success is not an integrated failover PASS |
 | GitHub-hosted process scope | A real Witness child process communicates over localhost TCP; tests exercise bounded input, authenticated requests, durable voting, retry, restart, conflicts, and selected pause/kill cases | This is not a three-role Active/Standby failover result |
 | Required scenario campaign | Individual model, component, or process analogues cover parts of the matrix | None of the 25 rows has a global end-to-end PASS result |
 | Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |

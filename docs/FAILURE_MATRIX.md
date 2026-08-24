@@ -10,17 +10,17 @@ not declare the row passed as an integrated failover scenario.
   with 0 model invariant violations. Its serial-view and logical-clock
   assumptions still apply.
 - **COMPONENT SOURCE:** a focused core, wire, store, runtime, RPO-0, or CLI test
-  is present in the candidate source. Exact current-tree CI is pending.
+  is present. Extended Safety run #6 on `0424290` executed 153 workspace tests
+  with 0 failures and 0 ignored tests.
 - **WITNESS PROCESS SOURCE:** a client and real Witness child process exercise a
   localhost TCP analogue. Node A, Node B, activation, and failover are absent.
 - **NOT INTEGRATED:** no complete three-role Active/Standby scenario exists.
 - **PHYSICAL-ONLY:** the literal hardware assertion requires independent hosts
   or a real fence/effect adapter.
 
-The candidate contains focused component tests, one bounded Witness clean-exit
-test, and two deterministic malformed-wire campaigns. Their exact count and
-result require a successful workflow for the exact commit. Historical Extended
-Safety run #3 measured 69.28% workspace line coverage, below the required 80%
+The linked run also completed 16 real-process Witness-lab repetitions, 16
+durable-store crash-recovery repetitions, and all seven named malformed-parser
+checks. It measured 76.05% workspace line coverage, below the required 80%
 target.
 
 **None of rows 1–25 currently has a global end-to-end PASS result.** Partial

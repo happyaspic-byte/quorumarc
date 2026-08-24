@@ -69,19 +69,20 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 | Classification | Current status |
 |---|---|
 | Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs |
-| Verified by compact model | Historical Extended Safety run #3 explored depth 12: 143,439 unique states, 836,424 transitions, and 0 model invariant violations |
+| Verified by compact model | Extended Safety run #6 on `0424290` explored depth 12: 143,439 unique states, 836,424 transitions, and 0 model invariant violations |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
 | Not yet end-to-end verified | Node A and Node B election, activation, real failover/failback, one integrated RPO-0 authority path, and all 25 scenarios as global PASS results |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
-The candidate adds focused safety-path tests, a bounded Witness clean-exit
-case, and two deterministic malformed-wire campaigns. A source inventory is not
-a PASS result: the exact test count belongs to the final successful workflow
-for the exact commit and must not be inferred before that run finishes.
+Extended Safety run #6 on commit `0424290` executed **153 tests: 153 passed, 0
+failed, 0 ignored**. It also completed 16 real-process Witness-lab repetitions,
+16 durable-store crash-recovery repetitions, and all seven named malformed
+parser checks. This is component/process evidence, not a global PASS for the 25
+integrated failover scenarios.
 
-Historical Extended Safety run #3 measured **69.28% workspace line coverage**.
+That run measured **76.05% workspace line coverage**.
 The 80% workspace target is therefore **not met**. No threshold is weakened or
-silently treated as passing. The same historical run's model counts apply only
+silently treated as passing. The linked run's model counts apply only
 to its exact compact-model revision and do not prove physical or end-to-end HA.
 
 ## Build and test
