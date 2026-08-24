@@ -126,10 +126,20 @@ impl Drop for WitnessChild {
     }
 }
 
+#[track_caller]
 fn value_or_abort<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     match result {
         Ok(value) => value,
-        Err(error) => panic!("lab test prerequisite failed: {error:?}"),
+        Err(error) => {
+            let caller = std::panic::Location::caller();
+            eprintln!(
+                "lab test prerequisite failed at {}:{}:{}: {error:?}",
+                caller.file(),
+                caller.line(),
+                caller.column()
+            );
+            std::process::abort();
+        }
     }
 }
 
@@ -273,8 +283,14 @@ fn require_closed_without_payload(stream: &mut TcpStream) {
                 error.kind(),
                 io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
             ) => {}
-        Ok(read) => panic!("malformed peer unexpectedly returned {read} payload byte(s)"),
-        Err(error) => panic!("malformed peer did not close cleanly: {error:?}"),
+        Ok(read) => {
+            eprintln!("malformed peer unexpectedly returned {read} payload byte(s)");
+            std::process::abort();
+        }
+        Err(error) => {
+            eprintln!("malformed peer did not close cleanly: {error:?}");
+            std::process::abort();
+        }
     }
 }
 
