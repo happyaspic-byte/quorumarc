@@ -66,7 +66,8 @@ fn run_witness(mut options: ParsedOptions) -> Result<(), CliError> {
         FileBackend,
     )
     .map_err(CliError::boxed)?;
-    let listener = TcpListener::bind(listen).map_err(|error| CliError::io("bind witness", error))?;
+    let listener =
+        TcpListener::bind(listen).map_err(|error| CliError::io("bind witness", error))?;
     let actual = listener
         .local_addr()
         .map_err(|error| CliError::io("inspect witness address", error))?;
@@ -87,10 +88,14 @@ fn run_candidate(mut options: ParsedOptions) -> Result<(), CliError> {
         .map_or(Ok(1_u64), |value| parse_number(&value, "--epoch"))?;
     let message_byte = options
         .optional("--message-byte")
-        .map_or(Ok(1_u8), |value| parse_nonzero_byte(&value, "--message-byte"))?;
+        .map_or(Ok(1_u8), |value| {
+            parse_nonzero_byte(&value, "--message-byte")
+        })?;
     let request_byte = options
         .optional("--request-byte")
-        .map_or(Ok(1_u8), |value| parse_nonzero_byte(&value, "--request-byte"))?;
+        .map_or(Ok(1_u8), |value| {
+            parse_nonzero_byte(&value, "--request-byte")
+        })?;
     options.finish()?;
 
     let candidate = CanonicalId::new(&candidate_text).map_err(CliError::boxed)?;
@@ -230,9 +235,8 @@ impl CliError {
 impl Display for CliError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage => formatter.write_str(
-                "usage: quorumarc-lab <witness|candidate|probe> [--option value ...]",
-            ),
+            Self::Usage => formatter
+                .write_str("usage: quorumarc-lab <witness|candidate|probe> [--option value ...]"),
             Self::UnknownMode(mode) => write!(formatter, "unknown mode {mode}"),
             Self::UnexpectedArgument(argument) => {
                 write!(formatter, "unexpected argument {argument}")

@@ -1,0 +1,144 @@
+name: extended-safety
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+  push:
+    branches:
+      - main
+      - "gate1a/**"
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - "apps/**"
+      - "crates/**"
+      - .github/workflows/extended-safety.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-safety-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extended-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@85c23e28f7ccc75a9a153d45d385d94a85464876 # 1.85.1
+        with:
+          components: llvm-tools-preview
+      - name: Install pinned coverage tool
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+
+      - name: Record run metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p safety-artifacts/coverage
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "commit=${GITHUB_SHA}"
+            echo "runner=${RUNNER_OS}-${RUNNER_ARCH}"
+            rustc --version --verbose
+            cargo --version --verbose
+            cargo llvm-cov --version
+          } | tee safety-artifacts/run-metadata.log
+
+      - name: Locked workspace regression suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo test --locked --workspace --all-targets 2>&1 \
+            | tee safety-artifacts/workspace-tests.log
+
+      - name: Deeper deterministic authority model
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo run --locked -p quorumarc-sim -- --depth 12 --require-safe 2>&1 \
+            | tee safety-artifacts/model-depth-12.log
+
+      - name: Repeat real-process witness lab
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > safety-artifacts/process-lab-repetitions.log
+          seeds=(104729 130363 155921 181081 205759 231481 257053 282617 308003 333667 359357 384961)
+          iteration=0
+          for seed in "${seeds[@]}"; do
+            iteration=$((iteration + 1))
+            {
+              echo "iteration=${iteration} seed_label=${seed} suite=deterministic-process-lab"
+              QUORUMARC_TEST_ITERATION="${iteration}" \
+                QUORUMARC_TEST_SEED_LABEL="${seed}" \
+                cargo test --locked -p quorumarc-lab --tests -- \
+                  --nocapture --test-threads=1
+            } 2>&1 | tee -a safety-artifacts/process-lab-repetitions.log
+          done
+
+      - name: Repeat durable-store crash recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > safety-artifacts/store-crash-recovery-repetitions.log
+          for iteration in $(seq 1 16); do
+            {
+              echo "iteration=${iteration} suite=durable-store-crash-recovery"
+              QUORUMARC_TEST_ITERATION="${iteration}" \
+                cargo test --locked -p quorumarc-store --tests -- \
+                  --nocapture --test-threads=1
+            } 2>&1 | tee -a safety-artifacts/store-crash-recovery-repetitions.log
+          done
+
+      - name: Bounded malformed promotion parser suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > safety-artifacts/malformed-parser.log
+          cases=(
+            malformed_truncations_are_all_rejected
+            version_downgrade_is_rejected
+            unknown_trailing_field_is_rejected
+            malformed_utf8_identifier_is_rejected
+            oversized_wire_objects_are_rejected_before_parsing
+          )
+          for case_name in "${cases[@]}"; do
+            {
+              echo "case=${case_name} suite=bounded-malformed-parser"
+              cargo test --locked -p quorumarc-wire "${case_name}" -- \
+                --nocapture --test-threads=1
+            } 2>&1 | tee -a safety-artifacts/malformed-parser.log
+          done
+
+      - name: Measure workspace coverage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --workspace --all-targets --no-report
+          cargo llvm-cov report --lcov \
+            --output-path safety-artifacts/coverage/lcov.info
+          cargo llvm-cov report --json \
+            --output-path safety-artifacts/coverage/coverage.json
+          cargo llvm-cov report --summary-only 2>&1 \
+            | tee safety-artifacts/coverage/summary.txt
+
+      - name: Upload extended safety evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extended-safety-${{ github.run_id }}-${{ github.run_attempt }}
+          path: safety-artifacts
+          if-no-files-found: warn
+          retention-days: 30

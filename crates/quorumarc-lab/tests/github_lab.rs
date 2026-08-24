@@ -133,12 +133,7 @@ fn value_or_abort<T, E>(result: Result<T, E>) -> T {
     value
 }
 
-fn signed_request(
-    candidate: &str,
-    epoch: u64,
-    message_byte: u8,
-    request_byte: u8,
-) -> VoteRequest {
+fn signed_request(candidate: &str, epoch: u64, message_byte: u8, request_byte: u8) -> VoteRequest {
     let candidate_id = value_or_abort(CanonicalId::new(candidate));
     let Some(signing_key) = TestPeerKeys::candidate_signing_key(&candidate_id) else {
         std::process::abort();

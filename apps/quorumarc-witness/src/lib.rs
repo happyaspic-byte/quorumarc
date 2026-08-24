@@ -15,9 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_runtime::{FrameCodec, FrameReasonCode};
-use quorumarc_store::{
-    AuthorityState, DurableAuthorityStore, FileBackend, StoreError, StorePaths,
-};
+use quorumarc_store::{AuthorityState, DurableAuthorityStore, FileBackend, StoreError, StorePaths};
 use quorumarc_wire::{MAX_SIGNED_ENVELOPE_SIZE, SignedPromotionEnvelope};
 
 const EXIT_NOT_READY: u8 = 1;
@@ -471,9 +469,7 @@ fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u
     write_error_exit(result, code)
 }
 
-fn recover_store_snapshot(
-    source: &StorePaths,
-) -> Result<(AuthorityState, u64), InspectStoreError> {
+fn recover_store_snapshot(source: &StorePaths) -> Result<(AuthorityState, u64), InspectStoreError> {
     let bytes = read_bounded(source.committed(), MAX_STORE_SNAPSHOT_SIZE)
         .map_err(InspectStoreError::Read)?;
     let snapshot = create_snapshot_directory().map_err(|error| InspectStoreError::SnapshotIo {
@@ -751,7 +747,10 @@ mod tests {
         assert_eq!(code, 0);
         assert!(stdout.contains("mode=inspection"));
         assert!(stderr.is_empty());
-        assert_eq!(fs::read(paths.temporary()).ok().as_deref(), Some(b"live-writer-staging".as_slice()));
+        assert_eq!(
+            fs::read(paths.temporary()).ok().as_deref(),
+            Some(b"live-writer-staging".as_slice())
+        );
     }
 
     #[test]

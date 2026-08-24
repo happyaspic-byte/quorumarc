@@ -531,8 +531,8 @@ impl Writer {
     }
 
     fn put_id(&mut self, identifier: &CanonicalId) -> Result<(), ProtocolError> {
-        let length = u16::try_from(identifier.as_str().len())
-            .map_err(|_| ProtocolError::LengthOverflow)?;
+        let length =
+            u16::try_from(identifier.as_str().len()).map_err(|_| ProtocolError::LengthOverflow)?;
         self.put_u16(length);
         self.put_bytes(identifier.as_str().as_bytes());
         Ok(())
@@ -587,7 +587,8 @@ impl<'a> Reader<'a> {
 
     fn read_id(&mut self) -> Result<CanonicalId, ProtocolError> {
         let length = usize::from(self.read_u16()?);
-        let text = std::str::from_utf8(self.take(length)?).map_err(|_| ProtocolError::InvalidUtf8)?;
+        let text =
+            std::str::from_utf8(self.take(length)?).map_err(|_| ProtocolError::InvalidUtf8)?;
         CanonicalId::new(text).map_err(ProtocolError::InvalidIdentifier)
     }
 
@@ -667,10 +668,9 @@ impl Display for ProtocolError {
                 formatter.write_str("lab response fields contradict its decision")
             }
             Self::TrailingBytes => formatter.write_str("lab protocol message had trailing bytes"),
-            Self::UnknownCandidateKey { candidate, key_id } => write!(
-                formatter,
-                "unknown lab candidate key {candidate}/{key_id}"
-            ),
+            Self::UnknownCandidateKey { candidate, key_id } => {
+                write!(formatter, "unknown lab candidate key {candidate}/{key_id}")
+            }
             Self::InvalidRequestSignature => {
                 formatter.write_str("lab candidate request signature was invalid")
             }

@@ -20,10 +20,7 @@ pub struct WitnessServerConfig {
 
 impl WitnessServerConfig {
     /// Builds settings with non-zero I/O timeouts.
-    pub fn new(
-        io_timeout: Duration,
-        max_connections: Option<u64>,
-    ) -> Result<Self, ServeError> {
+    pub fn new(io_timeout: Duration, max_connections: Option<u64>) -> Result<Self, ServeError> {
         if io_timeout.is_zero() {
             return Err(ServeError::ZeroTimeout);
         }
@@ -83,9 +80,7 @@ pub fn serve_witness<R: PeerKeyResolver>(
             .checked_add(1)
             .ok_or(ServeError::ConnectionCounterExhausted)?;
         if !peer.ip().is_loopback() {
-            eprintln!(
-                "event=witness_connection code=CONNECTION_REFUSED_NON_LOOPBACK peer={peer}"
-            );
+            eprintln!("event=witness_connection code=CONNECTION_REFUSED_NON_LOOPBACK peer={peer}");
             continue;
         }
         if let Err(error) = configure_stream(&stream, config.io_timeout) {
@@ -165,8 +160,8 @@ pub fn request_vote(
         .read_frame(&mut stream)
         .map_err(ClientError::Frame)?
         .ok_or(ClientError::MissingResponse)?;
-    let response = VoteResponse::from_canonical_bytes(&response_bytes)
-        .map_err(ClientError::Protocol)?;
+    let response =
+        VoteResponse::from_canonical_bytes(&response_bytes).map_err(ClientError::Protocol)?;
     if response.request_id() != request.request_id() {
         return Err(ClientError::RequestIdMismatch);
     }

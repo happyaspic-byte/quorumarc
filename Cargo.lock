@@ -175,12 +175,24 @@ dependencies = [
 name = "quorumarc-agent"
 version = "0.1.0"
 dependencies = [
- "quorumarc-core",
+ "quorumarc-store",
+ "quorumarc-wire",
 ]
 
 [[package]]
 name = "quorumarc-core"
 version = "0.1.0"
+
+[[package]]
+name = "quorumarc-lab"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "quorumarc-core",
+ "quorumarc-runtime",
+ "quorumarc-store",
+ "quorumarc-wire",
+]
 
 [[package]]
 name = "quorumarc-rpo0"
@@ -221,6 +233,11 @@ dependencies = [
 [[package]]
 name = "quorumarc-witness"
 version = "0.1.0"
+dependencies = [
+ "quorumarc-runtime",
+ "quorumarc-store",
+ "quorumarc-wire",
+]
 
 [[package]]
 name = "quote"

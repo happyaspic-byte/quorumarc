@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_store::{AuthorityState, DurableAuthorityStore, FileBackend, StoreError, StorePaths};
 use quorumarc_wire::{
-    CanonicalId, SignedPromotionEnvelope, VerificationKeyResolver, VerifyingKey,
-    MAX_SIGNED_ENVELOPE_SIZE,
+    CanonicalId, MAX_SIGNED_ENVELOPE_SIZE, SignedPromotionEnvelope, VerificationKeyResolver,
+    VerifyingKey,
 };
 
 const EXIT_NOT_READY: u8 = 1;
@@ -237,7 +237,12 @@ where
     let command = match parse_command(&arguments) {
         Ok(command) => command,
         Err(failure) => {
-            return CliReport::refusal("command", failure.reason, failure.detail, failure.exit_code);
+            return CliReport::refusal(
+                "command",
+                failure.reason,
+                failure.detail,
+                failure.exit_code,
+            );
         }
     };
     match command {
@@ -268,7 +273,11 @@ fn parse_command(arguments: &[OsString]) -> Result<Command, Failure> {
         "inspect-proof" => parse_proof_options(options).map(Command::InspectProof),
         "inspect-store" => {
             let store = parse_single_path_option(options, "--store")?.ok_or_else(|| {
-                Failure::new("STORE_REQUIRED", "inspect-store requires --store", EXIT_MISSING)
+                Failure::new(
+                    "STORE_REQUIRED",
+                    "inspect-store requires --store",
+                    EXIT_MISSING,
+                )
             })?;
             Ok(Command::InspectStore { store })
         }
@@ -454,11 +463,7 @@ fn nonempty_path(argument: &OsStr, option: &str) -> Result<PathBuf, Failure> {
     Ok(PathBuf::from(argument))
 }
 
-fn set_path_once(
-    target: &mut Option<PathBuf>,
-    value: &OsStr,
-    option: &str,
-) -> Result<(), Failure> {
+fn set_path_once(target: &mut Option<PathBuf>, value: &OsStr, option: &str) -> Result<(), Failure> {
     if target.is_some() {
         return Err(Failure::new(
             "DUPLICATE_OPTION",
@@ -472,11 +477,7 @@ fn set_path_once(
 
 fn status(config_path: Option<&Path>) -> CliReport {
     let Some(path) = config_path else {
-        let fields = safe_state_fields(
-            "status",
-            "safe-default",
-            "CONFIG_MISSING_SAFE_DEFAULT",
-        );
+        let fields = safe_state_fields("status", "safe-default", "CONFIG_MISSING_SAFE_DEFAULT");
         return CliReport::output(json_record(&fields));
     };
     match load_config(path) {
@@ -583,12 +584,7 @@ fn run(options: RunOptions) -> CliReport {
     let config = match load_config(config_path) {
         Ok(config) => config,
         Err(failure) => {
-            return CliReport::refusal(
-                "run",
-                failure.reason,
-                failure.detail,
-                failure.exit_code,
-            );
+            return CliReport::refusal("run", failure.reason, failure.detail, failure.exit_code);
         }
     };
     if config.role != NodeRole::Data {
@@ -602,12 +598,7 @@ fn run(options: RunOptions) -> CliReport {
     let summary = match inspect_material_consistency(&config) {
         Ok(summary) => summary,
         Err(failure) => {
-            return CliReport::refusal(
-                "run",
-                failure.reason,
-                failure.detail,
-                failure.exit_code,
-            );
+            return CliReport::refusal("run", failure.reason, failure.detail, failure.exit_code);
         }
     };
     let promotion_mode = if config.automatic_promotion {
@@ -788,14 +779,20 @@ struct RecoveredAuthority {
 }
 
 fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary, Failure> {
-    let store_path = config
-        .store_dir
-        .as_deref()
-        .ok_or_else(|| Failure::new("STORE_REQUIRED", "no durable store is configured", EXIT_CONFIG))?;
-    let proof_path = config
-        .proof_path
-        .as_deref()
-        .ok_or_else(|| Failure::new("PROOF_REQUIRED", "no promotion proof is configured", EXIT_CONFIG))?;
+    let store_path = config.store_dir.as_deref().ok_or_else(|| {
+        Failure::new(
+            "STORE_REQUIRED",
+            "no durable store is configured",
+            EXIT_CONFIG,
+        )
+    })?;
+    let proof_path = config.proof_path.as_deref().ok_or_else(|| {
+        Failure::new(
+            "PROOF_REQUIRED",
+            "no promotion proof is configured",
+            EXIT_CONFIG,
+        )
+    })?;
     let recovered = recover_store_snapshot(store_path)?;
     let signed = read_signed_proof(proof_path)?;
     if config.keys.is_empty() {
@@ -808,9 +805,9 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
     let resolver = KeyResolver {
         entries: config.keys.clone(),
     };
-    signed.verify(&resolver).map_err(|error| {
-        Failure::new("PROOF_SIGNATURE_INVALID", error.to_string(), EXIT_DATA)
-    })?;
+    signed
+        .verify(&resolver)
+        .map_err(|error| Failure::new("PROOF_SIGNATURE_INVALID", error.to_string(), EXIT_DATA))?;
     let envelope = signed.envelope();
     if envelope.candidate_node_id != config.node_id {
         return Err(Failure::new(
@@ -848,9 +845,7 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
             EXIT_DATA,
         )
     })?;
-    if vote.epoch() != envelope.epoch
-        || vote.candidate() != envelope.candidate_node_id.as_str()
-    {
+    if vote.epoch() != envelope.epoch || vote.candidate() != envelope.candidate_node_id.as_str() {
         return Err(Failure::new(
             "DURABLE_VOTE_MISMATCH",
             "durable vote epoch or candidate does not match the proof",
@@ -885,13 +880,9 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
             EXIT_DATA,
         ));
     }
-    let final_digest = signed.digest().map_err(|error| {
-        Failure::new(
-            "PROOF_DIGEST_FAILED",
-            error.to_string(),
-            EXIT_DATA,
-        )
-    })?;
+    let final_digest = signed
+        .digest()
+        .map_err(|error| Failure::new("PROOF_DIGEST_FAILED", error.to_string(), EXIT_DATA))?;
     Err(unsupported_digest_binding(
         vote.proposal_digest(),
         promotion.digest(),
@@ -920,11 +911,7 @@ fn unsupported_digest_binding(
 
 fn recover_store_snapshot(path: &Path) -> Result<RecoveredAuthority, Failure> {
     let source = StorePaths::new(path);
-    let bytes = read_bounded(
-        source.committed(),
-        MAX_STORE_SNAPSHOT_SIZE,
-        "STORE",
-    )?;
+    let bytes = read_bounded(source.committed(), MAX_STORE_SNAPSHOT_SIZE, "STORE")?;
     let snapshot_directory = create_snapshot_directory()?;
     let snapshot_paths = StorePaths::new(&snapshot_directory);
     if let Err(error) = fs::write(snapshot_paths.committed(), bytes) {
@@ -977,10 +964,7 @@ fn create_snapshot_directory() -> Result<PathBuf, Failure> {
     ))
 }
 
-fn cleanup_after_snapshot_error<T>(
-    directory: &Path,
-    failure: Failure,
-) -> Result<T, Failure> {
+fn cleanup_after_snapshot_error<T>(directory: &Path, failure: Failure) -> Result<T, Failure> {
     match fs::remove_dir_all(directory) {
         Ok(()) => Err(failure),
         Err(error) => Err(Failure::new(
@@ -1002,9 +986,8 @@ fn map_store_error(error: StoreError) -> Failure {
 
 fn read_signed_proof(path: &Path) -> Result<SignedPromotionEnvelope, Failure> {
     let bytes = read_bounded(path, MAX_SIGNED_ENVELOPE_SIZE, "PROOF")?;
-    SignedPromotionEnvelope::from_canonical_bytes(&bytes).map_err(|error| {
-        Failure::new("PROOF_MALFORMED", error.to_string(), EXIT_DATA)
-    })
+    SignedPromotionEnvelope::from_canonical_bytes(&bytes)
+        .map_err(|error| Failure::new("PROOF_MALFORMED", error.to_string(), EXIT_DATA))
 }
 
 fn load_config(path: &Path) -> Result<AgentConfig, Failure> {
@@ -1037,9 +1020,9 @@ fn read_bounded(path: &Path, maximum: usize, prefix: &'static str) -> Result<Vec
         };
         Failure::new(reason, error.to_string(), exit_code)
     })?;
-    let metadata = file.metadata().map_err(|error| {
-        Failure::new("INPUT_METADATA_FAILED", error.to_string(), EXIT_IO)
-    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| Failure::new("INPUT_METADATA_FAILED", error.to_string(), EXIT_IO))?;
     if !metadata.is_file() {
         return Err(Failure::new(
             "INPUT_INVALID_TYPE",
@@ -1101,9 +1084,9 @@ fn parse_config_text(text: &str, base: &Path) -> Result<AgentConfig, Failure> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (name, raw_value) = line.split_once('=').ok_or_else(|| {
-            config_error(line_number, "expected name = value")
-        })?;
+        let (name, raw_value) = line
+            .split_once('=')
+            .ok_or_else(|| config_error(line_number, "expected name = value"))?;
         let name = name.trim();
         let raw_value = raw_value.trim();
         match name {
@@ -1123,9 +1106,8 @@ fn parse_config_text(text: &str, base: &Path) -> Result<AgentConfig, Failure> {
             }
             "role" => {
                 let value = parse_quoted(raw_value, line_number)?;
-                let parsed = NodeRole::parse(&value).ok_or_else(|| {
-                    config_error(line_number, "role must be data or witness")
-                })?;
+                let parsed = NodeRole::parse(&value)
+                    .ok_or_else(|| config_error(line_number, "role must be data or witness"))?;
                 set_once(&mut role, parsed, line_number, name)?;
             }
             "store_dir" => {
@@ -1140,10 +1122,7 @@ fn parse_config_text(text: &str, base: &Path) -> Result<AgentConfig, Failure> {
             }
             "automatic_promotion" => {
                 if saw_automatic_promotion {
-                    return Err(config_error(
-                        line_number,
-                        "duplicate automatic_promotion",
-                    ));
+                    return Err(config_error(line_number, "duplicate automatic_promotion"));
                 }
                 automatic_promotion = match raw_value {
                     "true" => true,
@@ -1185,7 +1164,10 @@ fn parse_config_text(text: &str, base: &Path) -> Result<AgentConfig, Failure> {
 }
 
 fn parse_quoted(raw: &str, line: usize) -> Result<String, Failure> {
-    let Some(inner) = raw.strip_prefix('"').and_then(|value| value.strip_suffix('"')) else {
+    let Some(inner) = raw
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
         return Err(config_error(line, "string values must use double quotes"));
     };
     if inner.is_empty() {
@@ -1217,12 +1199,7 @@ fn resolve_config_path(
     }
 }
 
-fn set_once<T>(
-    target: &mut Option<T>,
-    value: T,
-    line: usize,
-    name: &str,
-) -> Result<(), Failure> {
+fn set_once<T>(target: &mut Option<T>, value: T, line: usize, name: &str) -> Result<(), Failure> {
     if target.is_some() {
         return Err(config_error(line, format!("duplicate {name}")));
     }
@@ -1295,9 +1272,10 @@ fn parse_key_spec(value: &str) -> Result<KeyEntry, Failure> {
 }
 
 fn push_unique_key(entries: &mut Vec<KeyEntry>, entry: KeyEntry) -> Result<(), Failure> {
-    if entries.iter().any(|existing| {
-        existing.principal == entry.principal && existing.key_id == entry.key_id
-    }) {
+    if entries
+        .iter()
+        .any(|existing| existing.principal == entry.principal && existing.key_id == entry.key_id)
+    {
         return Err(Failure::new(
             "DUPLICATE_VERIFICATION_KEY",
             format!(

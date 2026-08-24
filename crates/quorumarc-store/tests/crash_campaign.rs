@@ -200,7 +200,10 @@ fn acknowledged_generations_recover_exactly_across_fixed_seed_campaign() -> Test
 
             let activation_retry = store.record_activation(activation)?;
             assert_eq!(activation_retry.generation(), expected_generation);
-            assert_eq!(activation_retry.outcome(), TransitionOutcome::AlreadyDurable);
+            assert_eq!(
+                activation_retry.outcome(),
+                TransitionOutcome::AlreadyDurable
+            );
         }
     }
     Ok(())
@@ -292,8 +295,7 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             )?;
 
             let (before_generation, before_state) = {
-                let mut bootstrap =
-                    DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+                let mut bootstrap = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
                 bootstrap.allocate_incarnation(incarnation)?;
                 bootstrap.record_vote(VoteRecord::new(epoch, "node-a", digest)?)?;
                 bootstrap.record_promotion(PromotionRecord::new(
@@ -333,10 +335,7 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             let mut recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
             if fault_case.rename_was_visible {
                 assert_eq!(recovered.generation(), before_generation + 1);
-                assert_eq!(
-                    recovered.state().activation_receipt(),
-                    Some(&activation)
-                );
+                assert_eq!(recovered.state().activation_receipt(), Some(&activation));
             } else {
                 assert_eq!(recovered.generation(), before_generation);
                 assert_eq!(recovered.state(), &before_state);
@@ -354,11 +353,8 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             let final_state = recovered.state().clone();
             drop(recovered);
 
-            let mut recovered = recover_exact(
-                directory.path(),
-                before_generation + 1,
-                &final_state,
-            )?;
+            let mut recovered =
+                recover_exact(directory.path(), before_generation + 1, &final_state)?;
             let exact_vote = VoteRecord::new(epoch, "node-a", digest)?;
             let vote_retry = recovered.record_vote(exact_vote)?;
             assert_eq!(vote_retry.outcome(), TransitionOutcome::AlreadyDurable);
