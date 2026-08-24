@@ -16,11 +16,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@85c23e28f7ccc75a9a153d45d385d94a85464876 # 1.85.1
         with:
           components: rustfmt, clippy
-      # Temporary for the first isolated lab resolution. The resulting lock
-      # and rustfmt output are committed, then these bootstrap steps are removed.
-      - name: Resolve process-lab bootstrap lock
+      # Temporary: capture rustfmt and lockfile output for the last isolated
+      # scenario additions. The following commit removes these bootstrap steps.
+      - name: Resolve final Gate 1A bootstrap lock
         run: cargo generate-lockfile
-      - name: Normalize process-lab bootstrap sources
+      - name: Normalize final Gate 1A bootstrap sources
         run: cargo fmt --all
       - name: Formatting
         run: cargo fmt --all -- --check
@@ -30,16 +30,17 @@ jobs:
         run: cargo test --locked --workspace --all-targets
       - name: Gate 0 deterministic model
         run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
-      - name: Capture Gate 1A service bootstrap inputs
+      - name: Capture final Gate 1A bootstrap inputs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: gate1a-service-bootstrap
+          name: gate1a-final-bootstrap
           path: |
             Cargo.lock
             apps/quorumarc-agent
             apps/quorumarc-witness
             crates/quorumarc-lab
+            crates/quorumarc-store
           retention-days: 1
 
   supply-chain:

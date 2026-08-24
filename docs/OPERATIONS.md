@@ -55,7 +55,9 @@ The exact field rules are:
 - `verification_key` may be repeated. Each double-quoted value has the exact
   form `principal:key-id:64-hex-public-key`; the first two parts must be
   canonical IDs and the final part must decode to a valid 32-byte Ed25519 public
-  key. These are verification keys only, not private signing keys.
+  key. Each `(principal, key-id)` pair must be unique; even an exact duplicate is
+  rejected so file order can never choose a trust anchor. These are verification
+  keys only, not private signing keys.
 
 Blank lines and whole-line comments whose first non-space character is `#` are
 accepted. Other fields, duplicate singleton fields, tables, arrays, escapes,

@@ -15,5 +15,8 @@ quorumarc-runtime = { path = "../quorumarc-runtime", version = "=0.1.0" }
 quorumarc-store = { path = "../quorumarc-store", version = "=0.1.0" }
 quorumarc-wire = { path = "../quorumarc-wire", version = "=0.1.0" }
 
+[dev-dependencies]
+quorumarc-core = { path = "../quorumarc-core", version = "=0.1.0" }
+
 [lints]
 workspace = true
