@@ -7,7 +7,7 @@ use quorumarc_store::{
     DurableAuthorityStore, StorageBackend, StoreError, TransitionOutcome, VoteRecord,
 };
 use quorumarc_wire::{
-    CanonicalId, EnvelopeError, QuorumBinding, SignedVote, SigningKey, PROTOCOL_VERSION,
+    CanonicalId, EnvelopeError, PROTOCOL_VERSION, QuorumBinding, SignedVote, SigningKey,
 };
 use sha2::{Digest, Sha256};
 
@@ -286,14 +286,11 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
             return VoteReply::refused(VoteReasonCode::RefusedLeaseTooLong);
         }
 
-        let proposal_digest = match binding_digest(
-            binding,
-            &self.policy.witness_id,
-            &self.policy.key_id,
-        ) {
-            Ok(digest) => digest,
-            Err(_) => return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding),
-        };
+        let proposal_digest =
+            match binding_digest(binding, &self.policy.witness_id, &self.policy.key_id) {
+                Ok(digest) => digest,
+                Err(_) => return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding),
+            };
         let record = match VoteRecord::new(
             binding.epoch,
             binding.candidate_node_id.as_str(),
@@ -378,8 +375,8 @@ fn binding_digest(
 }
 
 fn hash_id(hasher: &mut Sha256, identifier: &CanonicalId) -> Result<(), EnvelopeError> {
-    let length = u16::try_from(identifier.as_str().len())
-        .map_err(|_| EnvelopeError::IdentifierTooLong)?;
+    let length =
+        u16::try_from(identifier.as_str().len()).map_err(|_| EnvelopeError::IdentifierTooLong)?;
     hasher.update(length.to_be_bytes());
     hasher.update(identifier.as_str().as_bytes());
     Ok(())

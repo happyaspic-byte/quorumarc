@@ -3,15 +3,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use quorumarc_runtime::{
-    VoteReasonCode, WitnessOpenReasonCode, WitnessPolicy, WitnessVoteActor,
-};
-use quorumarc_store::{
-    FaultInjectingBackend, FaultMode, FaultOperation, FaultRule, FileBackend,
-};
-use quorumarc_wire::{
-    CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SigningKey,
-};
+use quorumarc_runtime::{VoteReasonCode, WitnessOpenReasonCode, WitnessPolicy, WitnessVoteActor};
+use quorumarc_store::{FaultInjectingBackend, FaultMode, FaultOperation, FaultRule, FileBackend};
+use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SigningKey};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -315,6 +309,10 @@ fn reason_codes_have_stable_distinct_spellings() {
     ];
     for (index, code) in codes.iter().enumerate() {
         assert!(code.as_str().starts_with("VOTE_"));
-        assert!(codes[index + 1..].iter().all(|other| other.as_str() != code.as_str()));
+        assert!(
+            codes[index + 1..]
+                .iter()
+                .all(|other| other.as_str() != code.as_str())
+        );
     }
 }

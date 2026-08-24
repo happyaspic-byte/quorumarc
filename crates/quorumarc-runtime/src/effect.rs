@@ -219,10 +219,7 @@ impl<C: TrustedClock> TestEffectActor<C> {
     }
 
     /// Confirms the exact anti-replay record after external durability.
-    pub fn confirm_persisted(
-        &mut self,
-        record: &GatePersistenceRecord,
-    ) -> Result<(), GateError> {
+    pub fn confirm_persisted(&mut self, record: &GatePersistenceRecord) -> Result<(), GateError> {
         self.gate.confirm_persisted(record)
     }
 

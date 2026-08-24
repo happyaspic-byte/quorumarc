@@ -14,12 +14,10 @@ mod frame;
 mod witness;
 
 pub use effect::{
-    EffectEmitError, EffectOutcome, EffectReasonCode, TestEffectActor, TestEffectRecord,
-    MAX_TEST_EFFECT_SIZE,
+    EffectEmitError, EffectOutcome, EffectReasonCode, MAX_TEST_EFFECT_SIZE, TestEffectActor,
+    TestEffectRecord,
 };
-pub use frame::{
-    FrameCodec, FrameConfigError, FrameError, FrameReasonCode, HARD_MAX_FRAME_SIZE,
-};
+pub use frame::{FrameCodec, FrameConfigError, FrameError, FrameReasonCode, HARD_MAX_FRAME_SIZE};
 pub use witness::{
     VoteReasonCode, VoteReply, WitnessOpenError, WitnessOpenReasonCode, WitnessPolicy,
     WitnessPolicyError, WitnessVoteActor,

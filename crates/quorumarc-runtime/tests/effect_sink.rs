@@ -8,9 +8,7 @@ use quorumarc_core::{
     PromotionProof, QuorumCertificate, SafetyPolicy, SelfFenceReason, StateEvidence, StateRoot,
     TrustedClock, ValidatedPromotion, WorkloadId, validate_promotion,
 };
-use quorumarc_runtime::{
-    EffectEmitError, EffectOutcome, EffectReasonCode, TestEffectActor,
-};
+use quorumarc_runtime::{EffectEmitError, EffectOutcome, EffectReasonCode, TestEffectActor};
 
 const NOW: u64 = 20_000;
 
@@ -147,7 +145,10 @@ fn activate(actor: &mut TestEffectActor<ManualClock>) {
 fn sink_cannot_emit_before_core_gate_activation() {
     let (mut actor, _) = actor();
     let result = actor.emit([1; 16], node("node-a"), Epoch(1), b"write");
-    assert_eq!(result, Err(EffectEmitError::Gate(quorumarc_core::GateError::GateClosed)));
+    assert_eq!(
+        result,
+        Err(EffectEmitError::Gate(quorumarc_core::GateError::GateClosed))
+    );
     assert_eq!(actor.records().len(), 0);
 }
 
@@ -170,7 +171,11 @@ fn live_gate_records_once_and_rechecks_exact_retry() {
 fn operation_id_reuse_with_changed_effect_self_fences() {
     let (mut actor, _) = actor();
     activate(&mut actor);
-    assert!(actor.emit([2; 16], node("node-a"), Epoch(1), b"first").is_ok());
+    assert!(
+        actor
+            .emit([2; 16], node("node-a"), Epoch(1), b"first")
+            .is_ok()
+    );
     let result = actor.emit([2; 16], node("node-a"), Epoch(1), b"changed");
     assert_eq!(result, Err(EffectEmitError::OperationIdConflict));
     assert_eq!(
@@ -190,12 +195,18 @@ fn operation_id_reuse_with_changed_effect_self_fences() {
 fn exact_retry_after_lease_expiry_is_refused_and_self_fenced() {
     let (mut actor, clock) = actor();
     activate(&mut actor);
-    assert!(actor.emit([3; 16], node("node-a"), Epoch(1), b"once").is_ok());
+    assert!(
+        actor
+            .emit([3; 16], node("node-a"), Epoch(1), b"once")
+            .is_ok()
+    );
     clock.set(NOW + 100);
     let result = actor.emit([3; 16], node("node-a"), Epoch(1), b"once");
     assert_eq!(
         result,
-        Err(EffectEmitError::Gate(quorumarc_core::GateError::LeaseExpired))
+        Err(EffectEmitError::Gate(
+            quorumarc_core::GateError::LeaseExpired
+        ))
     );
     assert_eq!(actor.records().len(), 1);
 }

@@ -4,6 +4,7 @@ members = [
     "apps/quorumarc-agent",
     "apps/quorumarc-witness",
     "crates/quorumarc-core",
+    "crates/quorumarc-rpo0",
     "crates/quorumarc-sim",
     "crates/quorumarc-runtime",
     "crates/quorumarc-store",

@@ -1,8 +1,6 @@
 use std::io::{self, Cursor, Read};
 
-use quorumarc_runtime::{
-    FrameCodec, FrameError, FrameReasonCode, HARD_MAX_FRAME_SIZE,
-};
+use quorumarc_runtime::{FrameCodec, FrameError, FrameReasonCode, HARD_MAX_FRAME_SIZE};
 
 fn value_or_abort<T, E>(result: Result<T, E>) -> T {
     let Ok(value) = result else {

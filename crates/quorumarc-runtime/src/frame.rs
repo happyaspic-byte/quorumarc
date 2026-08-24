@@ -226,7 +226,10 @@ impl Display for FrameError {
         match self {
             Self::TruncatedHeader => formatter.write_str("frame header was truncated"),
             Self::TruncatedPayload { declared } => {
-                write!(formatter, "frame payload was shorter than declared length {declared}")
+                write!(
+                    formatter,
+                    "frame payload was shorter than declared length {declared}"
+                )
             }
             Self::EmptyFrame => formatter.write_str("empty frames are refused"),
             Self::FrameTooLarge { declared, maximum } => write!(
