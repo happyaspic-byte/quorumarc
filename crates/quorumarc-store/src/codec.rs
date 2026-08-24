@@ -133,9 +133,8 @@ pub(crate) fn encode(state: &AuthorityState, generation: u64) -> Vec<u8> {
     // Canonical identifiers are capped at 128 bytes, so the complete payload
     // is far below `u32::MAX` by construction.
     let payload_length = payload.len() as u32;
-    let mut frame = Vec::with_capacity(
-        HEADER_LENGTH + payload.len() + CHECKSUM_LENGTH + TRAILER.len(),
-    );
+    let mut frame =
+        Vec::with_capacity(HEADER_LENGTH + payload.len() + CHECKSUM_LENGTH + TRAILER.len());
     frame.extend_from_slice(MAGIC);
     push_u16(&mut frame, FORMAT_VERSION);
     push_u16(&mut frame, 0);
@@ -171,8 +170,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(AuthorityState, u64), Corruption> 
     if generation == 0 {
         return Err(Corruption::InvalidGeneration);
     }
-    let payload_length = usize::try_from(header.read_u32()?)
-        .map_err(|_| Corruption::LengthMismatch)?;
+    let payload_length =
+        usize::try_from(header.read_u32()?).map_err(|_| Corruption::LengthMismatch)?;
     let expected_length = HEADER_LENGTH
         .checked_add(payload_length)
         .and_then(|length| length.checked_add(CHECKSUM_LENGTH))
@@ -361,9 +360,7 @@ impl<'a> Reader<'a> {
     }
 
     fn read_array_32(&mut self) -> Result<[u8; 32], Corruption> {
-        self.take(32)?
-            .try_into()
-            .map_err(|_| Corruption::Truncated)
+        self.take(32)?.try_into().map_err(|_| Corruption::Truncated)
     }
 
     fn read_identifier(&mut self) -> Result<String, Corruption> {

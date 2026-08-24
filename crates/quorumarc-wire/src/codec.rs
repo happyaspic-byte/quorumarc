@@ -1,9 +1,9 @@
+use crate::EnvelopeError;
 use crate::crypto::SignedPromotionEnvelope;
 use crate::model::{
     CanonicalId, FenceMechanism, FenceReceipt, HealthAttestation, LeaseGrant, MessageId,
-    PromotionEnvelope, QuorumBinding, QuorumCertificate, SignedVote, PROTOCOL_VERSION,
+    PROTOCOL_VERSION, PromotionEnvelope, QuorumBinding, QuorumCertificate, SignedVote,
 };
-use crate::EnvelopeError;
 
 const ENVELOPE_MAGIC: &[u8; 8] = b"QARCENV\0";
 const SIGNED_MAGIC: &[u8; 8] = b"QARCSIG\0";
@@ -179,8 +179,8 @@ fn encode_certificate(
     certificate.validate()?;
     encode_binding(writer, &certificate.binding)?;
     writer.put_u16(certificate.threshold);
-    let count = u16::try_from(certificate.votes().len())
-        .map_err(|_| EnvelopeError::LengthOverflow)?;
+    let count =
+        u16::try_from(certificate.votes().len()).map_err(|_| EnvelopeError::LengthOverflow)?;
     writer.put_u16(count);
     for vote in certificate.votes() {
         writer.put_id(vote.voter_id())?;
@@ -208,10 +208,7 @@ fn decode_certificate(reader: &mut Reader<'_>) -> Result<QuorumCertificate, Enve
     QuorumCertificate::new(binding, threshold, votes)
 }
 
-fn encode_binding(
-    writer: &mut Writer,
-    binding: &QuorumBinding,
-) -> Result<(), EnvelopeError> {
+fn encode_binding(writer: &mut Writer, binding: &QuorumBinding) -> Result<(), EnvelopeError> {
     binding.validate()?;
     writer.put_u16(binding.protocol_version);
     writer.put_bytes(binding.message_id.as_bytes());
@@ -247,10 +244,7 @@ fn decode_binding(reader: &mut Reader<'_>) -> Result<QuorumBinding, EnvelopeErro
     Ok(binding)
 }
 
-fn encode_fence_receipt(
-    writer: &mut Writer,
-    receipt: &FenceReceipt,
-) -> Result<(), EnvelopeError> {
+fn encode_fence_receipt(writer: &mut Writer, receipt: &FenceReceipt) -> Result<(), EnvelopeError> {
     receipt.validate_structure()?;
     writer.put_option_id(receipt.target())?;
     writer.put_id(receipt.verifier_id())?;
@@ -357,8 +351,8 @@ impl Writer {
     }
 
     fn put_id(&mut self, value: &CanonicalId) -> Result<(), EnvelopeError> {
-        let length = u16::try_from(value.as_str().len())
-            .map_err(|_| EnvelopeError::LengthOverflow)?;
+        let length =
+            u16::try_from(value.as_str().len()).map_err(|_| EnvelopeError::LengthOverflow)?;
         self.put_u16(length);
         self.put_bytes(value.as_str().as_bytes());
         Ok(())
@@ -436,8 +430,8 @@ impl<'a> Reader<'a> {
 
     fn read_id(&mut self) -> Result<CanonicalId, EnvelopeError> {
         let length = usize::from(self.read_u16()?);
-        let text = std::str::from_utf8(self.take(length)?)
-            .map_err(|_| EnvelopeError::InvalidUtf8)?;
+        let text =
+            std::str::from_utf8(self.take(length)?).map_err(|_| EnvelopeError::InvalidUtf8)?;
         CanonicalId::new(text)
     }
 

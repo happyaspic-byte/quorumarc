@@ -170,10 +170,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
 
     /// Persists a vote before it is emitted. An exact retry is idempotent;
     /// another vote in the same epoch is rejected as a double vote.
-    pub fn record_vote(
-        &mut self,
-        vote: VoteRecord,
-    ) -> Result<DurabilityReceipt, StoreError> {
+    pub fn record_vote(&mut self, vote: VoteRecord) -> Result<DurabilityReceipt, StoreError> {
         self.ensure_writable()?;
         if vote.epoch() < self.state.highest_epoch {
             return Err(StoreError::StaleEpoch {
@@ -186,11 +183,15 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
                 if existing == &vote {
                     return Ok(self.already_durable());
                 }
-                return Err(StoreError::DoubleVote { epoch: vote.epoch() });
+                return Err(StoreError::DoubleVote {
+                    epoch: vote.epoch(),
+                });
             }
         }
         if vote.epoch() == self.state.highest_epoch {
-            return Err(StoreError::EpochAlreadyAccepted { epoch: vote.epoch() });
+            return Err(StoreError::EpochAlreadyAccepted {
+                epoch: vote.epoch(),
+            });
         }
 
         let mut next = self.state.clone();
@@ -347,10 +348,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
             .ok_or(StoreError::GenerationExhausted)?;
         let bytes = encode(&next, generation);
 
-        if let Err(error) = self
-            .backend
-            .remove_file_if_exists(self.paths.temporary())
-        {
+        if let Err(error) = self.backend.remove_file_if_exists(self.paths.temporary()) {
             return self.fail("prepare authority staging file", error);
         }
         if let Err(error) = self.backend.write_file(self.paths.temporary(), &bytes) {
@@ -389,9 +387,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
         operation: &'static str,
         error: io::Error,
     ) -> Result<T, StoreError> {
-        let _cleanup_result = self
-            .backend
-            .remove_file_if_exists(self.paths.temporary());
+        let _cleanup_result = self.backend.remove_file_if_exists(self.paths.temporary());
         self.fail(operation, error)
     }
 }
@@ -504,14 +500,20 @@ impl Display for StoreError {
                 "epoch {requested} is stale; highest durable epoch is {durable}"
             ),
             Self::DoubleVote { epoch } => {
-                write!(formatter, "a different durable vote already exists at epoch {epoch}")
+                write!(
+                    formatter,
+                    "a different durable vote already exists at epoch {epoch}"
+                )
             }
             Self::EpochAlreadyAccepted { epoch } => write!(
                 formatter,
                 "epoch {epoch} was already accepted and cannot be voted retroactively"
             ),
             Self::MissingVote { epoch } => {
-                write!(formatter, "no matching durable vote exists for epoch {epoch}")
+                write!(
+                    formatter,
+                    "no matching durable vote exists for epoch {epoch}"
+                )
             }
             Self::VoteDigestMismatch { epoch } => write!(
                 formatter,

@@ -85,9 +85,7 @@ impl Display for EnvelopeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyIdentifier => formatter.write_str("identifier is empty"),
-            Self::IdentifierTooLong => {
-                formatter.write_str("identifier is longer than 128 bytes")
-            }
+            Self::IdentifierTooLong => formatter.write_str("identifier is longer than 128 bytes"),
             Self::InvalidIdentifierCharacter => {
                 formatter.write_str("identifier contains a non-canonical character")
             }

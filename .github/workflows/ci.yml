@@ -20,6 +20,10 @@ jobs:
       # The generated lockfile is committed and this step removed before merge.
       - name: Resolve Gate 1A dependency lock
         run: cargo generate-lockfile
+      # Temporary bootstrap step. The resulting formatted sources and lockfile
+      # are captured below, committed, and this step is removed before PR.
+      - name: Normalize Gate 1A sources in ephemeral checkout
+        run: cargo fmt --all
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Lints
@@ -28,3 +32,14 @@ jobs:
         run: cargo test --locked --workspace --all-targets
       - name: Gate 0 deterministic model
         run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
+      - name: Capture Gate 1A bootstrap inputs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: gate1a-bootstrap-inputs
+          path: |
+            Cargo.lock
+            crates/quorumarc-store
+            crates/quorumarc-wire
+            crates/quorumarc-runtime
+          retention-days: 1

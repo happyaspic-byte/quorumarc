@@ -23,8 +23,8 @@ pub use crypto::{SignedPromotionEnvelope, VerificationKeyResolver};
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 pub use error::EnvelopeError;
 pub use model::{
-    CanonicalId, FenceMechanism, FenceReceipt, HealthAttestation, LeaseGrant, MAX_VOTES,
-    MessageId, PROTOCOL_VERSION, PromotionEnvelope, QuorumBinding, QuorumCertificate, SignedVote,
+    CanonicalId, FenceMechanism, FenceReceipt, HealthAttestation, LeaseGrant, MAX_VOTES, MessageId,
+    PROTOCOL_VERSION, PromotionEnvelope, QuorumBinding, QuorumCertificate, SignedVote,
 };
 
 #[cfg(test)]
@@ -49,11 +49,7 @@ mod tests {
     }
 
     impl VerificationKeyResolver for TestResolver {
-        fn resolve(
-            &self,
-            principal: &CanonicalId,
-            key_id: &CanonicalId,
-        ) -> Option<VerifyingKey> {
+        fn resolve(&self, principal: &CanonicalId, key_id: &CanonicalId) -> Option<VerifyingKey> {
             if key_id.as_str() != "key-1" {
                 return None;
             }
@@ -339,7 +335,10 @@ mod tests {
         let mut candidate = envelope();
         candidate.durable_commit = candidate.required_commit.saturating_sub(1);
         candidate.quorum_certificate.binding.durable_commit = candidate.durable_commit;
-        assert_eq!(candidate.validate(), Err(EnvelopeError::CandidateStateBehind));
+        assert_eq!(
+            candidate.validate(),
+            Err(EnvelopeError::CandidateStateBehind)
+        );
     }
 
     #[test]

@@ -23,5 +23,5 @@ pub use model::{
     VoteRecord,
 };
 pub use store::{
-    DurableAuthorityStore, DurabilityReceipt, StoreError, StorePaths, TransitionOutcome,
+    DurabilityReceipt, DurableAuthorityStore, StoreError, StorePaths, TransitionOutcome,
 };

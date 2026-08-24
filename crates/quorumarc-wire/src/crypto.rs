@@ -1,13 +1,13 @@
 use ed25519_dalek::{Signature, Signer};
 use sha2::{Digest, Sha256};
 
+use crate::EnvelopeError;
 use crate::codec::{
     encode_fence_statement, encode_outer_signature_statement, encode_vote_statement,
 };
 use crate::model::{
     CanonicalId, FenceMechanism, FenceReceipt, PromotionEnvelope, QuorumBinding, SignedVote,
 };
-use crate::EnvelopeError;
 
 const VOTE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/quorum-vote/ed25519/v1\0";
 const FENCE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/fence-receipt/ed25519/v1\0";
@@ -142,8 +142,7 @@ impl SignedPromotionEnvelope {
         let signer_id = envelope.candidate_node_id.clone();
         let envelope_bytes = envelope.to_canonical_bytes()?;
         let statement = encode_outer_signature_statement(&envelope_bytes, &signer_id, &key_id)?;
-        let signature =
-            signing_key.sign(&domain_preimage(ENVELOPE_SIGNATURE_DOMAIN, &statement));
+        let signature = signing_key.sign(&domain_preimage(ENVELOPE_SIGNATURE_DOMAIN, &statement));
         Ok(Self {
             envelope,
             signer_id,
@@ -209,10 +208,9 @@ impl SignedPromotionEnvelope {
         for vote in self.envelope.quorum_certificate.votes() {
             vote.verify(&self.envelope.quorum_certificate.binding, resolver)?;
         }
-        self.envelope.fence_receipt.verify(
-            &self.envelope.quorum_certificate.binding,
-            resolver,
-        )
+        self.envelope
+            .fence_receipt
+            .verify(&self.envelope.quorum_certificate.binding, resolver)
     }
 
     /// Domain-separated SHA-256 digest used by durable replay and audit stores.

@@ -64,7 +64,11 @@ impl StorageBackend for FileBackend {
     }
 
     fn sync_file(&mut self, path: &Path) -> io::Result<()> {
-        OpenOptions::new().read(true).write(true).open(path)?.sync_all()
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?
+            .sync_all()
     }
 
     fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
@@ -226,9 +230,7 @@ impl<B: StorageBackend> StorageBackend for FaultInjectingBackend<B> {
     fn write_file(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         match self.next_fault(FaultOperation::Write) {
             None => self.inner.write_file(path, bytes),
-            Some(FaultMode::Error(kind)) => {
-                Err(Self::injected_error(FaultOperation::Write, kind))
-            }
+            Some(FaultMode::Error(kind)) => Err(Self::injected_error(FaultOperation::Write, kind)),
             Some(FaultMode::PartialWrite {
                 bytes: prefix_length,
                 error_kind,

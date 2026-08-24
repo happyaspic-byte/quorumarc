@@ -51,10 +51,7 @@ fn sample_vote(
     Ok(VoteRecord::new(epoch, candidate, digest)?)
 }
 
-fn sample_promotion(
-    epoch: u64,
-    digest: [u8; 32],
-) -> Result<PromotionRecord, Box<dyn Error>> {
+fn sample_promotion(epoch: u64, digest: [u8; 32]) -> Result<PromotionRecord, Box<dyn Error>> {
     Ok(PromotionRecord::new(
         epoch,
         digest,
@@ -84,7 +81,10 @@ fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
     assert_eq!(recovered.state().highest_epoch(), 5);
     assert_eq!(recovered.state().incarnation(), 12);
     assert_eq!(recovered.state().commit_index(), 41);
-    assert_eq!(recovered.state().state_root(), Some(StateRoot::new([9; 32])));
+    assert_eq!(
+        recovered.state().state_root(),
+        Some(StateRoot::new([9; 32]))
+    );
     assert_eq!(
         recovered.state().last_vote().map(VoteRecord::candidate),
         Some("node-a")
@@ -121,7 +121,10 @@ fn exact_vote_retry_is_idempotent_but_double_vote_is_rejected() -> Result<(), Bo
         .err()
         .ok_or("double vote unexpectedly succeeded")?;
     assert!(matches!(error, StoreError::DoubleVote { epoch: 8 }));
-    assert_eq!(store.state().last_vote().map(VoteRecord::candidate), Some("node-a"));
+    assert_eq!(
+        store.state().last_vote().map(VoteRecord::candidate),
+        Some("node-a")
+    );
     Ok(())
 }
 
@@ -174,7 +177,9 @@ fn checksum_corruption_fails_closed() -> Result<(), Box<dyn Error>> {
     }
     let mut bytes = fs::read(paths.committed())?;
     let offset = 30;
-    let byte = bytes.get_mut(offset).ok_or("test frame was unexpectedly short")?;
+    let byte = bytes
+        .get_mut(offset)
+        .ok_or("test frame was unexpectedly short")?;
     *byte ^= 0x5a;
     fs::write(paths.committed(), bytes)?;
     let error = DurableAuthorityStore::open(paths, FileBackend)
@@ -283,10 +288,7 @@ fn promotion_requires_matching_durable_vote() -> Result<(), Box<dyn Error>> {
         .record_promotion(sample_promotion(2, [2; 32])?)
         .err()
         .ok_or("mismatched promotion unexpectedly succeeded")?;
-    assert!(matches!(
-        error,
-        StoreError::VoteDigestMismatch { epoch: 2 }
-    ));
+    assert!(matches!(error, StoreError::VoteDigestMismatch { epoch: 2 }));
     assert!(store.state().last_promotion().is_none());
     Ok(())
 }

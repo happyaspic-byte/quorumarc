@@ -102,11 +102,7 @@ impl VoteRecord {
         &self.proposal_digest
     }
 
-    pub(crate) fn from_validated(
-        epoch: u64,
-        candidate: String,
-        proposal_digest: [u8; 32],
-    ) -> Self {
+    pub(crate) fn from_validated(epoch: u64, candidate: String, proposal_digest: [u8; 32]) -> Self {
         Self {
             epoch,
             candidate,

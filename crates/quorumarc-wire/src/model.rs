@@ -476,10 +476,7 @@ pub(crate) fn validate_version(version: u16) -> Result<(), EnvelopeError> {
     Ok(())
 }
 
-pub(crate) fn validate_digest(
-    digest: &[u8; 32],
-    field: &'static str,
-) -> Result<(), EnvelopeError> {
+pub(crate) fn validate_digest(digest: &[u8; 32], field: &'static str) -> Result<(), EnvelopeError> {
     if digest.iter().all(|byte| *byte == 0) {
         return Err(EnvelopeError::ZeroDigest(field));
     }
@@ -493,11 +490,7 @@ fn validate_lease(not_before_ms: u64, expires_at_ms: u64) -> Result<(), Envelope
     Ok(())
 }
 
-fn ensure_equal<T: PartialEq>(
-    left: T,
-    right: T,
-    field: &'static str,
-) -> Result<(), EnvelopeError> {
+fn ensure_equal<T: PartialEq>(left: T, right: T, field: &'static str) -> Result<(), EnvelopeError> {
     if left != right {
         return Err(EnvelopeError::BindingMismatch(field));
     }
