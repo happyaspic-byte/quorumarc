@@ -429,27 +429,17 @@ fn promote(state: &ModelState, candidate: Node) -> Outcome {
     };
 
     let clock = ModelClock(now_ms);
-    let recovery = GateRecoveryState::new(
-        Epoch(candidate_state.accepted_epoch),
-        incarnation,
-        now_ms,
-    );
-    let mut gate = EffectGate::recover(
-        candidate_id.clone(),
-        workload,
-        policy_hash,
-        recovery,
-        clock,
-    );
+    let recovery =
+        GateRecoveryState::new(Epoch(candidate_state.accepted_epoch), incarnation, now_ms);
+    let mut gate =
+        EffectGate::recover(candidate_id.clone(), workload, policy_hash, recovery, clock);
     let record = match gate.stage(authorization) {
         Ok(record) => record,
         Err(_) => return Outcome::Rejected(Rejection::CoreRefused),
     };
     if gate.confirm_persisted(&record).is_err()
         || gate.activate().is_err()
-        || gate
-            .check_effect(&candidate_id, Epoch(new_epoch))
-            .is_err()
+        || gate.check_effect(&candidate_id, Epoch(new_epoch)).is_err()
     {
         return Outcome::Rejected(Rejection::CoreRefused);
     }

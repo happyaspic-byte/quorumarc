@@ -544,7 +544,11 @@ pub fn validate_promotion(
     let quorum = validate_quorum(proof, policy)?;
     let (fence_class, safe_not_before_ms) =
         validate_fence(proof, current, policy, &quorum, now_ms)?;
-    validate_fresh(proof.state.observed_at_ms, now_ms, policy.max_evidence_age_ms)?;
+    validate_fresh(
+        proof.state.observed_at_ms,
+        now_ms,
+        policy.max_evidence_age_ms,
+    )?;
     if proof.state.durable_commit < proof.state.required_commit {
         return Err(ProofError::CandidateStateBehind);
     }
@@ -635,10 +639,9 @@ fn validate_fence(
                 FenceMechanism::HardwarePower => {
                     Ok((FenceClass::HardwarePower, proof.fence.observed_at_ms))
                 }
-                FenceMechanism::StorageReservation => Ok((
-                    FenceClass::StorageReservation,
-                    proof.fence.observed_at_ms,
-                )),
+                FenceMechanism::StorageReservation => {
+                    Ok((FenceClass::StorageReservation, proof.fence.observed_at_ms))
+                }
                 FenceMechanism::EffectGateExpired => {
                     if !policy.allow_gate_expiry_fence {
                         return Err(ProofError::GateExpiryFenceDisabled);

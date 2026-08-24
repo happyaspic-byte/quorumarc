@@ -13,9 +13,9 @@ pub use gate::{
     SelfFenceReason, TrustedClock,
 };
 pub use proof::{
-    AuthorityState, FenceClass, FenceMechanism, FenceReceipt, HealthAttestation,
-    LeaseGrant, PolicyError, PromotionProof, ProofError, QuorumCertificate, SafetyPolicy,
-    StateEvidence, ValidatedPromotion, validate_promotion,
+    AuthorityState, FenceClass, FenceMechanism, FenceReceipt, HealthAttestation, LeaseGrant,
+    PolicyError, PromotionProof, ProofError, QuorumCertificate, SafetyPolicy, StateEvidence,
+    ValidatedPromotion, validate_promotion,
 };
 pub use types::{
     CommitIndex, Epoch, IdError, Incarnation, NodeId, PolicyHash, StateRoot, WorkloadId,

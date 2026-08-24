@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::{
-    CommitIndex, Epoch, FenceClass, Incarnation, NodeId, PolicyHash, StateRoot,
-    ValidatedPromotion, WorkloadId,
+    CommitIndex, Epoch, FenceClass, Incarnation, NodeId, PolicyHash, StateRoot, ValidatedPromotion,
+    WorkloadId,
 };
 
 /// Observable state of one node-local effect gate.
@@ -326,11 +326,7 @@ impl<C: TrustedClock> EffectGate<C> {
     }
 
     /// Authorizes one effect only for the exact live holder and epoch.
-    pub fn check_effect(
-        &mut self,
-        holder: &NodeId,
-        epoch: Epoch,
-    ) -> Result<(), GateError> {
+    pub fn check_effect(&mut self, holder: &NodeId, epoch: Epoch) -> Result<(), GateError> {
         let now_ms = self.observe_time()?;
         let GateState::Open {
             holder: active_holder,
