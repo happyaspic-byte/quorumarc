@@ -4,13 +4,40 @@
 
 The completed baseline is Gate 0. It validates promotion evidence in memory,
 models logical EffectGate transitions, and explores a deliberately compact,
-single-view state space. The agent and witness shells do not perform production
-automatic failover. Gate 1A documents and begins an incremental implementation;
-its features are not complete until successful CI evidence is linked.
+single-view state space. Gate 1A adds tested wire, durable-store,
+witness-runtime, and demonstration RPO-0 components. A GitHub-hosted test also
+runs a Witness child process and exchanges authenticated frames over a real
+localhost TCP connection, including a `SIGKILL` and durable restart case. This
+is a limited process lab, not a complete three-role failover system.
 
-The public repository and green Gate 0 workflow are useful reproducibility
-evidence, but neither is a certification, formal proof, independent audit, or
-production-readiness claim.
+The agent and witness CLIs are intentionally safe-default inspection and refusal
+shells. They report status and health, inspect selected artifacts, and simulate
+bounded failure paths, but they do not perform automatic promotion, open an
+externally effective writer, provide a production voting endpoint, or execute
+physical fencing. Their refusal behavior is part of the present safety boundary,
+not a missing-success test to bypass.
+
+The public repository and green workflows are useful reproducibility evidence,
+but neither is a certification, formal proof, independent audit, or
+production-readiness claim. The full 25-scenario campaign, coverage targets,
+and p50/p95/p99 failover and write-latency measurements have not yet been
+completed.
+
+## Current promotion-integration blocker
+
+The durable vote is made before a quorum certificate can be assembled, so its
+`VoteRecord` binds a pre-certificate `proposal_digest`. The final signed
+promotion-envelope digest includes the certificate produced from those votes.
+Requiring the vote's proposal digest to equal that final digest creates a cycle:
+the final digest depends on vote signatures that would themselves have to sign
+that final digest.
+
+The Witness runtime currently avoids pretending this cycle is solved by using a
+distinct proposal-binding digest. Full promotion persistence and activation stay
+disabled. The protocol and durable schema must first distinguish, bind, and
+persist both the pre-certificate proposal digest and the final certified
+envelope digest, then verify the relationship during replay and crash recovery.
+Until that work is integrated, the safe-default agent refuses `run` activation.
 
 ## Gate 0 limitations
 
@@ -28,9 +55,13 @@ production-readiness claim.
 - Reported state and transition counts apply only to the exact documented depth
   and model revision.
 
-## Planned Gate 1A does not remove every limitation
+## Gate 1A does not remove every limitation
 
 Even after all GitHub-hosted Gate 1A acceptance tests pass, the following remain:
+
+The current branch has not yet reached that condition: automatic promotion,
+physical fencing, all 25 required scenarios, coverage exit thresholds, and
+timing distributions remain incomplete.
 
 ### Shared runner failure domain
 
@@ -132,16 +163,21 @@ Do not describe the current or GitHub-only build as:
 
 ## Path to reducing these limitations
 
-1. Complete and link Gate 1A.0 signed durable-authority smoke evidence.
-2. Complete all three-process scenarios in `FAILURE_MATRIX.md` with replayable
+1. Resolve the proposal/final-digest distinction and complete a restart-safe,
+   signed durable-authority transaction without weakening the CLI refusals.
+2. Integrate identical Node A/B agents, the Witness, RPO-0 commit evidence, and
+   the EffectGate into one automatic-promotion lab path.
+3. Complete all three-process scenarios in `FAILURE_MATRIX.md` with replayable
    traces and green CI.
-3. Run the ordinary Ubuntu desktop A/B plus independent Witness lab in
+4. Measure and publish coverage and latency distributions from linked CI runs;
+   do not estimate missing values or weaken safety conditions to meet targets.
+5. Run the ordinary Ubuntu desktop A/B plus independent Witness lab in
    `LAB_SETUP.md`.
-4. Implement and test at least one real fence and one I/O-bound EffectGate
+6. Implement and test at least one real fence and one I/O-bound EffectGate
    adapter on supported hardware.
-5. Validate a named workload's consistency, recovery, client behavior, upgrade,
+7. Validate a named workload's consistency, recovery, client behavior, upgrade,
    and repair contracts under sustained faults.
-6. Obtain independent distributed-systems and security review before expanding
+8. Obtain independent distributed-systems and security review before expanding
    any product claim.
 
 Limitations are exit criteria, not footnotes. Removing an item requires a linked

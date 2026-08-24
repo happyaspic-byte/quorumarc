@@ -30,13 +30,15 @@ jobs:
         run: cargo test --locked --workspace --all-targets
       - name: Gate 0 deterministic model
         run: cargo run --locked -p quorumarc-sim -- --depth 10 --require-safe
-      - name: Capture process-lab bootstrap inputs
+      - name: Capture Gate 1A service bootstrap inputs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: gate1a-process-lab-bootstrap
+          name: gate1a-service-bootstrap
           path: |
             Cargo.lock
+            apps/quorumarc-agent
+            apps/quorumarc-witness
             crates/quorumarc-lab
           retention-days: 1
 

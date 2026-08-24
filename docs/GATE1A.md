@@ -2,10 +2,12 @@
 
 ## Status and claim boundary
 
-QuorumArc currently starts at **Gate 0**: an in-memory promotion-proof validator,
-a logical fail-closed EffectGate, and a deterministic compact-state simulator.
-Gate 0 does not run an automatic two-node failover service. Nothing in this
-document changes that claim.
+QuorumArc starts from **Gate 0**: an in-memory promotion-proof validator, a
+logical fail-closed EffectGate, and a deterministic compact-state simulator.
+The Gate 1A feature branch now also contains canonical signed-envelope,
+durable-store, witness-runtime, RPO-0 demonstration, and real-process lab
+building blocks. These components do not yet form an automatic two-node
+failover service. Nothing in this document changes that claim.
 
 Gate 1A is an incremental engineering program for exercising the authority path
 with real processes on a GitHub-hosted Ubuntu runner. A substage is complete only
@@ -17,6 +19,29 @@ The GitHub lab is deliberately not called production HA. Its participants share
 one virtual machine, kernel, clock, power source, and underlying storage. It can
 test protocol behavior and crash recovery, but it cannot establish independence
 of physical failure domains or the correctness of real fencing hardware.
+
+### Implemented and verified boundary
+
+- A GitHub-hosted runner has executed a Witness as a child process and exchanged
+  authenticated, bounded protocol frames over a real localhost TCP socket. The
+  lab covers durable retry after `SIGKILL`, same-epoch conflicting-candidate
+  refusal, stale-epoch replay refusal, malformed and oversized frames,
+  unauthenticated requests, and disconnect-before-request. This evidence is in
+  [workflow run 32706670597](https://github.com/happyaspic-byte/quorumarc/actions/runs/32706670597).
+- The `quorumarc-agent` and `quorumarc-witness` command-line programs are
+  safe-default inspection and refusal shells. They can report health/status,
+  inspect snapshots or proofs without becoming an active writer, and exercise
+  selected failure paths. They deliberately refuse activation, automatic
+  promotion, and network voting because the complete authority transaction is
+  not connected.
+- Canonical wire, durable-store, witness-runtime, and demonstration RPO-0
+  modules have focused tests. Their presence does not mean that the complete
+  Node A/Node B/Witness lifecycle or workload failover path has been integrated.
+
+Not yet complete are automatic promotion, a physical fence adapter, the full
+25-scenario failure campaign, coverage exit thresholds, and p50/p95/p99
+failover or write-latency measurements. No production-readiness, zero-downtime,
+or physical-fencing claim follows from the current GitHub evidence.
 
 ## Goal
 
@@ -39,7 +64,9 @@ or unavailable witness must result in a typed refusal and a closed gate.
 
 ### Gate 1A.0 — signed durable-authority smoke
 
-This is the first implementation target, not a completed capability claim.
+The component pieces below are implemented and tested in isolation or in the
+limited Witness process lab. The end-to-end authority transaction is not a
+completed capability claim.
 
 1. Define a length-bounded, deterministic canonical promotion envelope.
 2. Sign a domain-separated digest with a reviewed standard signature library.
@@ -54,8 +81,22 @@ Gate 1A.0 exits only when restart tests show that an acknowledged vote or
 authority record cannot be forgotten, malformed inputs fail closed, and the
 existing Gate 0 invariants remain green.
 
+One integration blocker remains: a durable `VoteRecord` binds a
+`proposal_digest` before the quorum certificate exists, while the final signed
+promotion-envelope digest includes the resulting certificate. Treating those
+two digests as the same value creates a dependency cycle: votes would need to
+sign a final digest that itself depends on those votes. The current Witness
+runtime therefore uses a distinct proposal-binding digest and the agent keeps
+promotion closed. Before activation can be enabled, the wire protocol and
+durable schema must explicitly define and persist both the pre-certificate
+proposal binding and final certified-envelope digest, with verification across
+restart.
+
 ### Gate 1A.1 — three-process control plane
 
+- **Partial only:** the current real-process TCP lab exercises a Witness child
+  process and a client harness; it is not yet a complete Node A/Node B/Witness
+  control plane.
 - Run identical agent binaries for Node A and Node B, plus a Witness that can
   vote but cannot host or activate a workload.
 - Authenticate peers, bound messages, use explicit versions and request IDs,
@@ -66,6 +107,10 @@ existing Gate 0 invariants remain green.
 
 ### Gate 1A.2 — RPO-0 demonstration workload
 
+- **Component implemented, authority integration incomplete:** the WAL-backed
+  demonstration enforces two distinct durable replicas before acknowledgement,
+  but its commit index and state root are not yet carried through an automatic
+  failover transaction.
 - Add a small counter or key/value workload with a checksummed write-ahead log.
 - Acknowledge a write only after both data nodes have made it durable.
 - Bind the committed index and state root into promotion authority.
@@ -78,6 +123,8 @@ database or a claim that arbitrary applications automatically achieve RPO 0.
 
 ### Gate 1A.3 — repeatable safety campaign
 
+- **Not complete:** focused process-lab cases are automated, but the required
+  25-scenario matrix, coverage thresholds, and timing distributions are not.
 - Automate the 25 scenarios in [the failure matrix](FAILURE_MATRIX.md).
 - Retain seeds and traces for failures and upload bounded artifacts from CI.
 - Add malformed-input, crash-recovery, multi-seed, and bounded fuzz campaigns.
