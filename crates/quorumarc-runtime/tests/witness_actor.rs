@@ -1,9 +1,12 @@
+use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use quorumarc_runtime::{VoteReasonCode, WitnessOpenReasonCode, WitnessPolicy, WitnessVoteActor};
+use quorumarc_runtime::{
+    VoteReasonCode, WitnessOpenReasonCode, WitnessPolicy, WitnessPolicyError, WitnessVoteActor,
+};
 use quorumarc_store::{FaultInjectingBackend, FaultMode, FaultOperation, FaultRule, FileBackend};
 use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SigningKey};
 
@@ -319,4 +322,148 @@ fn reason_codes_have_stable_distinct_spellings() {
                 .all(|other| other.as_str() != code.as_str())
         );
     }
+}
+
+#[test]
+fn witness_policy_rejects_ambiguous_or_self_authorizing_configuration() {
+    assert!(matches!(
+        WitnessPolicy::new(
+            id("witness"),
+            id("key-1"),
+            id("orders"),
+            [0; 32],
+            [id("node-a")],
+            100,
+        ),
+        Err(WitnessPolicyError::ZeroPolicyHash)
+    ));
+    assert!(matches!(
+        WitnessPolicy::new(
+            id("witness"),
+            id("key-1"),
+            id("orders"),
+            [5; 32],
+            Vec::<CanonicalId>::new(),
+            100,
+        ),
+        Err(WitnessPolicyError::NoCandidates)
+    ));
+    assert!(matches!(
+        WitnessPolicy::new(
+            id("witness"),
+            id("key-1"),
+            id("orders"),
+            [5; 32],
+            [id("witness")],
+            100,
+        ),
+        Err(WitnessPolicyError::WitnessIsCandidate)
+    ));
+    assert!(matches!(
+        WitnessPolicy::new(
+            id("witness"),
+            id("key-1"),
+            id("orders"),
+            [5; 32],
+            [id("node-a")],
+            0,
+        ),
+        Err(WitnessPolicyError::ZeroLeaseDuration)
+    ));
+}
+
+#[test]
+fn malformed_binding_matrix_never_mutates_or_signs() {
+    let directory = value_or_abort(TestDirectory::new("malformed-matrix"));
+    let mut actor = value_or_abort(WitnessVoteActor::open(
+        policy(),
+        SigningKey::from_bytes(&WITNESS_KEY),
+        directory.path(),
+        FileBackend,
+    ));
+
+    let mut wrong_version = binding("node-a", 2);
+    wrong_version.protocol_version = PROTOCOL_VERSION.saturating_add(1);
+    let mut zero_message = binding("node-a", 2);
+    zero_message.message_id = MessageId::new([0; 16]);
+    let mut zero_incarnation = binding("node-a", 2);
+    zero_incarnation.candidate_incarnation = 0;
+    let zero_epoch = binding("node-a", 0);
+    let mut zero_policy = binding("node-a", 2);
+    zero_policy.policy_hash = [0; 32];
+    let mut zero_root = binding("node-a", 2);
+    zero_root.state_root = [0; 32];
+    let mut lagging_commit = binding("node-a", 2);
+    lagging_commit.durable_commit = lagging_commit.required_commit.saturating_sub(1);
+    let mut empty_lease = binding("node-a", 2);
+    empty_lease.lease_expires_at_ms = empty_lease.lease_not_before_ms;
+
+    for malformed in [
+        wrong_version,
+        zero_message,
+        zero_incarnation,
+        zero_epoch,
+        zero_policy,
+        zero_root,
+        lagging_commit,
+        empty_lease,
+    ] {
+        let reply = actor.handle_vote(&malformed);
+        assert_eq!(reply.code(), VoteReasonCode::RefusedMalformedBinding);
+        assert!(reply.signed_vote().is_none());
+        assert_eq!(reply.durable_generation(), None);
+        assert_eq!(actor.durable_generation(), 0);
+        assert_eq!(actor.highest_durable_epoch(), 0);
+    }
+}
+
+#[test]
+fn workload_and_candidate_admission_failures_leave_no_durable_trace() {
+    let directory = value_or_abort(TestDirectory::new("identity-admission"));
+    let mut actor = value_or_abort(WitnessVoteActor::open(
+        policy(),
+        SigningKey::from_bytes(&WITNESS_KEY),
+        directory.path(),
+        FileBackend,
+    ));
+
+    let mut wrong_workload = binding("node-a", 4);
+    wrong_workload.workload_id = id("payments");
+    let workload_reply = actor.handle_vote(&wrong_workload);
+    assert_eq!(
+        workload_reply.code(),
+        VoteReasonCode::RefusedWorkloadMismatch
+    );
+    assert!(workload_reply.signed_vote().is_none());
+
+    let candidate_reply = actor.handle_vote(&binding("node-c", 4));
+    assert_eq!(
+        candidate_reply.code(),
+        VoteReasonCode::RefusedCandidateNotAllowed
+    );
+    assert!(candidate_reply.signed_vote().is_none());
+    assert_eq!(actor.durable_generation(), 0);
+    assert_eq!(actor.highest_durable_epoch(), 0);
+
+    let faulted_directory = value_or_abort(TestDirectory::new("open-io"));
+    let backend = FaultInjectingBackend::new(
+        FileBackend,
+        vec![FaultRule {
+            operation: FaultOperation::Read,
+            occurrence: 1,
+            mode: FaultMode::Error(io::ErrorKind::PermissionDenied),
+        }],
+    );
+    let result = WitnessVoteActor::open(
+        policy(),
+        SigningKey::from_bytes(&WITNESS_KEY),
+        faulted_directory.path(),
+        backend,
+    );
+    let Err(error) = result else {
+        std::process::abort();
+    };
+    assert_eq!(error.code(), WitnessOpenReasonCode::StorageIo);
+    assert!(error.to_string().contains(error.code().as_str()));
+    assert!(error.source().is_some());
 }

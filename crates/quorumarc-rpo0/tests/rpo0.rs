@@ -1,9 +1,14 @@
 #![allow(clippy::expect_used)]
 
+use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use quorumarc_rpo0::{
-    CounterOperation, Fault, MemoryReplica, OperationId, ReplicaSink, ReplicatedCounter, Rpo0Error,
-    WalCorruption, WalEntry, recover_wal,
+    CounterOperation, Fault, FileReplica, MemoryReplica, OperationId, ReplicaSink,
+    ReplicatedCounter, Rpo0Error, WalCorruption, WalEntry, recover_wal,
 };
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn operation(id: u8, expected_commit_index: u64, increment: u64) -> CounterOperation {
     CounterOperation {
@@ -49,6 +54,36 @@ fn replica_retry_after_lost_response_returns_same_durable_receipt() {
 
     assert_eq!(first, retry);
     assert_eq!(replica.bytes(), record);
+}
+
+#[test]
+fn file_replica_exact_tail_retry_does_not_append_twice() {
+    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-rpo0-tail-retry-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("temporary directory should be created");
+    let path = directory.join("replica.wal");
+    let entry = WalEntry {
+        commit_index: 1,
+        operation_id: OperationId::new([43; 16]),
+        previous_value: 0,
+        increment: 4,
+        value: 4,
+    };
+    let record = entry.encode();
+    let mut replica = FileReplica::new("node-b", &path);
+    let first = replica
+        .append_and_flush(&entry, &record)
+        .expect("first file append should become durable");
+    let retry = replica
+        .append_and_flush(&entry, &record)
+        .expect("exact file retry should be idempotent");
+
+    assert_eq!(first, retry);
+    assert_eq!(fs::read(&path).expect("WAL should be readable"), record);
+    fs::remove_dir_all(directory).expect("temporary directory should be removed");
 }
 
 #[test]

@@ -179,7 +179,7 @@ where
         Command::Vote => {
             let result = writeln!(
                 stderr,
-                "refused=true reason={REASON_DIRECT_VOTE_DISABLED} mode=lab"
+                "refused=true reason={REASON_DIRECT_VOTE_DISABLED} mode=lab voting=disabled"
             );
             write_error_exit(result, EXIT_UNAVAILABLE)
         }
