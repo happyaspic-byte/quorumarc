@@ -84,8 +84,12 @@ impl ReplicaSink for MemoryReplica {
         canonical_record: &[u8],
     ) -> Result<DurableReceipt, ReplicaError> {
         self.append_count = self.append_count.saturating_add(1);
+        if validate_existing_wal(&self.bytes, entry, canonical_record)?
+            == AppendDisposition::AlreadyDurable
+        {
+            return durable_receipt(&self.replica_id, entry, canonical_record);
+        }
         let fault = core::mem::replace(&mut self.next_fault, Fault::None);
-        validate_existing_wal(&self.bytes, entry)?;
         match fault {
             Fault::None => self.bytes.extend_from_slice(canonical_record),
             Fault::FailBeforeAppend => return Err(ReplicaError::InjectedFailure),
@@ -111,12 +115,7 @@ impl ReplicaSink for MemoryReplica {
                 });
             }
         }
-        Ok(DurableReceipt {
-            replica_id: self.replica_id.clone(),
-            commit_index: entry.commit_index,
-            record_checksum: record_checksum(canonical_record)
-                .map_err(|_| ReplicaError::InvalidReceipt)?,
-        })
+        durable_receipt(&self.replica_id, entry, canonical_record)
     }
 }
 
@@ -159,16 +158,20 @@ impl ReplicaSink for FileReplica {
             .open(&self.path)?;
         let mut existing = Vec::new();
         file.read_to_end(&mut existing)?;
-        validate_existing_wal(&existing, entry)?;
+        // The first durability response can be lost. Only an exact canonical
+        // record already at the validated WAL tail is an idempotent success;
+        // changed or older retries remain fail-closed.
+        if validate_existing_wal(&existing, entry, canonical_record)?
+            == AppendDisposition::AlreadyDurable
+        {
+            file.sync_all()?;
+            sync_parent_directory(&self.path)?;
+            return durable_receipt(&self.replica_id, entry, canonical_record);
+        }
         file.write_all(canonical_record)?;
         file.sync_all()?;
         sync_parent_directory(&self.path)?;
-        Ok(DurableReceipt {
-            replica_id: self.replica_id.clone(),
-            commit_index: entry.commit_index,
-            record_checksum: record_checksum(canonical_record)
-                .map_err(|_| ReplicaError::InvalidReceipt)?,
-        })
+        durable_receipt(&self.replica_id, entry, canonical_record)
     }
 }
 
@@ -180,14 +183,46 @@ fn sync_parent_directory(path: &Path) -> Result<(), std::io::Error> {
     File::open(parent)?.sync_all()
 }
 
-fn validate_existing_wal(bytes: &[u8], entry: &WalEntry) -> Result<(), ReplicaError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppendDisposition {
+    Append,
+    AlreadyDurable,
+}
+
+fn validate_existing_wal(
+    bytes: &[u8],
+    entry: &WalEntry,
+    canonical_record: &[u8],
+) -> Result<AppendDisposition, ReplicaError> {
+    if entry.encode() != canonical_record {
+        return Err(ReplicaError::InvalidReceipt);
+    }
     let recovered = recover_wal(bytes).map_err(ReplicaError::CorruptWal)?;
+    if recovered.commit_index == entry.commit_index
+        && recovered.value == entry.value
+        && bytes.ends_with(canonical_record)
+    {
+        return Ok(AppendDisposition::AlreadyDurable);
+    }
     if recovered.commit_index.checked_add(1) != Some(entry.commit_index)
         || recovered.value != entry.previous_value
     {
         return Err(ReplicaError::SequenceMismatch);
     }
-    Ok(())
+    Ok(AppendDisposition::Append)
+}
+
+fn durable_receipt(
+    replica_id: &str,
+    entry: &WalEntry,
+    canonical_record: &[u8],
+) -> Result<DurableReceipt, ReplicaError> {
+    Ok(DurableReceipt {
+        replica_id: replica_id.to_owned(),
+        commit_index: entry.commit_index,
+        record_checksum: record_checksum(canonical_record)
+            .map_err(|_| ReplicaError::InvalidReceipt)?,
+    })
 }
 
 fn read_file_or_empty(path: &Path) -> Result<Vec<u8>, std::io::Error> {

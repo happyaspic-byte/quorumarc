@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used)]
 
 use quorumarc_rpo0::{
-    CounterOperation, Fault, MemoryReplica, OperationId, ReplicatedCounter, Rpo0Error,
-    WalCorruption, recover_wal,
+    CounterOperation, Fault, MemoryReplica, OperationId, ReplicaSink, ReplicatedCounter, Rpo0Error,
+    WalCorruption, WalEntry, recover_wal,
 };
 
 fn operation(id: u8, expected_commit_index: u64, increment: u64) -> CounterOperation {
@@ -27,6 +27,48 @@ fn exact_duplicate_returns_stable_ack_without_second_append() {
     assert_eq!(first, duplicate);
     assert_eq!(left.append_count(), 1);
     assert_eq!(right.append_count(), 1);
+}
+
+#[test]
+fn replica_retry_after_lost_response_returns_same_durable_receipt() {
+    let entry = WalEntry {
+        commit_index: 1,
+        operation_id: OperationId::new([41; 16]),
+        previous_value: 0,
+        increment: 3,
+        value: 3,
+    };
+    let record = entry.encode();
+    let mut replica = MemoryReplica::new("node-b");
+    let first = replica
+        .append_and_flush(&entry, &record)
+        .expect("first append should become durable");
+    let retry = replica
+        .append_and_flush(&entry, &record)
+        .expect("exact retry should return the durable receipt");
+
+    assert_eq!(first, retry);
+    assert_eq!(replica.bytes(), record);
+}
+
+#[test]
+fn replica_rejects_noncanonical_bytes_before_append() {
+    let entry = WalEntry {
+        commit_index: 1,
+        operation_id: OperationId::new([42; 16]),
+        previous_value: 0,
+        increment: 3,
+        value: 3,
+    };
+    let mut changed = entry.encode();
+    changed[0] ^= 0xff;
+    let mut replica = MemoryReplica::new("node-b");
+
+    assert!(matches!(
+        replica.append_and_flush(&entry, &changed),
+        Err(quorumarc_rpo0::ReplicaError::InvalidReceipt)
+    ));
+    assert!(replica.bytes().is_empty());
 }
 
 #[test]
