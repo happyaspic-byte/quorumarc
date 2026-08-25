@@ -61,6 +61,7 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 | `quorumarc-runtime` | Bounded frames, durable Witness actor, and test EffectGate sink | Component runtime only |
 | `quorumarc-rpo0` | Two-replica WAL-backed monotonic-counter demonstration | Demonstration workload, not a general database |
 | `quorumarc-lab` | Real localhost TCP Witness process and deterministic fault cases | No complete Node A/Node B active-writer lifecycle |
+| `quorumarc-cluster` | Same-binary peer/Witness/bootstrap modes for one explicit lab genesis | Bounded one-shot lab only; no failover/failback or production authority claim |
 | `quorumarc-agent` | Safe-default inspection/refusal CLI | Automatic promotion deliberately disabled |
 | `quorumarc-witness` | Safe-default Witness inspection/refusal CLI | No production network voting service |
 
@@ -68,21 +69,23 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 
 | Classification | Current status |
 |---|---|
-| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs |
-| Verified by compact model | Extended Safety run #6 on `0424290` explored depth 12: 143,439 unique states, 836,424 transitions, and 0 model invariant violations |
+| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, and a bounded three-process one-shot genesis lab |
+| Historical linked compact model | Extended Safety run #6 on `0424290` explored depth 12: 143,439 unique states, 836,424 transitions, and 0 model invariant violations; the Draft PR is authoritative for its exact head |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
-| Not yet end-to-end verified | Node A and Node B election, activation, real failover/failback, one integrated RPO-0 authority path, and all 25 scenarios as global PASS results |
+| Not yet end-to-end verified | Long-running Node A/B election, Active failure recovery, real failover/failback, repeated authority transfer, and all 25 scenarios as global PASS results |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
-Extended Safety run #6 on commit `0424290` executed **153 tests: 153 passed, 0
+As a historical baseline, Extended Safety run #6 on commit `0424290` executed
+**153 tests: 153 passed, 0
 failed, 0 ignored**. It also completed 16 real-process Witness-lab repetitions,
 16 durable-store crash-recovery repetitions, and all seven named malformed
 parser checks. This is component/process evidence, not a global PASS for the 25
 integrated failover scenarios.
 
-That run measured **76.05% workspace line coverage**.
-The 80% workspace target is therefore **not met**. No threshold is weakened or
-silently treated as passing. The linked run's model counts apply only
+That historical run measured **76.05% workspace line coverage** and did not meet
+the 80% target. Exact-head coverage is reported only from the Draft PR's linked
+artifact; no threshold is weakened or silently treated as passing. The linked
+run's model counts apply only
 to its exact compact-model revision and do not prove physical or end-to-end HA.
 
 ## Build and test
@@ -100,13 +103,18 @@ inventory, model report, coverage report, and scenario-by-scenario evidence.
 
 ## Primary unresolved blocker
 
-The source now separates the canonical pre-certificate proposal digest from the
-final signed-envelope digest, persists both in authority journal format v2, and
-checks both during agent material inspection. That removes the earlier digest
-dependency cycle without opening effects. Automatic activation remains blocked
-because no trusted-time, fencing, lease-activation, and enforced EffectGate
-control plane connects Node A, Node B, and the Witness. The agent reports
-`ACTIVATION_CONTROL_PLANE_UNAVAILABLE` and remains closed. See
+The bounded lab adds an explicitly enabled `LAB_GENESIS_ONE_SHOT` path
+that joins a candidate, one durable peer, and a Witness to one signed envelope
+and one test-sink effect. It deliberately uses fixed fixture time/fencing and
+does not implement Active failure, authority transfer, lease renewal, failover,
+or failback. The normal agent still reports
+`ACTIVATION_CONTROL_PLANE_UNAVAILABLE` and remains closed.
+
+External uniqueness and enforcement remain decisive blockers. If every trusted
+store and a Witness credential are cloned into an independent instance, the
+copies are indistinguishable. A global single-writer claim still requires
+protected Witness ownership, identity-bound stores, trusted time or real
+fencing, and an enforced EffectGate. See
 [known limitations](docs/KNOWN_LIMITATIONS.md).
 
 ## R8 boundary

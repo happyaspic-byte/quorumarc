@@ -14,9 +14,10 @@ Passing the first lab does not imply that the second has passed.
 
 ## GitHub-hosted Gate 1A topology
 
-The intended workflow starts one binary as Node A, the same binary as Node B,
-and a witness-only binary. Each receives a unique loopback address or port,
-configuration file, identity, test key, and durable directory. A deterministic
+The intended workflow starts the same lab binary in Node A/bootstrap, Node
+B/peer, and Witness modes. Role selection is explicit configuration, not
+election. Each receives a unique loopback address or port, role-appropriate
+test key material, and a separate durable directory. A deterministic
 user-space fault proxy is preferred when privileged namespaces are unreliable on
 hosted runners.
 
@@ -32,7 +33,12 @@ flowchart TD
 The workflow must:
 
 - use non-production test identities generated or installed for the job;
+- expose the Witness private test key only to the Witness process and give the
+  candidate only its pinned public key;
+- use distinct public-key values for candidate, peer, and Witness roles;
 - keep A, B, and Witness stores in separate directories;
+- keep readiness files, keys, WALs, journals, and owner locks on disjoint local
+  paths; one role-independent lock name protects each declared state path;
 - wait for explicit health readiness instead of fixed sleep assumptions;
 - inject faults by scenario and retain a seed/trace;
 - assert the generation-aware sink sees at most one valid writer;
@@ -43,6 +49,11 @@ The workflow must:
 This arrangement can validate network protocol and local persistence behavior.
 It cannot validate host independence because every process shares the runner's
 kernel, clock, storage stack, hypervisor, and power.
+
+It also cannot prove global uniqueness after a perfect clone. Copying a
+Witness credential and every durable directory into a second independent lab
+creates another trusted root that the first lab cannot observe. Local owner
+locks must not be interpreted as distributed fencing.
 
 ## Future physical topology
 

@@ -24,10 +24,19 @@ candidate key, records an accepted vote durably before replying, and echoes a
 request ID in a strict response. Its deterministic identities and keys are
 test fixtures.
 
+`quorumarc-cluster` implements a second, deliberately bounded protocol named
+`LAB_GENESIS_ONE_SHOT`. The same binary runs in peer, Witness, or bootstrap
+mode. Its peer response and Witness response are signed and bind the exact
+domain-separated request digest, fixed identities/key IDs, decision, and
+durable result. The bootstrap process verifies those responses, the complete
+final promotion envelope, policy, commit/root, and durable state before one
+in-memory test effect. This is **IMPLEMENTED**, but remains a fixed epoch-1
+localhost integration rather than a deployment protocol.
+
 That loopback exchange is not the deployment control plane. General network
 listeners, mutual transport authentication, encryption, a peer handshake,
-Node A/B replication traffic, retry/backoff policy, membership discovery, full
-promotion-proof assembly, and automatic promotion remain
+general Node A/B replication traffic, retry/backoff policy, membership
+discovery, long-running authority transfer, and automatic promotion remain
 **NOT-IMPLEMENTED**. Network and hardware failure claims remain
 **PHYSICAL-REQUIRED** where identified in
 [the failure matrix](FAILURE_MATRIX.md).
@@ -142,6 +151,11 @@ Ed25519 signing:
 | Fence | `quorumarc/fence-receipt/ed25519/v1\0` | Binding, target, verifier/key IDs, mechanism, observation, evidence digest |
 | Outer envelope | `quorumarc/promotion-envelope/ed25519/v1\0` | `u32` envelope length, canonical envelope, signer ID, key ID |
 | Lab vote request | `quorumarc/lab-vote-request/ed25519/v1\0` | Request ID, canonical quorum binding, candidate key ID |
+| Cluster peer request | `quorumarc/cluster/peer-request/ed25519/v1\0` | Request ID, sender/key/workload IDs, WAL operation and canonical record, policy, expected state root |
+| Cluster peer request digest | `quorumarc/cluster/peer-request/sha256/v1\0` | Complete signed peer request bytes |
+| Cluster peer response | `quorumarc/cluster/peer-response/ed25519/v1\0` | Exact request digest, peer/key IDs, decision, commit index, record checksum |
+| Cluster Witness request digest | `quorumarc/cluster/witness-request/sha256/v1\0` | Complete candidate-signed provisional envelope bytes |
+| Cluster Witness response | `quorumarc/cluster/witness-response/ed25519/v1\0` | Message ID, exact request digest, Witness/key IDs, decision, durable generation, final envelope bytes |
 
 The durable/audit envelope digest is SHA-256 over
 `quorumarc/promotion-envelope/sha256/v1\0` followed by the complete canonical
@@ -172,6 +186,45 @@ connection count, one request and one response per connection, loopback-only
 addresses, strict request/response decoding, candidate-request signature
 verification, and durable witness vote handling. It does not make the generic
 frame self-authenticating or provide a production transport.
+
+The cluster one-shot uses the same frame primitive with a 131,072-byte bound,
+one request/response per connection, non-zero timeouts, loopback-only
+addresses, and a configured finite connection count. Strict decoders reject
+unknown magic/version, truncation, over-length payloads, and trailing fields.
+Signatures authenticate application messages, not the TCP transport; traffic
+confidentiality and production peer admission are absent.
+
+## Bounded cluster genesis exchange
+
+The peer request fixes one monotonic-counter operation and carries both parsed
+WAL fields and the canonical record bytes. The peer recomputes their equality,
+the fixed state root, workload/policy scope, operation ID, and commit/value
+transition before appending. A signed durable response binds the exact request
+digest, peer identity, decision, commit index, and record checksum. An exact
+durable-tail retry re-syncs the WAL and parent directory and returns the same
+receipt; changed or ambiguous state is refused.
+
+The Witness request is the complete candidate-signed provisional promotion
+envelope. The Witness strictly decodes and verifies it, checks the exact fixed
+epoch-1 scope, durably records the proposal vote, adds its signed vote and
+fixture bootstrap fence, and returns the resulting envelope inside a signed
+response bound to the exact request digest. The candidate has only the Witness
+public key. Role public keys must be pairwise distinct even when stored in
+different files.
+
+The candidate then signs and verifies the final envelope, converts only that
+verified object into core evidence, applies the safety policy, persists
+incarnation/vote/promotion/activation generations, rechecks proposal/final
+digests plus commit/root/lease, and uses an immutable fixture clock for one
+test-sink effect. Role-independent owner locks prevent two local roles from
+claiming the same store or WAL path. These locks do not prevent copied stores,
+copied credentials, distributed races, or rollback outside one filesystem.
+
+The core continuity receipt does not carry the final-envelope digest. The
+one-shot adapter therefore rechecks that digest in the durable authority store
+and compares every field the core receipt does expose. This single-function
+control-flow binding is not a production-grade unforgeable capability and must
+not be generalized into a failover claim.
 
 ## Loopback witness vote exchange
 

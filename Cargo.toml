@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "apps/quorumarc-agent",
     "apps/quorumarc-witness",
+    "crates/quorumarc-cluster",
     "crates/quorumarc-core",
     "crates/quorumarc-lab",
     "crates/quorumarc-rpo0",

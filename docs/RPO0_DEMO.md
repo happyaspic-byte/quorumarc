@@ -11,6 +11,9 @@ monotonic-counter workload. It provides:
 - an on-disk `FileReplica` that validates the existing WAL, appends the exact
   canonical record, calls `sync_all` on the file, and syncs its parent
   directory before returning;
+- exact-tail retry after a lost response: if the canonical record is already
+  the validated durable tail, the replica re-syncs and returns the same receipt
+  instead of appending it twice; changed reuse remains fail-closed;
 - stable 16-byte operation IDs, exact-retry deduplication, conflicting-reuse
   refusal, and recovery of the deduplication table from the WAL;
 - deterministic commit indexes and SHA-256 state roots exposed as
@@ -74,11 +77,14 @@ The current counter path behaves as follows:
    lengths, and CRC.
 5. The left and right sinks must have different replica IDs. Each validates its
    existing WAL before appending.
-6. Success is returned only after both receipts bind the expected replica ID,
+6. An exact retry whose canonical bytes are already the validated WAL tail
+   returns the same receipt. This resolves a local response-loss ambiguity
+   without a duplicate append; it is not a distributed commit marker.
+7. Success is returned only after both receipts bind the expected replica ID,
    commit index, and record checksum. Any append uncertainty or invalid receipt
    poisons that in-memory writer so later writes remain refused until explicit
    recovery.
-7. Recovery accepts only a complete, checksum-valid, contiguous WAL with
+8. Recovery accepts only a complete, checksum-valid, contiguous WAL with
    consistent value transitions and unique operation IDs. Two recovered copies
    must be exactly equal before `ReplicatedCounter::from_recovered` reopens the
    logical writer.
@@ -127,8 +133,15 @@ acknowledged operations:
   observed.
 
 An operation whose response was lost may have committed. The client must retry
-the same operation ID to resolve that ambiguity; it must not issue a
-replacement ID and then call a duplicate result data loss.
+the same operation ID to resolve that ambiguity; the exact-tail behavior makes
+the local replica retry idempotent. It must not issue a replacement ID and then
+call a duplicate result data loss.
+
+A single surviving WAL cannot by itself distinguish "both replicas durable and
+the client acknowledged" from "only this replica durable and the operation
+returned unknown/failure." A future service therefore needs an authenticated
+two-copy commit decision and acknowledgement trace. The current bytes must not
+be described as proving that boundary.
 
 ## Remaining software campaign
 

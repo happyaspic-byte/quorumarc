@@ -62,7 +62,9 @@ work:
   EffectGate enforcement;
 - BMC, PDU, switch, NIC, disk firmware, or storage controller compromise;
 - physical access, supply-chain compromise, side channels, and denial of service;
-- an administrator rolling back every durable copy and restoring old keys.
+- an administrator rolling back every durable copy and restoring old keys; and
+- cloning a Witness private key together with every trusted store into an
+  independently operating cluster instance.
 
 ## Threats and required response
 
@@ -73,6 +75,7 @@ work:
 | Same-epoch double vote | Persist the first vote before replying; compare exact candidate/digest on retry | Idempotent reply for same vote; reject different vote |
 | Lease extension | Include exact start/end and uncertainty domain in signed bytes | Reject modified lease |
 | Candidate behind | Compare required commit and state root with candidate durable evidence | Refuse promotion |
+| Candidate lies about progress | Independently authenticate two-copy durable progress and health | Current honest-candidate lab evidence is insufficient; keep production gate closed |
 | Partition mistaken for fence | Never infer fencing from heartbeat loss | Wait for authoritative fence or safe lease expiry |
 | Partial/corrupt store | Framed records, checksums, atomic replacement/journal recovery, explicit ambiguity state | Block voting and promotion |
 | Store rollback | Highest-epoch/incarnation checks across trusted durable copies; future anti-rollback adapter | Block when detected; Gate 1A cannot defeat undetectable total rollback |
@@ -80,6 +83,8 @@ work:
 | Message flood/oversize | Authentication, strict maximum sizes, timeouts, bounded queues | Drop/refuse without changing authority |
 | Unknown protocol field/version | Strict canonical decoder and explicit compatible versions | Reject; never guess semantics |
 | Stolen/retired key | Key IDs, authorization set, rotation and revocation interface | Reject unauthorized or retired key |
+| Cloned authority instance | Protected Witness ownership, identity-bound stores, external uniqueness, and effect fencing | Outside the GitHub one-shot lab claim; never treat local path locks as global proof |
+| Valid journal transplant | Bind cluster, workload, node, and role inside a future authenticated store format | Current v2 format cannot detect every compatible transplant; require repair with effects closed |
 | Undeclared output path | Continuity Capsule inventory and adapter review | Workload is ineligible for automatic promotion |
 | Check/use race | Generation-scoped adapter operation and enforcement at I/O boundary | Fail closed; user-space test sink is not production fencing |
 
@@ -112,6 +117,15 @@ The witness must not host the protected workload, share the data-node durable
 directory, or be treated as independent when it shares the same physical host.
 The GitHub three-process topology tests behavior only and does not satisfy this
 physical-independence assumption.
+
+Production Witness credentials must not be compiled into or provisioned to a
+candidate. Test fixtures are not key custody. Copying a Witness secret and all
+trusted state creates an indistinguishable authority clone outside this safety
+claim. A production design needs protected secret ownership, rotation and
+revocation, immutable membership/store identity, and a separately enforced
+effect boundary. The bounded one-shot lab additionally rejects equal public-key
+values across candidate, peer, and Witness roles; separate filenames alone are
+not treated as key separation.
 
 ## GitHub workflow threats
 

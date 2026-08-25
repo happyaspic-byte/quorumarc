@@ -6,13 +6,16 @@ The completed safety baseline is Gate 0: in-memory promotion validation, logical
 EffectGate transitions, and a deliberately compact single-view model. Gate 1A
 adds a substantial **component foundation**—wire, durable store, Witness
 runtime, RPO-0 demonstration, process harness, and refusal CLIs—but does not yet
-connect those pieces into a complete three-role failover system.
+connect those pieces into a complete three-role failover system. A bounded lab
+composes a peer, Witness, and explicitly enabled bootstrap
+process for one lab-genesis activation, but it is not a failover service.
 
-No current test starts Node A and Node B as authority participants, elects one
-Active, opens its externally effective gate, fails it, and safely activates the
-other while recovering the acknowledged workload. Consequently, automatic
-promotion, Active failover/failback, and end-to-end RPO-0 are not implemented
-claims.
+The bounded lab starts Node B as a durable peer, a Witness, and Node A as
+a one-shot bootstrap candidate. It can emit one logical test effect after its
+local durable transaction. It does not keep both nodes running as authority
+participants, fail the Active, or safely activate the other. Consequently,
+automatic promotion, Active failover/failback, global single-writer safety, and
+end-to-end RPO-0 are not implemented claims.
 
 The localhost process lab runs a real Witness child and exchanges authenticated,
 bounded frames. It includes focused kill/restart, conflict, replay, concurrency,
@@ -84,8 +87,27 @@ digests but still refuses `run` with
 Even after all GitHub-hosted Gate 1A acceptance tests pass, the following remain:
 
 The current branch has not yet reached that condition: automatic promotion,
-physical fencing, all 25 required scenarios, coverage exit thresholds, and
-timing distributions remain incomplete.
+physical fencing, all 25 required scenarios, aggregate critical-path coverage,
+and timing distributions remain incomplete.
+
+### One-shot genesis scope
+
+The bounded bootstrap is explicitly named `LAB_GENESIS_ONE_SHOT`. A
+role-independent owner-lock name prevents local peer/candidate/Witness roles
+from claiming the same declared store or WAL path; readiness, keys, journals,
+locks, and WAL paths are also checked for local aliases. These checks may
+prevent concurrent honest processes from owning the same local files, but they
+are not distributed locks. Copying the trusted directories and
+Witness credential to another instance can authorize another logical effect.
+This slice must never be reported as global single-writer proof or scenario 1
+PASS.
+
+The execution path separates the Witness private-key file from candidate
+public-key inputs and rejects equal role public-key values, but a same-binary,
+same-user GitHub fixture is not strong
+administrative or hardware-backed key isolation. Production needs a protected
+secret provider or separately governed service, provisioning, revocation, and
+auditable ownership.
 
 ### Shared runner failure domain
 
@@ -106,6 +128,25 @@ File-store tests can cover declared write/sync/rename/truncation fault points.
 They cannot prove that arbitrary disks, controllers, filesystems, hypervisors,
 or firmware honor flushes, nor defeat an undetectable rollback of every trusted
 copy.
+
+The authority frame has no immutable cluster/workload/node/role store identity,
+and the base store has no inter-process lock or compare-and-swap. A valid frame
+can be transplanted to a compatible path, and a perfect copy of every trusted
+directory plus a Witness credential creates an authority clone that the first
+instance cannot observe. Global single-writer safety needs an external
+uniqueness root, protected Witness ownership, identity-bound stores, and real
+effect fencing; a local filesystem lock cannot supply those properties.
+
+### Capability and acknowledgement boundaries
+
+Durability receipts and EffectGate persistence confirmations are ordinary Rust
+values passed across caller-trusted interfaces, not unforgeable capabilities.
+A malicious in-process adapter can fabricate them. The small RPO-0 demo likewise
+accepts public replica IDs and receipts; two different names do not prove two
+failure domains, and one surviving WAL does not encode whether a two-copy client
+acknowledgement occurred. A production design needs authenticated peer commit
+evidence, a durable two-copy commit decision, and a gate token that only the
+trusted store/effect adapter can create.
 
 ### Clock and process suspension
 

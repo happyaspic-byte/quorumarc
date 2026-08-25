@@ -117,6 +117,14 @@ declared fault points, hostile rollback, bit rot after validation, concurrent
 writers, or physical power loss. Those require both additional design and, for
 literal hardware claims, **PHYSICAL-REQUIRED** tests.
 
+The v2 frame does not bind an immutable cluster, workload, node, role, or store
+identity. A structurally valid compatible journal can therefore be copied to a
+different path and still pass format validation. The store API also contains no
+inter-process lock or compare-and-swap. The bounded cluster wrapper uses one
+role-independent local owner-lock name per declared store or WAL path, but that
+lock is not distributed fencing and cannot establish global uniqueness after a
+directory or credential clone.
+
 ## Safe handling rules
 
 - Give each role and workload its own directory on one local filesystem; never

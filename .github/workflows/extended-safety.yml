@@ -85,6 +85,19 @@ jobs:
             } 2>&1 | tee -a safety-artifacts/process-lab-repetitions.log
           done
 
+      - name: Repeat integrated one-shot three-process lab
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > safety-artifacts/cluster-genesis-repetitions.log
+          for iteration in $(seq 1 16); do
+            {
+              echo "iteration=${iteration} suite=lab-genesis-one-shot"
+              cargo test --locked -p quorumarc-cluster --tests -- \
+                --nocapture --test-threads=1
+            } 2>&1 | tee -a safety-artifacts/cluster-genesis-repetitions.log
+          done
+
       - name: Repeat durable-store crash recovery
         shell: bash
         run: |
@@ -140,7 +153,7 @@ jobs:
           set -Eeuo pipefail
           cargo build --locked --workspace --release
           mkdir -p safety-artifacts/release
-          for binary in quorumarc-agent quorumarc-witness quorumarc-lab quorumarc-sim; do
+          for binary in quorumarc-agent quorumarc-witness quorumarc-cluster quorumarc-lab quorumarc-sim; do
             test -x "target/release/${binary}"
             cp "target/release/${binary}" safety-artifacts/release/
           done

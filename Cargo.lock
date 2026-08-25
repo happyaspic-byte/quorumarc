@@ -180,6 +180,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "quorumarc-cluster"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "quorumarc-core",
+ "quorumarc-rpo0",
+ "quorumarc-runtime",
+ "quorumarc-store",
+ "quorumarc-wire",
+ "sha2",
+]
+
+[[package]]
 name = "quorumarc-core"
 version = "0.1.0"
 

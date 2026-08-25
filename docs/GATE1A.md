@@ -5,13 +5,18 @@
 Gate 1A is an **incomplete foundation**, not an automatic HA product. The branch
 contains a canonical signed envelope, durable authority store, Witness actor,
 bounded framing, test EffectGate, RPO-0 demonstration workload, safe-default
-CLIs, and focused process/fault tests. Those pieces do not yet form a complete
-Node A/Node B/Witness promotion transaction.
+CLIs, and focused process/fault tests. A bounded integration also connects one
+candidate, one peer, and one Witness in an explicitly enabled
+`LAB_GENESIS_ONE_SHOT` transaction. It is not a long-running Node A/Node B
+authority lifecycle.
 
-In particular, no current test starts two agent services, elects one Active,
-opens a generation-scoped externally effective gate, kills that Active, and
-proves safe workload recovery on the other agent. Therefore the project does
-not claim completed failover, failback, zero downtime, or production RPO 0.
+The test starts three processes, attempts one two-copy demo write,
+obtains a durable Witness decision, persists candidate authority, and emits one
+logical test effect. It neither kills an Active nor promotes the other node.
+Exact-head GitHub results are recorded in the Draft PR; even a green run is
+only bounded one-host process evidence. The project does not claim completed
+failover, failback, zero downtime, global
+single-writer enforcement, or production RPO 0.
 
 The GitHub-hosted lab also shares one virtual machine, kernel, clock, power
 source, and storage stack. It can validate software components and controlled
@@ -24,11 +29,11 @@ The following facts must not be conflated:
 
 | Evidence class | Current evidence | Claim limit |
 |---|---|---|
-| Implemented in source | Wire, store, runtime, demo workload, process harness, and refusal CLIs are present | Presence or compilation is not an end-to-end PASS |
-| Linked compact-model validation | Extended Safety run #6 on `0424290`, depth 12: 143,439 unique states, 836,424 transitions, 0 model invariant violations | Applies only to that model revision and its assumptions |
-| Linked coverage measurement | Extended Safety run #6 workspace line coverage 76.05% | The 80% workspace target is not met; aggregate critical-path compliance is not established |
-| Linked workspace tests | Extended Safety run #6: 153 passed, 0 failed, 0 ignored | Component/process success is not an integrated failover PASS |
-| GitHub-hosted process scope | A real Witness child process communicates over localhost TCP; tests exercise bounded input, authenticated requests, durable voting, retry, restart, conflicts, and selected pause/kill cases | This is not a three-role Active/Standby failover result |
+| Implemented in source | Wire, store, runtime, demo workload, process harness, refusal CLIs, and a bounded three-process genesis lab are present | Presence or compilation is not an end-to-end PASS |
+| Historical linked compact model | Extended Safety run #6 on `0424290`, depth 12: 143,439 unique states, 836,424 transitions, 0 model invariant violations | Applies only to that model revision and its assumptions; the Draft PR carries exact-head evidence |
+| Historical linked coverage | Extended Safety run #6 workspace line coverage 76.05% | That baseline missed 80%; exact-head coverage must come from its own linked artifact |
+| Historical linked workspace tests | Extended Safety run #6: 153 passed, 0 failed, 0 ignored | Component/process success is not an integrated failover PASS; exact-head counts are in the Draft PR |
+| GitHub-hosted process scope | The PR exact-head evidence covers the process suites associated with that commit | Neither the Witness-only nor three-process one-shot scope is Active/Standby failover |
 | Required scenario campaign | Individual model, component, or process analogues cover parts of the matrix | None of the 25 rows has a global end-to-end PASS result |
 | Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |
 
@@ -53,6 +58,9 @@ scenario artifacts.
 - A localhost TCP Witness process harness with deterministic cases for kill,
   restart, conflict, stale epoch, malformed/authentication failures, bounded
   clean exit, concurrency, and pause/resume behavior.
+- A same-binary three-mode bounded lab for one peer fsync, one durable
+  Witness vote/fixture fence, candidate proof/store ordering, and one logical
+  test-sink effect after explicit lab-genesis opt-in.
 - Safe-default `quorumarc-agent` and `quorumarc-witness` command shells for
   status, health, inspection, and bounded failure simulation.
 
@@ -62,6 +70,9 @@ scenario artifacts.
   and one trusted logical clock, at the exact explored depth.
 - Unit and integration tests check component contracts and selected process
   behavior on a shared runner.
+- Local owner locks and path checks scope the one-shot test to one declared
+  filesystem instance. They do not prevent an independently cloned credential
+  and store set from authorizing a separate sink.
 - Crash campaigns check the declared file-store API fault points, not arbitrary
   controller, filesystem, firmware, or total trusted-copy rollback behavior.
 - The test EffectGate records logical effects; it is not nftables, eBPF,
@@ -114,11 +125,17 @@ complete signed envelope. Promotion recovery matches vote to proposal, while
 activation matches its receipt to the final signed-envelope digest. Format v1
 is deliberately rejected rather than ambiguously migrated.
 
-This is still only durable material validation. There is no integrated
-three-role control plane that obtains the proof, validates trusted time and
-real fencing, durably activates a lease, and opens an enforced EffectGate. The
-agent therefore continues to refuse `run` with
-`ACTIVATION_CONTROL_PLANE_UNAVAILABLE` after successful inspection.
+The explicit lab-genesis candidate threads these materials through three
+processes and a test sink. Its evidence is synthetic: fixed logical time, a
+fixture bootstrap fence, deterministic test membership, and one operation. It
+is not the normal agent control plane and does not implement election, failure
+detection, lease renewal, failover, or failback. The agent therefore continues
+to refuse `run` with `ACTIVATION_CONTROL_PLANE_UNAVAILABLE`.
+
+No local protocol can detect a perfect clone of every trusted store and the
+Witness credential. Production safety additionally needs protected Witness
+ownership, immutable cluster/workload/store identity, independently verified
+replication progress, and real fencing or safe expiry.
 
 ## Incremental delivery
 
@@ -136,13 +153,13 @@ agent therefore continues to refuse `run` with
    durably verified.
 
 The component source supports these pieces, but Gate 1A.0 cannot claim an exit
-until the exact candidate has a linked green run and the durable material is
+until the exact head has a linked green run and the durable material is
 joined to the missing activation control plane without weakening fail-closed
 behavior.
 
 ### Gate 1A.1 — three-process control plane
 
-**Status: partial Witness process lab only.**
+**Status: bounded one-shot lab; lifecycle incomplete.**
 
 - Run identical agent binaries for Node A and Node B, plus a Witness that can
   vote but cannot host or activate a workload.
@@ -152,7 +169,9 @@ behavior.
   restart controls to a deterministic fault proxy or equivalent.
 - Record every safety decision with stable reason codes and replayable seeds.
 
-The existing client-to-Witness localhost tests do not satisfy this substage.
+The one-shot lab advances protocol composition, but does not satisfy this
+substage's long-running lifecycle, fault proxy, safe authority transfer, or
+all-scenario trace requirements.
 
 ### Gate 1A.2 — RPO-0 demonstration workload
 
