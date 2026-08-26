@@ -10,8 +10,8 @@ not declare the row passed as an integrated failover scenario.
   with 0 model invariant violations. Its serial-view and logical-clock
   assumptions still apply.
 - **COMPONENT SOURCE:** a focused core, wire, store, runtime, RPO-0, or CLI test
-  is present. Extended Safety run #6 on `0424290` executed 153 workspace tests
-  with 0 failures and 0 ignored tests.
+  is present. The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2)
+  links the exact-head test inventory, workflow, and artifact.
 - **WITNESS PROCESS SOURCE:** a client and real Witness child process exercise a
   localhost TCP analogue. Node A, Node B, activation, and failover are absent.
 - **THREE-PROCESS LAB:** one peer, one Witness, and one explicitly enabled
@@ -23,10 +23,10 @@ not declare the row passed as an integrated failover scenario.
 - **PHYSICAL-ONLY:** the literal hardware assertion requires independent hosts
   or a real fence/effect adapter.
 
-The linked run also completed 16 real-process Witness-lab repetitions, 16
-durable-store crash-recovery repetitions, and all seven named malformed-parser
-checks. It measured 76.05% workspace line coverage, below the required 80%
-target.
+Exact-head repetition counts, malformed-parser results, model counts, and
+coverage are taken from the Draft PR's linked artifact. Static source
+documentation does not retain an older workflow result as a current
+measurement.
 
 **None of rows 1–25 currently has a global end-to-end PASS result.** Partial
 component/model coverage must not be added together and reported as though Node

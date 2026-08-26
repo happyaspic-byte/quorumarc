@@ -70,23 +70,17 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 | Classification | Current status |
 |---|---|
 | Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, and a bounded three-process one-shot genesis lab |
-| Historical linked compact model | Extended Safety run #6 on `0424290` explored depth 12: 143,439 unique states, 836,424 transitions, and 0 model invariant violations; the Draft PR is authoritative for its exact head |
+| Latest exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its exact head; the counts apply only to that model revision and assumptions |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
 | Not yet end-to-end verified | Long-running Node A/B election, Active failure recovery, real failover/failback, repeated authority transfer, and all 25 scenarios as global PASS results |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
-As a historical baseline, Extended Safety run #6 on commit `0424290` executed
-**153 tests: 153 passed, 0
-failed, 0 ignored**. It also completed 16 real-process Witness-lab repetitions,
-16 durable-store crash-recovery repetitions, and all seven named malformed
-parser checks. This is component/process evidence, not a global PASS for the 25
-integrated failover scenarios.
-
-That historical run measured **76.05% workspace line coverage** and did not meet
-the 80% target. Exact-head coverage is reported only from the Draft PR's linked
-artifact; no threshold is weakened or silently treated as passing. The linked
-run's model counts apply only
-to its exact compact-model revision and do not prove physical or end-to-end HA.
+Exact test inventory, repetitions, coverage, model counts, commit, workflow,
+and artifact digest are reported only in the [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2)
+for its current head. Static source documentation deliberately does not retain
+an older run as a current measurement. Component/process evidence is not a
+global PASS for the 25 integrated failover scenarios, and model results do not
+prove physical or end-to-end HA.
 
 ## Build and test
 

@@ -30,15 +30,16 @@ The following facts must not be conflated:
 | Evidence class | Current evidence | Claim limit |
 |---|---|---|
 | Implemented in source | Wire, store, runtime, demo workload, process harness, refusal CLIs, and a bounded three-process genesis lab are present | Presence or compilation is not an end-to-end PASS |
-| Historical linked compact model | Extended Safety run #6 on `0424290`, depth 12: 143,439 unique states, 836,424 transitions, 0 model invariant violations | Applies only to that model revision and its assumptions; the Draft PR carries exact-head evidence |
-| Historical linked coverage | Extended Safety run #6 workspace line coverage 76.05% | That baseline missed 80%; exact-head coverage must come from its own linked artifact |
-| Historical linked workspace tests | Extended Safety run #6: 153 passed, 0 failed, 0 ignored | Component/process success is not an integrated failover PASS; exact-head counts are in the Draft PR |
+| Exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its current head | Applies only to that model revision and its assumptions |
+| Exact-head coverage | The Draft PR links the generated workspace and per-file coverage report | A workspace percentage does not establish aggregate critical-path compliance |
+| Exact-head workspace tests | The Draft PR links the exact commit, run, test inventory, and artifact digest | Component/process success is not an integrated failover PASS |
 | GitHub-hosted process scope | The PR exact-head evidence covers the process suites associated with that commit | Neither the Witness-only nor three-process one-shot scope is Active/Standby failover |
 | Required scenario campaign | Individual model, component, or process analogues cover parts of the matrix | None of the 25 rows has a global end-to-end PASS result |
 | Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |
 
 Run numbers without an exact commit and artifact are historical diagnostics,
-not current exit evidence. The final candidate must record its own successful
+not current exit evidence. Static source documentation therefore avoids
+retaining an older run as a current measurement. The final candidate must record its own successful
 workflow URL, commit SHA, test inventory, model report, coverage report, and
 scenario artifacts.
 

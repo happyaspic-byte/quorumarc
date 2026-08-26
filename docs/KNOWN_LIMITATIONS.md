@@ -44,14 +44,15 @@ integrated flow do not exist.
 
 | Class | What currently exists | Limitation |
 |---|---|---|
-| Linked workspace tests | Extended Safety run #6 on `0424290`: 153 passed, 0 failed, 0 ignored; 16 process-lab and 16 store-recovery repetitions completed | These are component/process results, not global scenario PASS results |
-| Linked compact model | Extended Safety run #6 explored depth 12: 143,439 states, 836,424 transitions, 0 model invariant violations | Applies only to that exact model revision and assumptions |
-| Linked coverage | Workspace line coverage measured 76.05% | The 80% workspace target is unmet; 90% aggregate critical-path compliance is not established |
+| Exact-head workspace tests | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the exact commit, run, inventory, and artifact | These are component/process results, not global scenario PASS results |
+| Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
+| Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
 | GitHub-hosted process | Client plus Witness child on localhost TCP | Shared host and no Node A/Node B activation or failover |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for
-the exact final commit's successful run and artifact. Coverage targets must be
+the exact final commit's successful run and artifact. Static documentation does
+not preserve an older run as a current measurement. Coverage targets must be
 met by meaningful tests, not lowered or described as passing when they are not.
 
 ## Current promotion-integration blocker
