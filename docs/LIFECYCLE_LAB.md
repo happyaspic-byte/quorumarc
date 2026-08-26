@@ -150,7 +150,7 @@ quorumarc-cluster lifecycle-controller \
   --max-promotions 2 \
   --logical-step-ms 10 \
   --poll-ms 20 \
-  --timeout-ms 1000 \
+  --timeout-ms 3000 \
   --max-runtime-ms 10000 \
   --emit-test-effect \
   --allow-lifecycle-lab
