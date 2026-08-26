@@ -320,13 +320,13 @@ fn remaining_runtime(started: Instant, max_runtime: Duration) -> Duration {
 }
 
 fn runtime_timeout(remaining: Duration, configured: Duration) -> Result<Duration, ClusterError> {
-    if remaining < configured {
+    if remaining.is_zero() {
         return Err(err(
             "LIFECYCLE_CONTROLLER_TIMEOUT",
-            "remaining runtime is shorter than the next I/O deadline",
+            "bounded automatic controller exhausted its runtime",
         ));
     }
-    Ok(configured)
+    Ok(remaining.min(configured))
 }
 
 fn controller_now_ms(
@@ -723,11 +723,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_timeout_refuses_io_that_cannot_finish_before_deadline() {
+    fn runtime_timeout_clamps_to_remaining_budget() {
         assert_eq!(
-            runtime_timeout(Duration::from_millis(2), Duration::from_secs(5))
+            runtime_timeout(Duration::ZERO, Duration::from_secs(5))
                 .map_err(|error| error.reason_code()),
             Err("LIFECYCLE_CONTROLLER_TIMEOUT")
+        );
+        assert_eq!(
+            runtime_timeout(Duration::from_millis(2), Duration::from_secs(5)),
+            Ok(Duration::from_millis(2))
         );
         assert_eq!(
             runtime_timeout(Duration::from_secs(5), Duration::from_secs(3)),
