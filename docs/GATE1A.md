@@ -37,7 +37,7 @@ The following facts must not be conflated:
 | Exact-head coverage | The Draft PR links the generated workspace and per-file coverage report | A workspace percentage does not establish aggregate critical-path compliance |
 | Exact-head workspace tests | The Draft PR links the exact commit, run, test inventory, and artifact digest | Component/process success is not an integrated failover PASS |
 | GitHub-hosted process scope | The PR exact-head evidence covers the process suites associated with that commit | Shared host, logical clock, test sink, and explicit control commands remain |
-| Required scenario campaign | Lifecycle source covers 21 scenario IDs and emits bounded trace fields, including bounded Node/Witness fault proxies | Exact-head workflow evidence is required; rows 6, 19, 20, 23 and physical classes remain |
+| Required scenario campaign | Lifecycle plus one-shot fault-proxy source covers all 25 scenario IDs and emits bounded trace fields | Exact-head workflow evidence is required; shared-host analogues, end-to-end client paths, and physical classes remain incomplete |
 | Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |
 
 Run numbers without an exact commit and artifact are historical diagnostics,

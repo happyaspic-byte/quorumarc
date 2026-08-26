@@ -32,10 +32,13 @@ The following claims are implemented in this laboratory:
   conflict close or keep closed the test effect sink;
 - an early promotion attempt is rejected before it can consume a Witness
   epoch; and
-- exact proof replay cannot create a second activation.
+- exact proof replay cannot create a second activation;
 - separate bounded Node/Witness proxies can inject drop, delay, duplicate,
   reply loss, corruption, and stale signed-request replay without gaining the
-  ability to manufacture a valid vote or authority proof.
+  ability to manufacture a valid vote or authority proof; and
+- after Active loss and safe promotion, an exact stable operation ID already
+  present in the two pre-seeded durable WALs is confirmed by the successor's
+  signed response without another append; an unknown retry remains refused.
 
 The lab-only `LifecycleAutoController` consumes fresh signed Node A/B reports.
 It requires multiple failed Active probes, waits for the old exclusive lease
@@ -45,8 +48,9 @@ failure suspicion and is never treated as fencing. The candidate still has to
 obtain the durable Witness vote and pass the complete proof/EffectGate path.
 
 The integration suite launches real child processes and covers required
-scenario IDs 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21,
-22, 24, and 25.
+scenario IDs 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+20, 21, 22, 23, 24, and 25. The separate one-shot three-process proxy test
+covers scenario 6's A/B replication-path partition.
 Each passing test emits a deterministic evidence line containing its scenario,
 seed, validation class, single-writer violation count, and acknowledged-write
 loss count. A successful exact-head workflow is still required before a source
@@ -112,6 +116,11 @@ store, private key, and readiness file. Private key files must be exact mode
 `0600`. All role keys must have distinct values, and stores, WALs, keys, owner
 locks, and readiness paths must not alias.
 
+Store and WAL ownership uses a persistent local lock inode with an OS advisory
+exclusive lock. A competing live process is refused, while `SIGKILL` releases
+the kernel lock so the same configured node can restart and allocate a newer
+durable incarnation. The lock is local coordination, not distributed fencing.
+
 The optional test proxy is configured independently for each node. Its mode
 file must be a small regular non-symlink file containing `pass`, `drop`,
 `delay-ms=N` (bounded to 1000), `duplicate`, `reply-drop`, `corrupt`, or
@@ -140,6 +149,10 @@ The suite performs real process `SIGKILL` and `SIGSTOP`/`SIGCONT` operations.
 It also injects a failure and a partial write at the authority promotion write
 boundary. In either storage case, the store becomes poisoned in that process,
 activation is not persisted, and the EffectGate never opens.
+
+Restart coverage kills an old Node A after a later Node B epoch is durable,
+restarts A against its older local authority state, and verifies that the new
+incarnation cannot reuse its prior vote or reopen effects.
 
 The Node/Witness proxy campaign additionally verifies one-sided Witness
 reachability, dual Witness isolation, bounded delay, duplicate delivery,
@@ -170,9 +183,10 @@ exclusive lease, so it self-fences before the test sink can record output.
   The old process cannot generate autonomous external I/O in this lab. A
   kernel or device-enforced adapter is required before using expiry as a real
   fence.
-- The WAL is pre-seeded through the RPO-0 component before services start.
-  Continuous replication, durable client acknowledgement through failover,
-  repair, snapshot, and resynchronization are not yet integrated.
+- The WAL is pre-seeded through the RPO-0 component before services start. The
+  lifecycle verifies recovered duplicate acknowledgement after failover, but
+  continuous live replication, fresh client writes, repair, snapshot, and
+  resynchronization are not yet integrated.
 - All processes share one kernel, storage host, clock source, hypervisor, and
   power domain on a GitHub runner.
 - The proxy currently covers each node's Witness path. There is no continuous

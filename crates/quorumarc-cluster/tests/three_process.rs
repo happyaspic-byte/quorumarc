@@ -142,10 +142,60 @@ fn three_child_processes_complete_one_shot_genesis() {
     assert_eq!(witness_state.generation(), 1);
     assert_eq!(witness_state.state().highest_epoch(), 1);
 
-    assert!(!candidate_store.join(".quorumarc.owner").exists());
-    assert!(!witness_store.join(".quorumarc.owner").exists());
-    assert!(!lock_for_file(&local_wal).exists());
-    assert!(!lock_for_file(&peer_wal).exists());
+    assert!(candidate_store.join(".quorumarc.owner").is_file());
+    assert!(witness_store.join(".quorumarc.owner").is_file());
+    assert!(lock_for_file(&local_wal).is_file());
+    assert!(lock_for_file(&peer_wal).is_file());
+    fixture.cleanup();
+}
+
+#[test]
+fn ab_replication_partition_refuses_acknowledgement_and_authority() {
+    let fixture = Fixture::new("ab-partition");
+    let peer_wal = fixture.root.join("node-b.wal");
+    let local_wal = fixture.root.join("node-a.wal");
+    let witness_store = fixture.root.join("witness-store");
+    let candidate_store = fixture.root.join("candidate-store");
+    let peer_ready = fixture.root.join("peer.ready");
+    let witness_ready = fixture.root.join("witness.ready");
+    let proxy_ready = fixture.root.join("peer-proxy.ready");
+    let proxy_mode = fixture.root.join("peer-proxy.mode");
+    fs::write(&proxy_mode, "drop").expect("create peer proxy mode");
+    let mut peer = spawn_peer(&fixture, &peer_wal, &peer_ready, 1);
+    let mut witness = spawn_witness(&fixture, &witness_store, &witness_ready, 1);
+    let peer_address = wait_ready(&peer_ready, &mut peer);
+    let witness_address = wait_ready(&witness_ready, &mut witness);
+    let mut proxy = spawn_fault_proxy(peer_address, &proxy_ready, &proxy_mode, 1);
+    let proxy_address = wait_ready(&proxy_ready, &mut proxy);
+    let candidate = run_candidate(
+        &fixture,
+        proxy_address,
+        witness_address,
+        &local_wal,
+        &candidate_store,
+    );
+    assert!(!candidate.status.success());
+    assert!(String::from_utf8_lossy(&candidate.stderr).contains("RPO0_WRITE_REFUSED"));
+    assert!(!String::from_utf8_lossy(&candidate.stdout).contains("effects=1"));
+    let proxy_output = proxy.wait_with_output().expect("collect peer proxy");
+    assert_success("peer proxy", &proxy_output);
+    peer.kill().expect("stop isolated peer");
+    witness.kill().expect("stop unused Witness");
+    let _peer_status = peer.wait().expect("collect isolated peer");
+    let _witness_status = witness.wait().expect("collect unused Witness");
+    assert!(!peer_wal.exists());
+    assert!(local_wal.is_file());
+    assert_eq!(
+        recover_wal(&fs::read(&local_wal).expect("read unacknowledged local WAL"))
+            .expect("recover unacknowledged local WAL")
+            .commit_index,
+        1
+    );
+    assert!(!candidate_store.join("authority.journal").exists());
+    assert!(!witness_store.join("authority.journal").exists());
+    eprintln!(
+        "scenario=6 name=ab_replication_partition seed=1 class=github-three-process-fault-proxy status=PASS single_writer_violations=0 acknowledged_write_loss=0 acknowledged_writes=0 effects=0"
+    );
     fixture.cleanup();
 }
 
@@ -465,6 +515,33 @@ fn spawn_witness(fixture: &Fixture, store: &Path, ready: &Path, max_connections:
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.spawn().expect("spawn witness")
+}
+
+fn spawn_fault_proxy(
+    upstream: SocketAddr,
+    ready: &Path,
+    mode: &Path,
+    max_connections: u64,
+) -> Child {
+    Command::new(binary())
+        .arg("fault-proxy")
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--ready-file")
+        .arg(ready)
+        .arg("--upstream")
+        .arg(upstream.to_string())
+        .arg("--mode-file")
+        .arg(mode)
+        .arg("--max-connections")
+        .arg(max_connections.to_string())
+        .arg("--timeout-ms")
+        .arg("3000")
+        .arg("--allow-lifecycle-lab")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fault proxy")
 }
 
 fn spawn_candidate(

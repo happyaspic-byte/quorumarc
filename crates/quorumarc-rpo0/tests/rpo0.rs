@@ -315,6 +315,35 @@ fn recovery_preserves_dedupe_without_reapplying_an_old_operation() {
 }
 
 #[test]
+fn recovered_wal_confirms_only_the_exact_stable_operation() {
+    let mut counter = ReplicatedCounter::new();
+    let mut left = MemoryReplica::new("left");
+    let mut right = MemoryReplica::new("right");
+    let acknowledged = counter
+        .apply(operation(19, 0, 4), &mut left, &mut right)
+        .expect("operation should be acknowledged");
+    let recovered = recover_wal(left.bytes()).expect("WAL should recover");
+    let confirmed = recovered
+        .confirm_operation(operation(19, 0, 4))
+        .expect("exact recovered retry")
+        .expect("operation must exist");
+    assert_eq!(confirmed.operation_id, OperationId::new([19; 16]));
+    assert_eq!(confirmed.commit_index, acknowledged.commit_index);
+    assert_eq!(confirmed.value, acknowledged.value);
+    assert_eq!(confirmed.state_root, acknowledged.state_root);
+    assert!(
+        recovered
+            .confirm_operation(operation(20, 0, 4))
+            .expect("unknown operation is not an error")
+            .is_none()
+    );
+    assert!(matches!(
+        recovered.confirm_operation(operation(19, 0, 5)),
+        Err(Rpo0Error::ConflictingDuplicate(_))
+    ));
+}
+
+#[test]
 fn preexisting_replica_corruption_blocks_the_next_write() {
     let mut counter = ReplicatedCounter::new();
     let mut left = MemoryReplica::new("left");

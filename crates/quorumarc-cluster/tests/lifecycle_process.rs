@@ -199,6 +199,33 @@ impl Lab {
         kill_child(&mut self.node_a);
     }
 
+    fn restart_node_a(&mut self, spec: NodeSpec) {
+        assert!(
+            self.node_a.is_none(),
+            "node A must be stopped before restart"
+        );
+        let ready = self.fixture.root.join("node-a.ready");
+        if let Err(error) = fs::remove_file(&ready) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotFound,
+                "remove stale node A readiness"
+            );
+        }
+        let witness = self.node_a_proxy_address.unwrap_or(self.witness_address);
+        let mut child = spawn_node(&self.fixture, LifecycleNodeId::NodeA, witness, &ready, spec);
+        let address = wait_ready(&ready, &mut child);
+        self.node_a_address = address;
+        self.node_a = Some(child);
+        self.node_a_client = LifecycleClient::new(
+            address,
+            LifecycleNodeId::NodeA,
+            SigningKey::from_bytes(&[11; 32]).verifying_key(),
+            SigningKey::from_bytes(&[37; 32]),
+            TIMEOUT,
+        );
+    }
+
     fn stop_node_a(&mut self, now_ms: u64) {
         let report = self.node_a_client.stop(now_ms).expect("stop node A");
         assert_eq!(report.reason_code, LifecycleReasonCode::Stopping);
@@ -708,6 +735,145 @@ fn stale_witness_exchange_replay_self_fences_requesting_node() {
     assert_eq!(replay.state, LifecycleState::SelfFenced);
     assert_eq!(replay.effect_count, 0);
     record_pass(13, "stale_witness_exchange_replay");
+}
+
+#[test]
+fn restarted_older_node_cannot_resurrect_previous_epoch() {
+    let mut lab = Lab::start("restart-old-epoch", NodeSpec::normal(), NodeSpec::normal());
+    assert_eq!(
+        lab.node_a_client
+            .promote(1, 1_000)
+            .expect("A epoch 1")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    lab.kill_node_a();
+    assert_eq!(
+        lab.node_b_client
+            .promote(2, 1_250)
+            .expect("B epoch 2")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    lab.restart_node_a(NodeSpec::normal());
+    let stale = lab
+        .node_a_client
+        .promote(1, 1_100)
+        .expect("old epoch restart refusal");
+    assert_eq!(stale.reason_code, LifecycleReasonCode::RefusedDurability);
+    assert_eq!(stale.state, LifecycleState::SelfFenced);
+    assert!(stale.incarnation >= 2);
+    assert_eq!(stale.effect_count, 0);
+    assert!(
+        lab.node_b_client
+            .emit(2, 1_251, [54; 16])
+            .expect("new authority remains effective")
+            .reason_code
+            .effect_succeeded()
+    );
+    record_pass(19, "restart_with_older_epoch");
+}
+
+#[test]
+fn witness_double_vote_refusal_prevents_second_activation() {
+    let mut lab = Lab::start("double-vote", NodeSpec::normal(), NodeSpec::normal());
+    assert_eq!(
+        lab.node_a_client
+            .promote(1, 1_000)
+            .expect("A epoch 1")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    let refused = lab
+        .node_b_client
+        .promote(1, 1_000)
+        .expect("same-epoch B refusal");
+    assert_eq!(refused.reason_code, LifecycleReasonCode::RefusedWitnessVote);
+    assert_eq!(refused.state, LifecycleState::Standby);
+    assert_eq!(refused.effect_count, 0);
+    let a = lab
+        .node_a_client
+        .emit(1, 1_001, [55; 16])
+        .expect("A effect");
+    let b = lab
+        .node_b_client
+        .emit(1, 1_001, [56; 16])
+        .expect("B effect refusal");
+    assert!(a.reason_code.effect_succeeded());
+    assert!(!b.reason_code.effect_succeeded());
+    record_pass(23, "witness_double_vote_attempt");
+}
+
+#[test]
+fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
+    let mut lab = Lab::start(
+        "workload-retry-failover",
+        NodeSpec::normal(),
+        NodeSpec::normal(),
+    );
+    let original_a = fs::read(&lab.fixture.node_a_wal).expect("read original A WAL");
+    let original_b = fs::read(&lab.fixture.node_b_wal).expect("read original B WAL");
+    assert_eq!(original_a, original_b);
+    assert_eq!(
+        lab.node_a_client
+            .promote(1, 1_000)
+            .expect("A epoch 1")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    lab.kill_node_a();
+    assert_eq!(
+        lab.node_b_client
+            .promote(2, 1_250)
+            .expect("B epoch 2")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    let confirmed = lab
+        .node_b_client
+        .retry_workload(2, 1_251, [9; 16])
+        .expect("confirm recovered operation");
+    assert_eq!(
+        confirmed.reason_code,
+        LifecycleReasonCode::WorkloadRetryConfirmed
+    );
+    assert_eq!(confirmed.state, LifecycleState::Active);
+    assert_eq!(confirmed.commit_index, 1);
+    assert_eq!(
+        lab.node_b_client
+            .retry_last_command()
+            .expect("exact controller retry"),
+        confirmed
+    );
+    let repeated = lab
+        .node_b_client
+        .retry_workload(2, 1_252, [9; 16])
+        .expect("new signed request for same operation");
+    assert_eq!(
+        repeated.reason_code,
+        LifecycleReasonCode::WorkloadRetryConfirmed
+    );
+    let unknown = lab
+        .node_b_client
+        .retry_workload(2, 1_253, [57; 16])
+        .expect("unknown operation refusal");
+    assert_eq!(
+        unknown.reason_code,
+        LifecycleReasonCode::RefusedWorkloadRetry
+    );
+    assert_eq!(unknown.state, LifecycleState::Active);
+    assert_eq!(
+        fs::read(&lab.fixture.node_a_wal).expect("read final A WAL"),
+        original_a
+    );
+    assert_eq!(
+        fs::read(&lab.fixture.node_b_wal).expect("read final B WAL"),
+        original_b
+    );
+    let recovered = recover_wal(&original_b).expect("recover single durable record");
+    assert_eq!(recovered.commit_index, 1);
+    assert_eq!(recovered.value, 1);
+    record_pass(20, "duplicate_workload_operation_after_failover");
 }
 
 #[test]

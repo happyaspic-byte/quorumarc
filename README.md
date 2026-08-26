@@ -75,7 +75,7 @@ enforced end-to-end failover remains unproven. See the
 | Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, bounded genesis, authenticated long-running A/B/Witness lifecycle, and deterministic repeated-probe/lease-guard automatic decisions |
 | Latest exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its exact head; the counts apply only to that model revision and assumptions |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
-| Not yet end-to-end verified | Autonomous election/failure detection, enforced external effects, continuous replication/client recovery, four remaining scenarios, and physical validation |
+| Not yet end-to-end verified | Autonomous election/failure detection, enforced external effects, continuous live replication/client writes, production-class all-scenario traces, and physical validation |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
 Exact test inventory, repetitions, coverage, model counts, commit, workflow,

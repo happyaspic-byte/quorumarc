@@ -137,6 +137,13 @@ the same operation ID to resolve that ambiguity; the exact-tail behavior makes
 the local replica retry idempotent. It must not issue a replacement ID and then
 call a duplicate result data loss.
 
+Recovered WAL state exposes an exact-operation confirmation API. It returns the
+durable commit, value, and state root only when operation ID, expected prior
+commit, and increment all match. The lifecycle lab uses this after an Active
+loss to answer a signed duplicate request from the successor without appending
+another record. This is recovered-dedup evidence for the fixed pre-seeded
+operation, not a continuous network client-write service.
+
 A single surviving WAL cannot by itself distinguish "both replicas durable and
 the client acknowledged" from "only this replica durable and the operation
 returned unknown/failure." A future service therefore needs an authenticated

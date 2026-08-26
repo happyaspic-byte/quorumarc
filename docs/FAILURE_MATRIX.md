@@ -39,7 +39,8 @@ measurement.
 
 This static file does not turn source presence into a global PASS result. The
 lifecycle suite emits scenario, seed, validation class, single-writer, and
-acknowledged-loss fields for 21 rows; the Draft PR must link an exact successful
+acknowledged-loss fields for 24 rows, while the one-shot proxy emits the A/B
+replication-partition row; the Draft PR must link an exact successful
 workflow before those executions are reported as GitHub-process PASS. Physical
 and production enforcement remain separate validation classes.
 
@@ -52,7 +53,7 @@ and production enforcement remain separate validation classes.
 | 3 | Graceful Active shutdown | The lifecycle closes and exits the Active, still withholding transfer until safe expiry | WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — no production planned-switch controller |
 | 4 | Standby process shutdown | The lifecycle stops a real Standby and verifies the Active test effect remains singular | MODEL; LIFECYCLE PROCESS SOURCE — continuous RPO-0 writes are not integrated |
 | 5 | Witness shutdown | The lifecycle kills the Witness and obtains a signed node refusal with zero effects | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE |
-| 6 | A/B network partition | Compact control-path partitions are explored | MODEL; NOT INTEGRATED — isolate actual A/B replication and control channels without treating disconnect as fencing |
+| 6 | A/B network partition | A one-shot candidate reaches the Witness but its authenticated A/B replication frame is dropped; no write is acknowledged, no vote is requested, and no effect opens | MODEL; THREE-PROCESS LAB; LIFECYCLE FAULT-PROXY SOURCE — fixed one-operation replication path, not continuous lifecycle traffic |
 | 7 | Only A can reach Witness | Separate Node/Witness proxies drop B's path; B is refused and A alone can obtain signed authority and emit one test effect | MODEL; LIFECYCLE FAULT-PROXY SOURCE — shared-host Witness-path analogue, not a physical partition |
 | 8 | Only B can reach Witness | Separate Node/Witness proxies drop A's path; A is refused and B alone can obtain signed authority and emit one test effect | MODEL; LIFECYCLE FAULT-PROXY SOURCE — shared-host Witness-path analogue, not a physical partition |
 | 9 | Complete network partition | Both Node/Witness proxy paths drop requests and both candidates remain ineffective | MODEL; LIFECYCLE FAULT-PROXY SOURCE — A/B data path is not yet continuous, so this covers Witness isolation only |
@@ -65,11 +66,11 @@ and production enforcement remain separate validation classes.
 | 16 | Clock rollback | A genuinely active lifecycle node emits once, observes rollback, self-fences, and refuses later effects | MODEL; COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |
 | 17 | Durable-store failure | A promotion-frame write error poisons the live node store before gate opening | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — other store operations retain component coverage |
 | 18 | Partial write and corrupt journal | A partial promotion-frame write poisons and self-fences the lifecycle process before effects | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — arbitrary crash boundaries remain open |
-| 19 | Restart with an older epoch | Store/Witness tests preserve highest accepted epoch and refuse stale input after restart | COMPONENT SOURCE; WITNESS PROCESS SOURCE; NOT INTEGRATED — include rolled-back complete-node fixtures and documented trust assumptions |
-| 20 | Duplicate workload operation | RPO-0 tests deduplicate operation IDs; exact durable-tail retry returns the same receipt after response loss | COMPONENT SOURCE; NOT INTEGRATED — retry through real failover and prove one application plus an authenticated acknowledgement boundary |
+| 19 | Restart with an older epoch | After A epoch 1 and B epoch 2, A is killed, reacquires its OS-released local locks with a higher incarnation, and self-fences when its older durable vote cannot be reused | COMPONENT SOURCE; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — complete trusted-copy rollback remains outside this evidence |
+| 20 | Duplicate workload operation | A two-copy acknowledged operation is recovered after A loss and B promotion; signed exact retries on B confirm the original commit/root without changing either WAL, while an unknown ID is refused | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — the original write is fixture-preseeded, not accepted through a live lifecycle client |
 | 21 | State-root mismatch | A valid but different WAL root is refused by the live candidate before activation | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |
 | 22 | Policy-hash mismatch | A data node with a different capsule hash receives a fail-closed lifecycle refusal | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — rotation/restart remains open |
-| 23 | Witness double-vote attempt | Durable Witness tests refuse a different candidate/proposal for the same workload and epoch | COMPONENT SOURCE; WITNESS PROCESS SOURCE; NOT INTEGRATED — prove the refusal prevents a second certified activation |
+| 23 | Witness double-vote attempt | A is certified in epoch 1; B's different same-epoch request is refused by the durable Witness, B remains Standby, and only A's test effect succeeds | COMPONENT SOURCE; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — cloned Witness identity/storage remains outside scope |
 | 24 | Process pause then resume | A real Active is stopped, a later epoch activates on the peer, and the resumed old process self-fences before effect | WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE; physical timing remains PHYSICAL-ONLY |
 | 25 | Repeated failover and failback | Four signed authority epochs alternate A/B with monotonic durable Witness state and one effect per epoch | MODEL; LIFECYCLE PROCESS SOURCE — command-driven bounded cycles, not soak evidence |
 

@@ -45,10 +45,10 @@ not a missing-success test to bypass.
 
 The public repository and workflow artifacts are useful reproducibility
 evidence, but neither is a certification, formal proof, independent audit, or
-production-readiness claim. Lifecycle source tests now cover 21 required
-scenario IDs in a shared-host, command-driven validation class; exact-head
-GitHub success is tracked in the Draft PR. The remaining four scenarios, physical
-enforcement, and production end-to-end PASS class remain incomplete.
+production-readiness claim. Lifecycle source tests now cover 24 required
+scenario IDs and the one-shot A/B proxy covers the remaining ID in shared-host
+validation classes; exact-head GitHub success is tracked in the Draft PR.
+Physical enforcement and production end-to-end PASS classes remain incomplete.
 p50/p95/p99 automatic failover and write-latency measurements do not exist.
 
 ## Evidence classification and current measurements
@@ -110,11 +110,12 @@ and timing distributions remain incomplete.
 ### One-shot genesis scope
 
 The bounded bootstrap is explicitly named `LAB_GENESIS_ONE_SHOT`. A
-role-independent owner-lock name prevents local peer/candidate/Witness roles
+role-independent OS advisory owner lock prevents local peer/candidate/Witness roles
 from claiming the same declared store or WAL path; readiness, keys, journals,
 locks, and WAL paths are also checked for local aliases. These checks may
-prevent concurrent honest processes from owning the same local files, but they
-are not distributed locks. Copying the trusted directories and
+prevent concurrent honest processes from owning the same local files and the
+kernel releases ownership after `SIGKILL`, but they are not distributed locks.
+Copying the trusted directories and
 Witness credential to another instance can authorize another logical effect.
 This slice must never be reported as global single-writer proof or scenario 1
 PASS.

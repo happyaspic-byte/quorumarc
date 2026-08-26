@@ -24,7 +24,7 @@ implemented and physically validated.
 | Operations | Local Web/API status, topology, alarms, reason codes, receipts and guided repair | CLI diagnostics only |
 | Workload coverage | systemd and container profiles first; KVM and supported databases later | Not implemented |
 | Security lifecycle | Provisioning, least privilege, rotation, revocation, SBOM, provenance and independent review | Candidate/Witness plus pinned-controller command authentication, latest-request replay handling, and CI dependency checks; no RBAC, durable management replay state, rotation workflow, SBOM/provenance, or independent review |
-| Availability evidence | 25 integrated scenarios, latency percentiles, zero single-writer violations and zero acknowledged loss | Lifecycle source covers 21/25 on a shared host, including bounded Witness-path faults; exact-head and remaining/physical evidence required |
+| Availability evidence | 25 integrated scenarios, latency percentiles, zero single-writer violations and zero acknowledged loss | Shared-host source paths cover 25/25, including bounded replication/Witness faults and crash restart; exact-head, end-to-end, timing, and physical evidence remain required |
 | Physical evidence | Two data hosts, independent Witness, NIC/switch/power/storage/fence/VIP campaigns | Not performed |
 | Serviceability | Backup, restore, node replacement, upgrade, rollback, support bundle and runbooks | Read-only identity-aware proof/store inspection plus documentation sketches |
 | FT continuity | Supported memory/device/session continuity profiles | Later research gate |

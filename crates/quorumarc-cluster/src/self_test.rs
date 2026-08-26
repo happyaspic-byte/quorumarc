@@ -14,7 +14,7 @@ use quorumarc_store::{DurableAuthorityStore, FileBackend};
 use quorumarc_wire::SigningKey;
 
 use crate::bootstrap::{BootstrapConfig, run_bootstrap};
-use crate::path_guard::reject_symlink_components;
+use crate::path_guard::{OwnerLock, reject_symlink_components};
 use crate::protocol::{
     LAB_EPOCH, LAB_INCARNATION, candidate_store_identity, witness_store_identity,
 };
@@ -532,18 +532,18 @@ fn verify_durable_outputs(
 }
 
 fn verify_locks_released(paths: &FixturePaths) -> Result<(), ClusterError> {
-    let locks = [
-        paths.candidate_store.join(".quorumarc.owner"),
-        paths.witness_store.join(".quorumarc.owner"),
-        paths.root.join("node-a.wal.quorumarc.owner"),
-        paths.root.join("node-b.wal.quorumarc.owner"),
-    ];
-    if let Some(lock) = locks.iter().find(|path| path.exists()) {
-        return Err(err(
-            "SELF_TEST_LOCK_REFUSED",
-            format!("{} remained after child exit", lock.display()),
-        ));
-    }
+    let candidate = OwnerLock::for_store(&paths.candidate_store, "self-test-verifier")
+        .map_err(|error| err("SELF_TEST_LOCK_REFUSED", error.to_string()))?;
+    drop(candidate);
+    let witness = OwnerLock::for_store(&paths.witness_store, "self-test-verifier")
+        .map_err(|error| err("SELF_TEST_LOCK_REFUSED", error.to_string()))?;
+    drop(witness);
+    let node_a = OwnerLock::for_file(&paths.candidate_wal, "self-test-verifier")
+        .map_err(|error| err("SELF_TEST_LOCK_REFUSED", error.to_string()))?;
+    drop(node_a);
+    let node_b = OwnerLock::for_file(&paths.peer_wal, "self-test-verifier")
+        .map_err(|error| err("SELF_TEST_LOCK_REFUSED", error.to_string()))?;
+    drop(node_b);
     Ok(())
 }
 

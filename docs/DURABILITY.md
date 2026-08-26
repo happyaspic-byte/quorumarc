@@ -136,8 +136,10 @@ workload, node, role, or store-instance ID. It does not detect a perfect clone
 that includes both the journal and the same expected identity/configuration. A
 malicious actor can also replace a CRC-protected frame because CRC is not
 authentication. The store API contains no inter-process lock or compare-and-swap.
-The bounded cluster wrapper uses one role-independent local owner-lock name per
-declared store or WAL path, but that lock is not distributed fencing and cannot
+The bounded cluster wrapper holds one role-independent OS advisory lock on a
+persistent local lock inode per declared store or WAL path. The kernel releases
+that ownership after process death, allowing a verified restart without unsafe
+stale-PID deletion. The lock is not distributed fencing and cannot
 establish global uniqueness after a complete directory/configuration/credential
 clone. Production use still requires protected provisioning, authenticated or
 hardware-backed anti-rollback state, and real effect fencing.

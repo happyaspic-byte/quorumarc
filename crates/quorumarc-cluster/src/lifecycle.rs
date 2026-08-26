@@ -15,7 +15,7 @@ use quorumarc_core::{
     SafetyPolicy, StateEvidence, StateRoot as CoreStateRoot, TrustedClock, WorkloadId,
     validate_promotion,
 };
-use quorumarc_rpo0::{OperationId, WalEntry, recover_wal};
+use quorumarc_rpo0::{CounterOperation, OperationId, WalEntry, recover_wal};
 use quorumarc_runtime::{
     EffectOutcome, FrameCodec, TestEffectActor, VoteReasonCode, WitnessPolicy, WitnessVoteActor,
 };
@@ -184,6 +184,7 @@ pub enum LifecycleReasonCode {
     EffectAlreadyRecorded,
     Closed,
     Stopping,
+    WorkloadRetryConfirmed,
     RefusedLeaseNotActive,
     RefusedWitnessUnavailable,
     RefusedWitnessVote,
@@ -198,6 +199,7 @@ pub enum LifecycleReasonCode {
     RefusedClockRollback,
     RefusedTerminalFault,
     RefusedReplay,
+    RefusedWorkloadRetry,
 }
 
 impl LifecycleReasonCode {
@@ -212,6 +214,7 @@ impl LifecycleReasonCode {
             Self::EffectAlreadyRecorded => "LIFECYCLE_EFFECT_ALREADY_RECORDED",
             Self::Closed => "LIFECYCLE_CLOSED",
             Self::Stopping => "LIFECYCLE_STOPPING",
+            Self::WorkloadRetryConfirmed => "LIFECYCLE_WORKLOAD_RETRY_CONFIRMED",
             Self::RefusedLeaseNotActive => "LIFECYCLE_REFUSED_LEASE_NOT_ACTIVE",
             Self::RefusedWitnessUnavailable => "LIFECYCLE_REFUSED_WITNESS_UNAVAILABLE",
             Self::RefusedWitnessVote => "LIFECYCLE_REFUSED_WITNESS_VOTE",
@@ -226,6 +229,7 @@ impl LifecycleReasonCode {
             Self::RefusedClockRollback => "LIFECYCLE_REFUSED_CLOCK_ROLLBACK",
             Self::RefusedTerminalFault => "LIFECYCLE_REFUSED_TERMINAL_FAULT",
             Self::RefusedReplay => "LIFECYCLE_REFUSED_REPLAY",
+            Self::RefusedWorkloadRetry => "LIFECYCLE_REFUSED_WORKLOAD_RETRY",
         }
     }
 
@@ -238,6 +242,7 @@ impl LifecycleReasonCode {
             Self::EffectAlreadyRecorded => 5,
             Self::Closed => 6,
             Self::Stopping => 7,
+            Self::WorkloadRetryConfirmed => 8,
             Self::RefusedLeaseNotActive => 100,
             Self::RefusedWitnessUnavailable => 101,
             Self::RefusedWitnessVote => 102,
@@ -252,6 +257,7 @@ impl LifecycleReasonCode {
             Self::RefusedClockRollback => 111,
             Self::RefusedTerminalFault => 112,
             Self::RefusedReplay => 113,
+            Self::RefusedWorkloadRetry => 114,
         }
     }
 
@@ -264,6 +270,7 @@ impl LifecycleReasonCode {
             5 => Ok(Self::EffectAlreadyRecorded),
             6 => Ok(Self::Closed),
             7 => Ok(Self::Stopping),
+            8 => Ok(Self::WorkloadRetryConfirmed),
             100 => Ok(Self::RefusedLeaseNotActive),
             101 => Ok(Self::RefusedWitnessUnavailable),
             102 => Ok(Self::RefusedWitnessVote),
@@ -278,6 +285,7 @@ impl LifecycleReasonCode {
             111 => Ok(Self::RefusedClockRollback),
             112 => Ok(Self::RefusedTerminalFault),
             113 => Ok(Self::RefusedReplay),
+            114 => Ok(Self::RefusedWorkloadRetry),
             _ => Err(err(
                 "LIFECYCLE_RESPONSE_MALFORMED",
                 "unknown lifecycle reason code",
@@ -666,6 +674,7 @@ enum CommandKind {
     Close,
     Stop,
     Replay,
+    RetryWorkload,
 }
 
 impl CommandKind {
@@ -678,6 +687,7 @@ impl CommandKind {
             Self::Close => 5,
             Self::Stop => 6,
             Self::Replay => 7,
+            Self::RetryWorkload => 8,
         }
     }
 
@@ -690,6 +700,7 @@ impl CommandKind {
             5 => Ok(Self::Close),
             6 => Ok(Self::Stop),
             7 => Ok(Self::Replay),
+            8 => Ok(Self::RetryWorkload),
             _ => Err(err(
                 "LIFECYCLE_COMMAND_MALFORMED",
                 "unknown lifecycle command tag",
@@ -758,7 +769,11 @@ impl LifecycleCommand {
     fn validate_canonical(self) -> Result<(), ClusterError> {
         match self.kind {
             CommandKind::Promote if self.epoch > 0 && self.operation_id == [0; 16] => Ok(()),
-            CommandKind::Emit if self.epoch > 0 && self.operation_id != [0; 16] => Ok(()),
+            CommandKind::Emit | CommandKind::RetryWorkload
+                if self.epoch > 0 && self.operation_id != [0; 16] =>
+            {
+                Ok(())
+            }
             CommandKind::Status
             | CommandKind::Tick
             | CommandKind::Close
@@ -1042,6 +1057,18 @@ impl LifecycleClient {
         self.send(CommandKind::Emit, now_ms, epoch, operation_id)
     }
 
+    /// Confirms an exact stable-operation retry from this Active node's
+    /// recovered RPO-0 demonstration WAL. This command never appends a new
+    /// workload record.
+    pub fn retry_workload(
+        &mut self,
+        epoch: u64,
+        now_ms: u64,
+        operation_id: [u8; 16],
+    ) -> Result<LifecycleReport, ClusterError> {
+        self.send(CommandKind::RetryWorkload, now_ms, epoch, operation_id)
+    }
+
     pub fn close(&mut self, now_ms: u64) -> Result<LifecycleReport, ClusterError> {
         self.send(CommandKind::Close, now_ms, 0, [0; 16])
     }
@@ -1149,6 +1176,7 @@ type LifecycleBackend = FaultInjectingBackend<FileBackend>;
 
 struct LifecycleNodeRuntime {
     node_id: LifecycleNodeId,
+    wal_path: PathBuf,
     signing_key: SigningKey,
     witness_key: VerifyingKey,
     controller_key: VerifyingKey,
@@ -1219,6 +1247,7 @@ impl LifecycleNodeRuntime {
         );
         Ok(Self {
             node_id: config.node_id,
+            wal_path: config.wal_path.clone(),
             signing_key,
             witness_key,
             controller_key,
@@ -1287,6 +1316,7 @@ impl LifecycleNodeRuntime {
             CommandKind::Promote => self.promote(command.epoch, command.now_ms),
             CommandKind::Tick => LifecycleReasonCode::TickApplied,
             CommandKind::Emit => self.emit(command.epoch, command.operation_id),
+            CommandKind::RetryWorkload => self.retry_workload(command.epoch, command.operation_id),
             CommandKind::Close => self.close(),
             CommandKind::Stop => {
                 let _ = self.close();
@@ -1544,6 +1574,58 @@ impl LifecycleNodeRuntime {
                 self.lease_expires_at_ms = 0;
                 LifecycleReasonCode::RefusedGate
             }
+        }
+    }
+
+    fn retry_workload(&mut self, epoch: u64, operation_id: [u8; 16]) -> LifecycleReasonCode {
+        if self.state != LifecycleState::Active || self.active_epoch != Some(epoch) {
+            return LifecycleReasonCode::RefusedNotActive;
+        }
+        let bytes = match fs::read(&self.wal_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!(
+                    "event=lifecycle_workload_retry_refusal node={} code=WAL_READ detail={error}",
+                    self.node_id.as_str()
+                );
+                self.effects.close();
+                self.state = LifecycleState::SelfFenced;
+                self.terminal_fault = true;
+                return LifecycleReasonCode::RefusedWorkloadRetry;
+            }
+        };
+        let recovered = match recover_wal(&bytes) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                eprintln!(
+                    "event=lifecycle_workload_retry_refusal node={} code=WAL_RECOVERY detail={error}",
+                    self.node_id.as_str()
+                );
+                self.effects.close();
+                self.state = LifecycleState::SelfFenced;
+                self.terminal_fault = true;
+                return LifecycleReasonCode::RefusedWorkloadRetry;
+            }
+        };
+        let operation = CounterOperation {
+            id: OperationId::new(operation_id),
+            expected_commit_index: 0,
+            increment: 1,
+        };
+        match recovered.confirm_operation(operation) {
+            Ok(Some(confirmed))
+                if confirmed.commit_index == self.progress_commit
+                    && confirmed.state_root == self.progress_root =>
+            {
+                LifecycleReasonCode::WorkloadRetryConfirmed
+            }
+            Ok(Some(_)) => {
+                self.effects.close();
+                self.state = LifecycleState::SelfFenced;
+                self.terminal_fault = true;
+                LifecycleReasonCode::RefusedWorkloadRetry
+            }
+            Ok(None) | Err(_) => LifecycleReasonCode::RefusedWorkloadRetry,
         }
     }
 

@@ -65,6 +65,17 @@ pub struct RecoveredCounter {
     pub(crate) operations: BTreeMap<OperationId, RecoveredOperation>,
 }
 
+/// Exact durable result of an operation recovered from a WAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveredWrite {
+    pub operation_id: OperationId,
+    pub expected_commit_index: u64,
+    pub increment: u64,
+    pub commit_index: u64,
+    pub value: u64,
+    pub state_root: StateRoot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoveredOperation {
     pub(crate) commit_index: u64,
@@ -83,6 +94,33 @@ impl RecoveredCounter {
             state_root: initial_state_root(),
             operations: BTreeMap::new(),
         }
+    }
+
+    /// Confirms an exact stable-operation retry from recovered durable bytes.
+    ///
+    /// A missing operation returns `Ok(None)`. Reuse of an existing operation
+    /// ID with different content is a typed conflict and never becomes an
+    /// acknowledgement.
+    pub fn confirm_operation(
+        &self,
+        operation: CounterOperation,
+    ) -> Result<Option<RecoveredWrite>, crate::Rpo0Error> {
+        let Some(recovered) = self.operations.get(&operation.id) else {
+            return Ok(None);
+        };
+        if recovered.expected_commit_index != operation.expected_commit_index
+            || recovered.increment != operation.increment
+        {
+            return Err(crate::Rpo0Error::ConflictingDuplicate(operation.id));
+        }
+        Ok(Some(RecoveredWrite {
+            operation_id: operation.id,
+            expected_commit_index: recovered.expected_commit_index,
+            increment: recovered.increment,
+            commit_index: recovered.commit_index,
+            value: recovered.value,
+            state_root: recovered.state_root,
+        }))
     }
 }
 

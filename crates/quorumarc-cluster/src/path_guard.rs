@@ -3,6 +3,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
+use fs2::FileExt;
+
 use crate::{ClusterError, err};
 
 pub(crate) fn reject_symlink_components(path: &Path) -> Result<(), ClusterError> {
@@ -350,7 +352,7 @@ pub(crate) fn write_ready_file(path: &Path, contents: &str) -> Result<(), Cluste
 
 #[derive(Debug)]
 pub(crate) struct OwnerLock {
-    path: PathBuf,
+    _file: File,
 }
 
 impl OwnerLock {
@@ -367,18 +369,26 @@ impl OwnerLock {
     fn acquire(path: PathBuf, role: &str) -> Result<Self, ClusterError> {
         reject_symlink_components(&path)?;
         let mut file = OpenOptions::new()
-            .create_new(true)
+            .create(true)
+            .read(true)
             .write(true)
+            .truncate(false)
             .open(&path)
             .map_err(|error| err("OWNER_LOCK_REFUSED", format!("{}: {error}", path.display())))?;
-        file.write_all(format!("role={role} pid={}", std::process::id()).as_bytes())
+        file.try_lock_exclusive().map_err(|error| {
+            err(
+                "OWNER_LOCK_REFUSED",
+                format!("{} is already owned: {error}", path.display()),
+            )
+        })?;
+        file.set_len(0)
+            .and_then(|()| {
+                file.write_all(format!("role={role} pid={}", std::process::id()).as_bytes())
+            })
             .and_then(|()| file.sync_all())
             .and_then(|()| sync_parent(&path))
-            .map_err(|error| {
-                let _remove_result = fs::remove_file(&path);
-                err("OWNER_LOCK_FAILED", format!("{}: {error}", path.display()))
-            })?;
-        Ok(Self { path })
+            .map_err(|error| err("OWNER_LOCK_FAILED", format!("{}: {error}", path.display())))?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -400,14 +410,6 @@ fn ready_staging_path(file: &Path) -> PathBuf {
         .map_or_else(|| OsString::from("ready"), OsString::from);
     name.push(".quorumarc.staging");
     file_parent(file).join(name)
-}
-
-impl Drop for OwnerLock {
-    fn drop(&mut self) {
-        if fs::remove_file(&self.path).is_ok() {
-            let _sync_result = sync_parent(&self.path);
-        }
-    }
 }
 
 fn absolute_lexical(path: &Path) -> Result<PathBuf, ClusterError> {
