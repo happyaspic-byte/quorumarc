@@ -861,6 +861,49 @@ fn delayed_duplicate_lost_reply_and_corrupt_frames_fail_safely() {
         );
         assert_eq!(refusal.effect_count, 0);
     }
+    {
+        let lab = Lab::start("proxy-reorder-pair", NodeSpec::normal(), NodeSpec::normal());
+        let log = lab.fixture.root.join("node-a-control-proxy.log");
+        let (mut proxy, proxy_address) =
+            spawn_control_proxy(&lab.fixture, "node-a-control", lab.node_a_address, &log);
+        fs::write(
+            lab.fixture.root.join("node-a-control-proxy.mode"),
+            "reorder-pair",
+        )
+        .expect("set node-facing reorder mode");
+        let node_key = SigningKey::from_bytes(&[11; 32]).verifying_key();
+        let controller_key = SigningKey::from_bytes(&[37; 32]);
+        let mut first = LifecycleClient::new(
+            proxy_address,
+            LifecycleNodeId::NodeA,
+            node_key,
+            controller_key.clone(),
+            TIMEOUT,
+        );
+        let mut second = LifecycleClient::new(
+            proxy_address,
+            LifecycleNodeId::NodeA,
+            node_key,
+            controller_key,
+            TIMEOUT,
+        );
+        let first_thread =
+            thread::spawn(move || first.status(1_000).expect("reordered first status"));
+        assert!(
+            wait_for_log(&log, "event=fault_proxy_reorder_buffered", &mut proxy),
+            "reorder proxy did not buffer the first frame"
+        );
+        let second_report = second.status(1_000).expect("reordered second status");
+        let first_report = first_thread.join().expect("join reordered first status");
+        assert_eq!(first_report, second_report);
+        assert_eq!(first_report.reason_code, LifecycleReasonCode::Status);
+        fs::write(lab.fixture.root.join("node-a-control-proxy.mode"), "pass")
+            .expect("restore node-facing proxy mode");
+        let later = second.status(1_001).expect("counter 2 after reorder");
+        assert_eq!(later.reason_code, LifecycleReasonCode::Status);
+        assert_eq!(later.incarnation, first_report.incarnation);
+        drain_proxy(&mut Some(proxy), Some(proxy_address));
+    }
     record_pass(10, "delay_duplicate_reply_drop_corrupt");
 }
 
@@ -1446,6 +1489,40 @@ fn proxy_mode_path(fixture: &Fixture, node: LifecycleNodeId) -> PathBuf {
     fixture.root.join(format!("{label}-proxy.mode"))
 }
 
+fn spawn_control_proxy(
+    fixture: &Fixture,
+    label: &str,
+    upstream: SocketAddr,
+    log_path: &Path,
+) -> (Child, SocketAddr) {
+    let ready = fixture.root.join(format!("{label}-proxy.ready"));
+    let mode = fixture.root.join(format!("{label}-proxy.mode"));
+    fs::write(&mode, "pass").expect("create control proxy mode");
+    let log = File::create(log_path).expect("create control proxy log");
+    let log_stderr = log.try_clone().expect("clone control proxy log");
+    let mut child = Command::new(binary())
+        .arg("fault-proxy")
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--ready-file")
+        .arg(&ready)
+        .arg("--upstream")
+        .arg(upstream.to_string())
+        .arg("--mode-file")
+        .arg(&mode)
+        .arg("--max-connections")
+        .arg(PROXY_MAX_CONNECTIONS.to_string())
+        .arg("--timeout-ms")
+        .arg("10000")
+        .arg("--allow-lifecycle-lab")
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_stderr))
+        .spawn()
+        .expect("spawn control fault proxy");
+    let address = wait_ready(&ready, &mut child);
+    (child, address)
+}
+
 fn spawn_witness(fixture: &Fixture, ready: &Path) -> Child {
     Command::new(binary())
         .arg("lifecycle-witness")
@@ -1609,6 +1686,19 @@ fn wait_for_trace(path: &Path, expected: &str, child: &mut Child) -> bool {
             return true;
         }
         if child.try_wait().expect("inspect controller").is_some() || Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_log(path: &Path, expected: &str, child: &mut Child) -> bool {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        if fs::read_to_string(path).is_ok_and(|log| log.contains(expected)) {
+            return true;
+        }
+        if child.try_wait().expect("inspect logged child").is_some() || Instant::now() >= deadline {
             return false;
         }
         thread::sleep(Duration::from_millis(5));

@@ -1,8 +1,9 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quorumarc_runtime::FrameCodec;
 
@@ -34,13 +35,14 @@ enum ProxyMode {
     Corrupt,
     CorruptReply,
     ReplayLast,
+    ReorderPair,
 }
 
 /// Runs a bounded, loopback-only, frame-aware fault proxy.
 ///
 /// Promotion requests and Witness responses remain end-to-end signed. The
-/// proxy can delay, duplicate, drop, corrupt, or replay opaque frames but
-/// cannot create valid authority evidence.
+/// proxy can delay, duplicate, drop, corrupt, replay, or reorder opaque frames
+/// but cannot create valid authority evidence.
 pub fn serve_fault_proxy(config: FaultProxyConfig) -> Result<(), ClusterError> {
     ensure_loopback(config.listen)?;
     ensure_loopback(config.upstream)?;
@@ -74,40 +76,53 @@ pub fn serve_fault_proxy(config: FaultProxyConfig) -> Result<(), ClusterError> {
     );
 
     let mut last_forwarded_request: Option<Vec<u8>> = None;
-    for _ in 0..config.max_connections {
+    let mut remaining = config.max_connections;
+    while remaining > 0 {
         let (mut downstream, remote) = listener
             .accept()
             .map_err(|error| err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()))?;
+        remaining -= 1;
         if !remote.ip().is_loopback() {
             continue;
         }
         configure_stream(&downstream, config.io_timeout)?;
-        if let Err(error) =
-            handle_connection(&mut downstream, codec, &config, &mut last_forwarded_request)
-        {
-            eprintln!("event=fault_proxy_refusal {error}");
+        match handle_connection(
+            &listener,
+            &mut downstream,
+            codec,
+            &config,
+            &mut last_forwarded_request,
+            &mut remaining,
+        ) {
+            Ok(()) => {}
+            Err(error) => eprintln!("event=fault_proxy_refusal {error}"),
         }
     }
     Ok(())
 }
 
 fn handle_connection(
+    listener: &TcpListener,
     downstream: &mut TcpStream,
     codec: FrameCodec,
     config: &FaultProxyConfig,
     last_forwarded_request: &mut Option<Vec<u8>>,
+    remaining: &mut u64,
 ) -> Result<(), ClusterError> {
-    let request = codec
-        .read_frame(downstream)
-        .map_err(|error| err("FAULT_PROXY_DOWNSTREAM_READ_FAILED", error.to_string()))?
-        .ok_or_else(|| {
-            err(
-                "FAULT_PROXY_DOWNSTREAM_REQUEST_MISSING",
-                "downstream closed without a frame",
-            )
-        })?;
+    let request = read_downstream_request(downstream, codec)?;
     let mode = read_mode(&config.mode_file)?;
     eprintln!("event=fault_proxy_mode mode={mode:?}");
+    if mode == ProxyMode::ReorderPair {
+        return reorder_pair(
+            listener,
+            downstream,
+            request,
+            codec,
+            config,
+            last_forwarded_request,
+            remaining,
+        );
+    }
     match mode {
         ProxyMode::Drop => Ok(()),
         ProxyMode::Delay(delay_ms) => {
@@ -166,7 +181,96 @@ fn handle_connection(
             *last_forwarded_request = Some(request);
             write_downstream(downstream, codec, &response)
         }
+        ProxyMode::ReorderPair => Err(err(
+            "FAULT_PROXY_MODE_REFUSED",
+            "reorder-pair requires a paired accept",
+        )),
     }
+}
+
+fn reorder_pair(
+    listener: &TcpListener,
+    first_downstream: &mut TcpStream,
+    first_request: Vec<u8>,
+    codec: FrameCodec,
+    config: &FaultProxyConfig,
+    last_forwarded_request: &mut Option<Vec<u8>>,
+    remaining: &mut u64,
+) -> Result<(), ClusterError> {
+    if *remaining == 0 {
+        return Err(err(
+            "FAULT_PROXY_REORDER_REFUSED",
+            "reorder-pair requires a second connection",
+        ));
+    }
+    eprintln!("event=fault_proxy_reorder_buffered");
+    let (mut second_downstream, second_remote) =
+        accept_loopback_partner(listener, config.io_timeout)?;
+    *remaining -= 1;
+    if !second_remote.ip().is_loopback() {
+        return Err(err(
+            "FAULT_PROXY_REORDER_REFUSED",
+            "reorder partner was not loopback",
+        ));
+    }
+    configure_stream(&second_downstream, config.io_timeout)?;
+    let second_request = read_downstream_request(&mut second_downstream, codec)?;
+    let second_response = upstream_exchange(config, codec, &second_request)?;
+    *last_forwarded_request = Some(second_request);
+    write_downstream(&mut second_downstream, codec, &second_response)?;
+    let first_response = upstream_exchange(config, codec, &first_request)?;
+    *last_forwarded_request = Some(first_request);
+    write_downstream(first_downstream, codec, &first_response)?;
+    eprintln!("event=fault_proxy_reorder_complete order=second,first");
+    Ok(())
+}
+
+fn accept_loopback_partner(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> Result<(TcpStream, SocketAddr), ClusterError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()))?;
+    let deadline = Instant::now() + timeout;
+    let accepted = loop {
+        match listener.accept() {
+            Ok(accepted) => break accepted,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    let _blocking = listener.set_nonblocking(false);
+                    return Err(err(
+                        "FAULT_PROXY_REORDER_REFUSED",
+                        "reorder partner did not arrive before the I/O timeout",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => {
+                let _blocking = listener.set_nonblocking(false);
+                return Err(err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()));
+            }
+        }
+    };
+    listener
+        .set_nonblocking(false)
+        .map_err(|error| err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()))?;
+    Ok(accepted)
+}
+
+fn read_downstream_request(
+    downstream: &mut TcpStream,
+    codec: FrameCodec,
+) -> Result<Vec<u8>, ClusterError> {
+    codec
+        .read_frame(downstream)
+        .map_err(|error| err("FAULT_PROXY_DOWNSTREAM_READ_FAILED", error.to_string()))?
+        .ok_or_else(|| {
+            err(
+                "FAULT_PROXY_DOWNSTREAM_REQUEST_MISSING",
+                "downstream closed without a frame",
+            )
+        })
 }
 
 fn upstream_exchange(
@@ -260,6 +364,7 @@ fn parse_mode(value: &str) -> Result<ProxyMode, ClusterError> {
         "corrupt" => Ok(ProxyMode::Corrupt),
         "corrupt-reply" => Ok(ProxyMode::CorruptReply),
         "replay-last" => Ok(ProxyMode::ReplayLast),
+        "reorder-pair" => Ok(ProxyMode::ReorderPair),
         _ => {
             let delay = value
                 .strip_prefix("delay-ms=")
@@ -334,6 +439,10 @@ mod tests {
         assert_eq!(
             parse_mode("corrupt-reply").expect("corrupt reply"),
             ProxyMode::CorruptReply
+        );
+        assert_eq!(
+            parse_mode("reorder-pair").expect("reorder pair"),
+            ProxyMode::ReorderPair
         );
         assert!(parse_mode("delay-ms=1001").is_err());
         assert!(parse_mode("PASS").is_err());

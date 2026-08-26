@@ -39,8 +39,9 @@ The following claims are implemented in this laboratory:
   epoch; and
 - exact proof replay cannot create a second activation;
 - separate bounded Node/Witness proxies can inject drop, delay, duplicate,
-  reply loss, corruption, and stale signed-request replay without gaining the
-  ability to manufacture a valid vote or authority proof; and
+  reply loss, corruption, stale signed-request replay, and a bounded
+  two-connection reorder of opaque frames without gaining the ability to
+  manufacture a valid vote or authority proof; and
 - after Active loss and safe promotion, an exact stable operation ID already
   present in the two pre-seeded durable WALs is confirmed by the successor's
   signed response without another append; an unknown retry remains refused.
@@ -184,7 +185,10 @@ evidence rather than a production trusted-time attestation.
 The optional test proxy is configured independently for each node. Its mode
 file must be a small regular non-symlink file containing `pass`, `drop`,
 `delay-ms=N` (bounded to 1000), `duplicate`, `reply-drop`, `corrupt`,
-`corrupt-reply`, or `replay-last`.
+`corrupt-reply`, `replay-last`, or `reorder-pair`. `reorder-pair` holds one
+opaque loopback request, waits for a second bounded loopback connection, and
+exchanges the second request with upstream before the first. It never
+crosses replies, never rewrites signed bytes, and counts both connections.
 
 ```text
 quorumarc-cluster fault-proxy \
@@ -216,9 +220,12 @@ incarnation cannot reuse its prior vote or reopen effects.
 
 The Node/Witness proxy campaign additionally verifies one-sided Witness
 reachability, dual Witness isolation, bounded delay, duplicate delivery,
-response loss followed by an exact durable retry, corrupted requests, and an
-obsolete signed request/response binding. The proxy never sees private keys and
-cannot turn a malformed or replayed exchange into authority.
+response loss followed by an exact durable retry, corrupted requests, an
+obsolete signed request/response binding, and a node-facing two-connection
+reorder of identical authenticated status frames. The delayed first request
+remains an exact cached retry; the next sequential request still uses
+counter 2. The proxy never sees private keys and cannot turn a malformed,
+replayed, or reordered exchange into authority.
 
 A paused old Active is resumed only after another node has safely obtained a
 later epoch. Its first effect request advances the logical clock beyond its old
