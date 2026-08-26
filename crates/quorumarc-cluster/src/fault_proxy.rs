@@ -32,6 +32,7 @@ enum ProxyMode {
     Duplicate,
     ReplyDrop,
     Corrupt,
+    CorruptReply,
     ReplayLast,
 }
 
@@ -137,6 +138,18 @@ fn handle_connection(
             *last ^= 0x80;
             let _response = upstream_exchange(config, codec, &corrupt)?;
             Ok(())
+        }
+        ProxyMode::CorruptReply => {
+            let mut response = upstream_exchange(config, codec, &request)?;
+            let last = response.last_mut().ok_or_else(|| {
+                err(
+                    "FAULT_PROXY_RESPONSE_MALFORMED",
+                    "cannot corrupt an empty response",
+                )
+            })?;
+            *last ^= 0x80;
+            *last_forwarded_request = Some(request);
+            write_downstream(downstream, codec, &response)
         }
         ProxyMode::ReplayLast => {
             let replay = last_forwarded_request.as_ref().ok_or_else(|| {
@@ -245,6 +258,7 @@ fn parse_mode(value: &str) -> Result<ProxyMode, ClusterError> {
         "duplicate" => Ok(ProxyMode::Duplicate),
         "reply-drop" => Ok(ProxyMode::ReplyDrop),
         "corrupt" => Ok(ProxyMode::Corrupt),
+        "corrupt-reply" => Ok(ProxyMode::CorruptReply),
         "replay-last" => Ok(ProxyMode::ReplayLast),
         _ => {
             let delay = value
@@ -316,6 +330,10 @@ mod tests {
         assert_eq!(
             parse_mode("replay-last").expect("replay"),
             ProxyMode::ReplayLast
+        );
+        assert_eq!(
+            parse_mode("corrupt-reply").expect("corrupt reply"),
+            ProxyMode::CorruptReply
         );
         assert!(parse_mode("delay-ms=1001").is_err());
         assert!(parse_mode("PASS").is_err());

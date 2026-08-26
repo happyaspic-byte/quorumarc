@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,9 @@ use quorumarc_rpo0::{
 use quorumarc_wire::SigningKey;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
-const TIMEOUT: Duration = Duration::from_secs(3);
+static PROCESS_LAB: Mutex<()> = Mutex::new(());
+const TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const WITNESS_MAX_CONNECTIONS: usize = 16;
 const PROXY_MAX_CONNECTIONS: usize = 16;
 
@@ -101,6 +104,7 @@ impl Fixture {
 }
 
 struct Lab {
+    _process_lab_guard: MutexGuard<'static, ()>,
     fixture: Fixture,
     witness: Option<Child>,
     witness_address: SocketAddr,
@@ -131,6 +135,14 @@ impl Lab {
         node_b_spec: NodeSpec,
         with_proxies: bool,
     ) -> Self {
+        // These tests intentionally start several real processes apiece. Rust's
+        // default test parallelism can otherwise overload a shared CI runner
+        // and turn scheduling delay into a false network timeout. The extended
+        // campaign already uses one test thread; keep direct `cargo test`
+        // equally deterministic within this process-test binary.
+        let process_lab_guard = PROCESS_LAB
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fixture = Fixture::new(label, node_a_spec, node_b_spec);
         let witness_ready = fixture.root.join("witness.ready");
         let mut witness = spawn_witness(&fixture, &witness_ready);
@@ -161,6 +173,7 @@ impl Lab {
         let node_b_key = SigningKey::from_bytes(&[17; 32]).verifying_key();
         let controller_key = SigningKey::from_bytes(&[37; 32]);
         Self {
+            _process_lab_guard: process_lab_guard,
             fixture,
             witness: Some(witness),
             witness_address,
@@ -367,6 +380,7 @@ fn normal_boot_and_first_active_selection_have_one_writer() {
 #[test]
 fn active_sigkill_requires_expiry_and_then_promotes_standby() {
     let mut lab = Lab::start("sigkill", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -384,7 +398,7 @@ fn active_sigkill_requires_expiry_and_then_promotes_standby() {
     lab.kill_node_a();
     let early = lab
         .node_b_client
-        .promote(2, 1_249)
+        .promote(2, second_start - 1)
         .expect("early B promotion refusal");
     assert_eq!(
         early.reason_code,
@@ -392,12 +406,12 @@ fn active_sigkill_requires_expiry_and_then_promotes_standby() {
     );
     let promoted = lab
         .node_b_client
-        .promote(2, 1_250)
+        .promote(2, second_start)
         .expect("promote B after guard");
     assert_eq!(promoted.reason_code, LifecycleReasonCode::Promoted);
     assert!(
         lab.node_b_client
-            .emit(2, 1_251, [4; 16])
+            .emit(2, second_start + 1, [4; 16])
             .expect("emit B")
             .reason_code
             .effect_succeeded()
@@ -412,6 +426,7 @@ fn active_sigkill_requires_expiry_and_then_promotes_standby() {
 #[test]
 fn automatic_controller_requires_detection_lease_guard_and_witness() {
     let mut lab = Lab::start("automatic-sigkill", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
     let mut controller = LifecycleAutoController::new(2).expect("automatic policy");
     let a_boot = lab.node_a_client.status(1_000).expect("A boot status");
     let b_boot = lab.node_b_client.status(1_000).expect("B boot status");
@@ -459,19 +474,25 @@ fn automatic_controller_requires_detection_lease_guard_and_witness() {
             reason: LifecycleAutoReason::WaitingForLeaseGuard,
         }
     );
-    let b_guard = lab.node_b_client.status(1_249).expect("guard B probe");
+    let b_guard = lab
+        .node_b_client
+        .status(second_start - 1)
+        .expect("guard B probe");
     assert_eq!(
         controller
-            .evaluate(1_249, None, Some(&b_guard), true)
+            .evaluate(second_start - 1, None, Some(&b_guard), true)
             .expect("guard boundary decision"),
         LifecycleAutoDecision::Hold {
             reason: LifecycleAutoReason::WaitingForLeaseGuard,
         }
     );
-    let b_ready = lab.node_b_client.status(1_250).expect("ready B probe");
+    let b_ready = lab
+        .node_b_client
+        .status(second_start)
+        .expect("ready B probe");
     assert_eq!(
         controller
-            .evaluate(1_250, None, Some(&b_ready), false)
+            .evaluate(second_start, None, Some(&b_ready), false)
             .expect("Witness loss decision"),
         LifecycleAutoDecision::Hold {
             reason: LifecycleAutoReason::WitnessUnavailable,
@@ -479,20 +500,20 @@ fn automatic_controller_requires_detection_lease_guard_and_witness() {
     );
     assert_eq!(
         controller
-            .evaluate(1_250, None, Some(&b_ready), true)
+            .evaluate(second_start, None, Some(&b_ready), true)
             .expect("automatic failover decision"),
         LifecycleAutoDecision::Promote {
             candidate: LifecycleNodeId::NodeB,
             epoch: 2,
         }
     );
-    let promoted_b = lab.node_b_client.promote(2, 1_250).expect("promote B");
+    let promoted_b = lab.node_b_client.promote(2, second_start).expect("promote B");
     controller
         .record_promotion_result(&promoted_b)
         .expect("record B promotion");
     let effect = lab
         .node_b_client
-        .emit(2, 1_251, [44; 16])
+        .emit(2, second_start + 1, [44; 16])
         .expect("automatic successor effect");
     assert!(effect.reason_code.effect_succeeded());
     eprintln!(
@@ -509,11 +530,21 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
     );
     let trace_path = lab.fixture.root.join("controller.trace");
     let mut controller = spawn_auto_controller(&lab, &trace_path);
-    wait_for_trace(
+    if !wait_for_trace(
         &trace_path,
         "event=controller_effect node=node-a epoch=1",
         &mut controller,
-    );
+    ) {
+        let output = controller.wait_with_output().expect("collect early controller exit");
+        let node_a_log = kill_and_collect(&mut lab.node_a);
+        let node_b_log = kill_and_collect(&mut lab.node_b);
+        let witness_log = kill_and_collect(&mut lab.witness);
+        panic!(
+            "controller exited before initial effect: {}\nnode-a:\n{node_a_log}\nnode-b:\n{node_b_log}\nwitness:\n{witness_log}\ntrace:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(&trace_path).unwrap_or_else(|error| error.to_string())
+        );
+    }
     let failover_started = Instant::now();
     lab.kill_node_a();
     let output = controller.wait_with_output().expect("collect controller");
@@ -531,10 +562,7 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
     assert!(trace.contains(
         "event=controller_promotion node=node-a epoch=1 now_ms=1000 code=LIFECYCLE_PROMOTED promotions=1 "
     ));
-    assert!(trace.contains("decision=WAITING_FOR_LEASE_GUARD"));
-    assert!(trace.contains(
-        "event=controller_promotion node=node-b epoch=2 now_ms=1250 code=LIFECYCLE_PROMOTED promotions=2 "
-    ));
+    assert!(trace.contains("event=controller_promotion node=node-b epoch=2 "));
     assert!(trace.contains(
         "event=controller_effect node=node-b epoch=2 code=LIFECYCLE_EFFECT_RECORDED effects=1 "
     ));
@@ -549,6 +577,16 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
         "event=controller_promotion node=node-b epoch=2",
         "promotion_ms",
     );
+    let successor_now_ms = trace_metric(
+        &trace,
+        "event=controller_promotion node=node-b epoch=2",
+        "now_ms",
+    );
+    let (successor_start, successor_end) = lease_window(2);
+    assert!(
+        (u128::from(successor_start)..u128::from(successor_end)).contains(&successor_now_ms),
+        "successor promotion must stay inside the epoch-2 lease window: {successor_now_ms}"
+    );
     let effect_ms = trace_metric(
         &trace,
         "event=controller_effect node=node-b epoch=2",
@@ -561,8 +599,42 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
 }
 
 #[test]
+fn automatic_controller_halts_on_untrusted_node_observation() {
+    let lab = Lab::start(
+        "controller-untrusted-observation",
+        NodeSpec::normal(),
+        NodeSpec::normal(),
+    );
+    let (mut proxy, proxy_address) =
+        start_proxy_if_requested(&lab.fixture, "controller-node-a", lab.node_a_address, true);
+    let proxy_address = proxy_address.expect("controller proxy address");
+    fs::write(
+        lab.fixture.root.join("controller-node-a-proxy.mode"),
+        "corrupt-reply",
+    )
+    .expect("enable response corruption");
+    let trace_path = lab.fixture.root.join("controller-untrusted.trace");
+    let controller = spawn_auto_controller_at(&lab, &trace_path, proxy_address, lab.node_b_address);
+    let output = controller.wait_with_output().expect("collect controller");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("LIFECYCLE_CONTROLLER_OBSERVATION_REFUSED"));
+    let trace = fs::read_to_string(&trace_path).expect("read refusal trace");
+    assert!(trace.contains(
+        "event=controller_observation node=node-a now_ms=1000 status=REFUSED code=LIFECYCLE_RESPONSE_AUTH_REFUSED"
+    ));
+    assert!(!trace.contains("event=controller_promotion node="));
+    assert!(!trace.contains("event=controller_effect node="));
+    drain_proxy(&mut proxy, Some(proxy_address));
+    eprintln!(
+        "security=automatic-observation-auth status=PASS untrusted_observations=REFUSED promotions=0 effects=0"
+    );
+}
+
+#[test]
 fn graceful_active_shutdown_still_waits_for_safe_expiry() {
     let mut lab = Lab::start("graceful", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -573,14 +645,14 @@ fn graceful_active_shutdown_still_waits_for_safe_expiry() {
     lab.stop_node_a(1_100);
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_200)
+            .promote(2, second_start - 1)
             .expect("refuse before expiry")
             .reason_code,
         LifecycleReasonCode::RefusedLeaseNotActive
     );
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_250)
+            .promote(2, second_start)
             .expect("promote after expiry")
             .reason_code,
         LifecycleReasonCode::Promoted
@@ -771,6 +843,8 @@ fn delayed_duplicate_lost_reply_and_corrupt_frames_fail_safely() {
 #[test]
 fn stale_witness_exchange_replay_self_fences_requesting_node() {
     let mut lab = Lab::start_with_proxies("proxy-replay", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
+    let (third_start, _) = lease_window(3);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -780,7 +854,7 @@ fn stale_witness_exchange_replay_self_fences_requesting_node() {
     );
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_250)
+            .promote(2, second_start)
             .expect("B epoch 2")
             .reason_code,
         LifecycleReasonCode::Promoted
@@ -788,7 +862,7 @@ fn stale_witness_exchange_replay_self_fences_requesting_node() {
     lab.set_proxy_mode(LifecycleNodeId::NodeA, "replay-last");
     let replay = lab
         .node_a_client
-        .promote(3, 1_500)
+        .promote(3, third_start)
         .expect("signed stale Witness response refusal");
     assert_eq!(
         replay.reason_code,
@@ -802,6 +876,7 @@ fn stale_witness_exchange_replay_self_fences_requesting_node() {
 #[test]
 fn restarted_older_node_cannot_resurrect_previous_epoch() {
     let mut lab = Lab::start("restart-old-epoch", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -812,7 +887,7 @@ fn restarted_older_node_cannot_resurrect_previous_epoch() {
     lab.kill_node_a();
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_250)
+            .promote(2, second_start)
             .expect("B epoch 2")
             .reason_code,
         LifecycleReasonCode::Promoted
@@ -828,7 +903,7 @@ fn restarted_older_node_cannot_resurrect_previous_epoch() {
     assert_eq!(stale.effect_count, 0);
     assert!(
         lab.node_b_client
-            .emit(2, 1_251, [54; 16])
+            .emit(2, second_start + 1, [54; 16])
             .expect("new authority remains effective")
             .reason_code
             .effect_succeeded()
@@ -875,6 +950,7 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
     );
     let original_a = fs::read(&lab.fixture.node_a_wal).expect("read original A WAL");
     let original_b = fs::read(&lab.fixture.node_b_wal).expect("read original B WAL");
+    let (second_start, _) = lease_window(2);
     assert_eq!(original_a, original_b);
     assert_eq!(
         lab.node_a_client
@@ -886,14 +962,14 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
     lab.kill_node_a();
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_250)
+            .promote(2, second_start)
             .expect("B epoch 2")
             .reason_code,
         LifecycleReasonCode::Promoted
     );
     let confirmed = lab
         .node_b_client
-        .retry_workload(2, 1_251, [9; 16])
+        .retry_workload(2, second_start + 1, [9; 16])
         .expect("confirm recovered operation");
     assert_eq!(
         confirmed.reason_code,
@@ -909,7 +985,7 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
     );
     let repeated = lab
         .node_b_client
-        .retry_workload(2, 1_252, [9; 16])
+        .retry_workload(2, second_start + 2, [9; 16])
         .expect("new signed request for same operation");
     assert_eq!(
         repeated.reason_code,
@@ -917,7 +993,7 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
     );
     let unknown = lab
         .node_b_client
-        .retry_workload(2, 1_253, [57; 16])
+        .retry_workload(2, second_start + 3, [57; 16])
         .expect("unknown operation refusal");
     assert_eq!(
         unknown.reason_code,
@@ -945,6 +1021,7 @@ fn lagging_candidate_is_refused_before_witness_authority() {
         ..NodeSpec::normal()
     };
     let mut lab = Lab::start("lagging", NodeSpec::normal(), lagging);
+    let (second_start, _) = lease_window(2);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -952,7 +1029,7 @@ fn lagging_candidate_is_refused_before_witness_authority() {
             .reason_code,
         LifecycleReasonCode::Promoted
     );
-    let report = lab.node_b_client.promote(2, 1_250).expect("lag refusal");
+    let report = lab.node_b_client.promote(2, second_start).expect("lag refusal");
     assert_eq!(
         report.reason_code,
         LifecycleReasonCode::RefusedCandidateLagging
@@ -964,6 +1041,7 @@ fn lagging_candidate_is_refused_before_witness_authority() {
 #[test]
 fn early_promotion_does_not_burn_witness_epoch() {
     let mut lab = Lab::start("early", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -973,19 +1051,48 @@ fn early_promotion_does_not_burn_witness_epoch() {
     );
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_249)
+            .promote(2, second_start - 1)
             .expect("early refusal")
             .reason_code,
         LifecycleReasonCode::RefusedLeaseNotActive
     );
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_250)
+            .promote(2, second_start)
             .expect("later exact promotion")
             .reason_code,
         LifecycleReasonCode::Promoted
     );
     record_pass(15, "early_promotion");
+}
+
+#[test]
+fn late_promotion_window_uses_fresh_witness_fence_evidence() {
+    let mut lab = Lab::start("late-window", NodeSpec::normal(), NodeSpec::normal());
+    let (_, second_end) = lease_window(2);
+    let late_promotion_ms = second_end - 50;
+    assert_eq!(
+        lab.node_a_client
+            .promote(1, 1_000)
+            .expect("A epoch 1")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    let promoted = lab
+        .node_b_client
+        .promote(2, late_promotion_ms)
+        .expect("late in-window B promotion");
+    assert_eq!(promoted.reason_code, LifecycleReasonCode::Promoted);
+    assert!(
+        lab.node_b_client
+            .emit(2, late_promotion_ms + 1, [62; 16])
+            .expect("late-window B effect")
+            .reason_code
+            .effect_succeeded()
+    );
+    eprintln!(
+        "security=fresh-witness-fence-window status=PASS promotion_now_ms={late_promotion_ms} window_end_ms={second_end} single_writer_violations=0"
+    );
 }
 
 #[test]
@@ -1156,6 +1263,7 @@ fn clock_rollback_self_fences_active_node() {
 #[test]
 fn paused_old_active_self_fences_before_effect_after_resume() {
     let mut lab = Lab::start("pause", NodeSpec::normal(), NodeSpec::normal());
+    let (second_start, _) = lease_window(2);
     assert_eq!(
         lab.node_a_client
             .promote(1, 1_000)
@@ -1173,14 +1281,14 @@ fn paused_old_active_self_fences_before_effect_after_resume() {
     lab.pause_node_a();
     assert_eq!(
         lab.node_b_client
-            .promote(2, 1_250)
+            .promote(2, second_start)
             .expect("promote B after A lease")
             .reason_code,
         LifecycleReasonCode::Promoted
     );
     assert!(
         lab.node_b_client
-            .emit(2, 1_251, [11; 16])
+            .emit(2, second_start + 1, [11; 16])
             .expect("B effect")
             .reason_code
             .effect_succeeded()
@@ -1188,7 +1296,7 @@ fn paused_old_active_self_fences_before_effect_after_resume() {
     lab.resume_node_a();
     let old = lab
         .node_a_client
-        .emit(1, 1_251, [12; 16])
+        .emit(1, second_start + 1, [12; 16])
         .expect("resumed A refusal");
     assert!(!old.reason_code.effect_succeeded());
     assert_eq!(old.state, LifecycleState::SelfFenced);
@@ -1264,6 +1372,10 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_quorumarc-cluster"))
 }
 
+fn lease_window(epoch: u64) -> (u64, u64) {
+    lifecycle_lease(epoch).expect("valid lifecycle lease")
+}
+
 fn start_proxy_if_requested(
     fixture: &Fixture,
     label: &str,
@@ -1289,7 +1401,7 @@ fn start_proxy_if_requested(
         .arg("--max-connections")
         .arg(PROXY_MAX_CONNECTIONS.to_string())
         .arg("--timeout-ms")
-        .arg("3000")
+        .arg("10000")
         .arg("--allow-lifecycle-lab")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1325,7 +1437,7 @@ fn spawn_witness(fixture: &Fixture, ready: &Path) -> Child {
         .arg("--max-connections")
         .arg(WITNESS_MAX_CONNECTIONS.to_string())
         .arg("--timeout-ms")
-        .arg("3000")
+        .arg("10000")
         .arg("--allow-lifecycle-lab")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1375,7 +1487,7 @@ fn spawn_node(
         .arg("--max-connections")
         .arg("64")
         .arg("--timeout-ms")
-        .arg("3000")
+        .arg("10000")
         .arg("--policy-byte")
         .arg(spec.policy_byte.to_string())
         .arg("--store-fault")
@@ -1388,12 +1500,21 @@ fn spawn_node(
 }
 
 fn spawn_auto_controller(lab: &Lab, trace: &Path) -> Child {
+    spawn_auto_controller_at(lab, trace, lab.node_a_address, lab.node_b_address)
+}
+
+fn spawn_auto_controller_at(
+    lab: &Lab,
+    trace: &Path,
+    node_a_address: SocketAddr,
+    node_b_address: SocketAddr,
+) -> Child {
     Command::new(binary())
         .arg("lifecycle-controller")
         .arg("--node-a")
-        .arg(lab.node_a_address.to_string())
+        .arg(node_a_address.to_string())
         .arg("--node-b")
-        .arg(lab.node_b_address.to_string())
+        .arg(node_b_address.to_string())
         .arg("--node-a-public-key")
         .arg(&lab.fixture.node_a_public)
         .arg("--node-b-public-key")
@@ -1411,9 +1532,9 @@ fn spawn_auto_controller(lab: &Lab, trace: &Path) -> Child {
         .arg("--poll-ms")
         .arg("20")
         .arg("--timeout-ms")
-        .arg("1000")
+        .arg("3000")
         .arg("--max-runtime-ms")
-        .arg("5000")
+        .arg("10000")
         .arg("--emit-test-effect")
         .arg("--allow-lifecycle-lab")
         .stdout(Stdio::piped())
@@ -1436,7 +1557,7 @@ fn trace_metric(trace: &str, event_prefix: &str, metric: &str) -> u128 {
 }
 
 fn wait_ready(path: &Path, child: &mut Child) -> SocketAddr {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if let Ok(value) = fs::read_to_string(path) {
             if let Ok(address) = SocketAddr::from_str(value.trim()) {
@@ -1452,17 +1573,17 @@ fn wait_ready(path: &Path, child: &mut Child) -> SocketAddr {
     }
 }
 
-fn wait_for_trace(path: &Path, expected: &str, child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+fn wait_for_trace(path: &Path, expected: &str, child: &mut Child) -> bool {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if fs::read_to_string(path).is_ok_and(|trace| trace.contains(expected)) {
-            return;
+            return true;
         }
-        assert!(
-            child.try_wait().expect("inspect controller").is_none(),
-            "controller exited before expected trace: {expected}"
-        );
-        assert!(Instant::now() < deadline, "controller trace timed out");
+        if child.try_wait().expect("inspect controller").is_some()
+            || Instant::now() >= deadline
+        {
+            return false;
+        }
         thread::sleep(Duration::from_millis(5));
     }
 }

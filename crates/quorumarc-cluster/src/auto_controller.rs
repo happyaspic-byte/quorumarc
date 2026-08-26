@@ -95,7 +95,6 @@ pub fn run_lifecycle_controller(
     let (logical_start_ms, _) = lifecycle_lease(1)?;
     let started = Instant::now();
     let mut promotions = 0_u64;
-    let mut now_ms = logical_start_ms;
     let mut last_observation_a = None;
     let mut last_observation_b = None;
     let mut last_decision = None;
@@ -109,6 +108,7 @@ pub fn run_lifecycle_controller(
                 "bounded automatic controller exceeded max runtime",
             ));
         }
+        let now_ms = controller_now_ms(logical_start_ms, elapsed, config.logical_step_ms)?;
         let report_a = observe(
             &mut node_a,
             now_ms,
@@ -244,13 +244,28 @@ pub fn run_lifecycle_controller(
             LifecycleAutoDecision::Stable { .. } | LifecycleAutoDecision::Hold { .. } => {}
         }
         thread::sleep(config.poll_interval);
-        now_ms = now_ms.checked_add(config.logical_step_ms).ok_or_else(|| {
-            err(
-                "LIFECYCLE_CONTROLLER_CLOCK_REFUSED",
-                "logical controller clock overflow",
-            )
-        })?;
     }
+}
+
+fn controller_now_ms(
+    logical_start_ms: u64,
+    elapsed: Duration,
+    logical_step_ms: u64,
+) -> Result<u64, ClusterError> {
+    let step = u128::from(logical_step_ms);
+    let elapsed_bucket = (elapsed.as_millis() / step) * step;
+    let elapsed_ms = u64::try_from(elapsed_bucket).map_err(|_error| {
+        err(
+            "LIFECYCLE_CONTROLLER_CLOCK_REFUSED",
+            "monotonic elapsed time exceeds the logical clock range",
+        )
+    })?;
+    logical_start_ms.checked_add(elapsed_ms).ok_or_else(|| {
+        err(
+            "LIFECYCLE_CONTROLLER_CLOCK_REFUSED",
+            "logical controller clock overflow",
+        )
+    })
 }
 
 fn validate_config(config: &LifecycleControllerConfig) -> Result<(), ClusterError> {
@@ -342,6 +357,16 @@ fn observe(
         Ok(report) => (ObservationState::Available, Some(report)),
         Err(error) => {
             let code = error.reason_code();
+            if !is_availability_error(code) {
+                trace.record(&format!(
+                    "event=controller_observation node={} now_ms={now_ms} status=REFUSED code={code}",
+                    node.as_str()
+                ))?;
+                return Err(err(
+                    "LIFECYCLE_CONTROLLER_OBSERVATION_REFUSED",
+                    format!("node={} untrusted observation code={code}", node.as_str()),
+                ));
+            }
             (ObservationState::Missing(code), None)
         }
     };
@@ -359,6 +384,16 @@ fn observe(
         *previous = Some(state);
     }
     Ok(report)
+}
+
+fn is_availability_error(code: &str) -> bool {
+    matches!(
+        code,
+        "LIFECYCLE_NODE_UNAVAILABLE"
+            | "LIFECYCLE_COMMAND_WRITE_FAILED"
+            | "LIFECYCLE_RESPONSE_READ_FAILED"
+            | "LIFECYCLE_RESPONSE_MISSING"
+    )
 }
 
 fn controller_operation_id(epoch: u64, node: LifecycleNodeId) -> [u8; 16] {
@@ -501,6 +536,52 @@ mod tests {
         assert_ne!(
             controller_operation_id(1, LifecycleNodeId::NodeA),
             controller_operation_id(2, LifecycleNodeId::NodeA)
+        );
+    }
+
+    #[test]
+    fn only_transport_absence_is_eligible_for_failure_suspicion() {
+        for code in [
+            "LIFECYCLE_NODE_UNAVAILABLE",
+            "LIFECYCLE_COMMAND_WRITE_FAILED",
+            "LIFECYCLE_RESPONSE_READ_FAILED",
+            "LIFECYCLE_RESPONSE_MISSING",
+        ] {
+            assert!(is_availability_error(code), "{code}");
+        }
+        for code in [
+            "LIFECYCLE_RESPONSE_AUTH_REFUSED",
+            "LIFECYCLE_RESPONSE_BINDING_REFUSED",
+            "LIFECYCLE_RESPONSE_MALFORMED",
+            "SOCKET_CONFIG_FAILED",
+        ] {
+            assert!(!is_availability_error(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn logical_clock_is_monotonic_quantized_and_never_leads_elapsed_time() {
+        let start = 1_000;
+        for (elapsed_ms, expected) in [(0, 1_000), (9, 1_000), (27, 1_020)] {
+            assert_eq!(
+                controller_now_ms(start, Duration::from_millis(elapsed_ms), 10)
+                    .map_err(|error| error.reason_code()),
+                Ok(expected)
+            );
+        }
+        for elapsed_ms in 0_u64..100 {
+            let expected = start + (elapsed_ms / 10) * 10;
+            assert_eq!(
+                controller_now_ms(start, Duration::from_millis(elapsed_ms), 10)
+                    .map_err(|error| error.reason_code()),
+                Ok(expected)
+            );
+            assert!(expected <= start + elapsed_ms);
+        }
+        assert_eq!(
+            controller_now_ms(u64::MAX, Duration::from_millis(10), 10)
+                .map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_CONTROLLER_CLOCK_REFUSED")
         );
     }
 }

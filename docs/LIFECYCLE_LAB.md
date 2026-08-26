@@ -64,18 +64,18 @@ result is reported as GitHub-verified evidence.
 
 ## Fixed safety timing
 
-The test uses a deterministic logical time domain:
+The test uses a monotonic, deterministically quantized logical time domain:
 
 | Value | Bound |
 |---|---:|
 | Epoch 1 start | 1000 ms |
-| Lease duration | 200 ms |
-| Post-lease guard | 50 ms |
-| Next epoch stride | 250 ms |
+| Lease duration | 1000 ms |
+| Post-lease guard | 250 ms |
+| Next epoch stride | 1250 ms |
 
-Epoch 2 therefore cannot activate before 1250 ms. This logical schedule makes
+Epoch 2 therefore cannot activate before 2250 ms. This logical schedule makes
 the test reproducible and checks proof/gate ordering. It does not establish
-clock bounds across hosts, and the 250 ms logical stride is not itself a
+clock bounds across hosts, and the 1250 ms logical stride is not itself a
 failover measurement.
 
 Lease renewal is deliberately absent. Heartbeats cannot extend authority. A
@@ -151,21 +151,35 @@ quorumarc-cluster lifecycle-controller \
   --logical-step-ms 10 \
   --poll-ms 20 \
   --timeout-ms 1000 \
-  --max-runtime-ms 5000 \
+  --max-runtime-ms 10000 \
   --emit-test-effect \
   --allow-lifecycle-lab
 ```
 
-The process starts at the canonical epoch-1 logical time and advances only by
-the declared deterministic step. Actual elapsed milliseconds are recorded
-separately and never substituted for trusted cross-host time. Each trace event
-is synced before the next decision. `--emit-test-effect` is explicit test-only
-validation; omitting it does not create an external workload effect.
+`--logical-step-ms` quantizes a monotonic elapsed-time clock; it never advances
+authority time faster than real monotonic time. The 10-second process watchdog
+is deliberately separate from the CI performance gate, which still requires
+the measured failure-to-effect p95 to remain at or below 5 seconds.
+
+The process starts at the canonical epoch-1 logical time and maps local
+monotonic elapsed time into the declared deterministic buckets. This is a
+shared-host lab clock, not evidence of trusted cross-host time or bounded
+oscillator drift. Each trace event is synced before the next decision.
+`--emit-test-effect` is explicit test-only validation; omitting it does not
+create an external workload effect.
+
+The lab Witness accepts a proposal only when its candidate-signed health and
+provisional-fence timestamps are identical and fall inside the pinned epoch
+window. Its independent final fence remains bound to the deterministic safe
+window start. The policy permits that evidence only for the same bounded
+1-second activation window, so the automatic decision window and proof
+freshness window cannot disagree. This remains shared-host logical-time
+evidence rather than a production trusted-time attestation.
 
 The optional test proxy is configured independently for each node. Its mode
 file must be a small regular non-symlink file containing `pass`, `drop`,
-`delay-ms=N` (bounded to 1000), `duplicate`, `reply-drop`, `corrupt`, or
-`replay-last`.
+`delay-ms=N` (bounded to 1000), `duplicate`, `reply-drop`, `corrupt`,
+`corrupt-reply`, or `replay-last`.
 
 ```text
 quorumarc-cluster fault-proxy \
@@ -217,6 +231,10 @@ exclusive lease, so it self-fences before the test sink can record output.
   process-local and protects only the latest accepted request; a node restart
   begins a new lab control session. Production management must durably bind a
   session/sequence or use an equivalent anti-replay mechanism.
+- Transport absence is eligible only for bounded failure suspicion. A
+  malformed, incorrectly bound, or incorrectly signed node response is an
+  untrusted observation that halts automatic execution; it is never converted
+  into peer-failure evidence.
 - The test clock is supplied by the controller. It is not a trusted,
   pause-aware cross-host clock.
 - EffectGate expiry is enforced for calls through the in-process test sink.

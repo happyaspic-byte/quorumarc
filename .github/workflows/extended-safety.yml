@@ -151,7 +151,7 @@ jobs:
           failover_p99_ms="$(percentile "${failover_metric}" 99)"
           {
             echo "metric=bounded_logical_failover"
-            echo "scope=github_shared_host_controller_supplied_logical_time_test_sink"
+            echo "scope=github_shared_host_monotonic_quantized_lab_time_test_sink"
             echo "samples=8"
             echo "failure_to_effect_p50_ms=${failover_p50_ms}"
             echo "failure_to_effect_p95_ms=${failover_p95_ms}"

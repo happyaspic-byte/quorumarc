@@ -17,7 +17,8 @@ use quorumarc_core::{
 };
 use quorumarc_rpo0::{CounterOperation, OperationId, WalEntry, recover_wal};
 use quorumarc_runtime::{
-    EffectOutcome, FrameCodec, TestEffectActor, VoteReasonCode, WitnessPolicy, WitnessVoteActor,
+    EffectOutcome, FrameCodec, FrameReasonCode, TestEffectActor, VoteReasonCode, WitnessPolicy,
+    WitnessVoteActor,
 };
 use quorumarc_store::{
     ActivationReceipt, DurableAuthorityStore, FaultInjectingBackend, FaultMode, FaultOperation,
@@ -50,8 +51,8 @@ const NODE_B: &str = "node-b";
 const POLICY_HASH: [u8; 32] = [0xa5; 32];
 const REQUIRED_COMMIT: u64 = 1;
 const LEASE_BASE_MS: u64 = 1_000;
-const LEASE_DURATION_MS: u64 = 200;
-const LEASE_GUARD_MS: u64 = 50;
+const LEASE_DURATION_MS: u64 = 1_000;
+const LEASE_GUARD_MS: u64 = 250;
 const LEASE_STRIDE_MS: u64 = LEASE_DURATION_MS + LEASE_GUARD_MS;
 const MAX_LIFECYCLE_FRAME: usize = 4_096;
 const COMMAND_MAGIC: &[u8; 8] = b"QALCMD\0\0";
@@ -1140,7 +1141,14 @@ impl LifecycleClient {
             .map_err(|error| err("LIFECYCLE_COMMAND_WRITE_FAILED", error.to_string()))?;
         let bytes = codec
             .read_frame(&mut stream)
-            .map_err(|error| err("LIFECYCLE_RESPONSE_READ_FAILED", error.to_string()))?
+            .map_err(|error| {
+                let code = if error.reason_code() == FrameReasonCode::TransportIo {
+                    "LIFECYCLE_RESPONSE_READ_FAILED"
+                } else {
+                    "LIFECYCLE_RESPONSE_MALFORMED"
+                };
+                err(code, error.to_string())
+            })?
             .ok_or_else(|| {
                 err(
                     "LIFECYCLE_RESPONSE_MISSING",
@@ -2092,6 +2100,7 @@ fn lifecycle_witness_scope(
     } else {
         FenceMechanism::EffectGateExpired
     };
+    let observed_at_ms = envelope.health_attestation.observed_at_ms;
     if envelope.workload_id.as_str() != LIFECYCLE_WORKLOAD
         || envelope.policy_hash != policy_hash
         || envelope.required_commit != REQUIRED_COMMIT
@@ -2108,6 +2117,9 @@ fn lifecycle_witness_scope(
         || envelope.fence_receipt.key_id().as_str() != LIFECYCLE_KEY_ID
         || envelope.fence_receipt.mechanism() != expected_mechanism
         || actual_target != expected_target
+        || envelope.fence_receipt.observed_at_ms() != observed_at_ms
+        || observed_at_ms < lease_start
+        || observed_at_ms >= lease_end
     {
         return Err(err(
             "LIFECYCLE_WITNESS_SCOPE_REFUSED",
@@ -2469,7 +2481,7 @@ fn core_policy(policy_hash: [u8; 32]) -> Result<SafetyPolicy, ClusterError> {
         2,
         Some(core_node(LIFECYCLE_WITNESS)?),
         3,
-        100,
+        LEASE_DURATION_MS,
         LEASE_DURATION_MS,
         LEASE_GUARD_MS,
         true,
@@ -2828,9 +2840,10 @@ mod tests {
         );
 
         let mut missed = LifecycleAutoController::new(2).expect("valid policy");
+        let (_, bootstrap_end) = lease_for_epoch(1).expect("bootstrap lease");
         assert_eq!(
             missed
-                .evaluate(1_200, None, None, true)
+                .evaluate(bootstrap_end, None, None, true)
                 .expect("missed bootstrap window"),
             LifecycleAutoDecision::Halt {
                 reason: LifecycleAutoReason::PromotionWindowMissed,
