@@ -234,20 +234,24 @@ fn accept_loopback_partner(
         .map_err(|error| err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()))?;
     let deadline = Instant::now() + timeout;
     let accepted = loop {
+        if Instant::now() >= deadline {
+            listener
+                .set_nonblocking(false)
+                .map_err(|error| err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()))?;
+            return Err(err(
+                "FAULT_PROXY_REORDER_REFUSED",
+                "reorder partner did not arrive before the I/O timeout",
+            ));
+        }
         match listener.accept() {
             Ok(accepted) => break accepted,
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    let _blocking = listener.set_nonblocking(false);
-                    return Err(err(
-                        "FAULT_PROXY_REORDER_REFUSED",
-                        "reorder partner did not arrive before the I/O timeout",
-                    ));
-                }
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
-                let _blocking = listener.set_nonblocking(false);
+                listener.set_nonblocking(false).map_err(|restore_error| {
+                    err("FAULT_PROXY_ACCEPT_FAILED", restore_error.to_string())
+                })?;
                 return Err(err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()));
             }
         }

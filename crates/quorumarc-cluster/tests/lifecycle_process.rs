@@ -20,6 +20,7 @@ use quorumarc_cluster::{
 use quorumarc_rpo0::{
     CounterOperation, FileReplica, OperationId, ReplicatedCounter, WalEntry, recover_wal,
 };
+use quorumarc_store::AuthoritySnapshot;
 use quorumarc_wire::SigningKey;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -1223,7 +1224,78 @@ fn stale_signed_promotion_replay_is_refused_without_closing_live_authority() {
             .reason_code
             .effect_succeeded()
     );
+    let before = node_a_authority_snapshot(&lab.fixture);
+    let before_generation = before.generation();
+    let before_incarnation = before.state().incarnation();
+    let before_digest = before
+        .state()
+        .last_promotion()
+        .expect("live promotion digest")
+        .signed_envelope_digest();
+    assert!(before.state().activation_receipt().is_some());
+    lab.kill_node_a();
+    lab.restart_node_a(NodeSpec::normal());
+    let restarted = lab
+        .node_a_client
+        .status(1_003)
+        .expect("restarted node A status");
+    assert_eq!(restarted.reason_code, LifecycleReasonCode::Status);
+    assert_eq!(restarted.state, LifecycleState::Standby);
+    assert_eq!(restarted.highest_epoch, 1);
+    assert!(restarted.incarnation > before_incarnation);
+    assert!(restarted.store_generation > before_generation);
+    assert_eq!(restarted.effect_count, 0);
+    assert_eq!(restarted.lease_expires_at_ms, 0);
+    let after = node_a_authority_snapshot(&lab.fixture);
+    assert_eq!(after.state().incarnation(), restarted.incarnation);
+    assert_eq!(after.generation(), restarted.store_generation);
+    assert_eq!(
+        after
+            .state()
+            .last_promotion()
+            .expect("restarted promotion digest")
+            .signed_envelope_digest(),
+        before_digest
+    );
+    assert!(after.state().activation_receipt().is_none());
+    let emit = lab
+        .node_a_client
+        .emit(1, 1_004, [7; 16])
+        .expect("restarted emit");
+    assert_eq!(emit.reason_code, LifecycleReasonCode::RefusedNotActive);
+    assert_eq!(emit.state, LifecycleState::Standby);
+    let refuse = lab
+        .node_a_client
+        .promote(1, 1_005)
+        .expect("equal-epoch restart promotion");
+    assert_eq!(refuse.reason_code, LifecycleReasonCode::RefusedDurability);
+    assert_eq!(refuse.state, LifecycleState::SelfFenced);
+    assert_eq!(refuse.effect_count, 0);
+    let replay_after_restart = lab
+        .node_a_client
+        .replay_last_proof(1_005)
+        .expect("post-restart replay is cache absence");
+    assert_eq!(
+        replay_after_restart.reason_code,
+        LifecycleReasonCode::RefusedReplay
+    );
+    let final_journal = node_a_authority_snapshot(&lab.fixture);
+    assert_eq!(
+        final_journal
+            .state()
+            .last_promotion()
+            .expect("final promotion digest")
+            .signed_envelope_digest(),
+        before_digest
+    );
+    assert!(final_journal.state().activation_receipt().is_none());
     record_pass(12, "old_promotion_proof_replay");
+}
+
+fn node_a_authority_snapshot(fixture: &Fixture) -> AuthoritySnapshot {
+    let bytes = fs::read(fixture.root.join("node-a-store").join("authority.journal"))
+        .expect("read node A authority journal");
+    AuthoritySnapshot::decode(&bytes).expect("decode committed node A authority")
 }
 
 #[test]
