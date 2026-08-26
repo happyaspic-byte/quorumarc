@@ -279,6 +279,66 @@ mod tests {
     }
 
     #[test]
+    fn previously_issued_witness_vote_cannot_certify_a_later_envelope() {
+        let earlier = envelope();
+        let Some(earlier_witness) = earlier
+            .quorum_certificate
+            .votes()
+            .iter()
+            .find(|vote| vote.voter_id().as_str() == "witness")
+            .cloned()
+        else {
+            std::process::abort();
+        };
+        let mut later = envelope();
+        later.message_id = MessageId::new([44; 16]);
+        later.epoch = 20;
+        later.candidate_incarnation = 8;
+        later.health_attestation.epoch = 20;
+        later.health_attestation.incarnation = 8;
+        later.lease.epoch = 20;
+        later.lease.incarnation = 8;
+        later.lease.not_before_ms = 12_000;
+        later.lease.expires_at_ms = 13_000;
+        later.quorum_certificate.binding.message_id = later.message_id;
+        later.quorum_certificate.binding.epoch = later.epoch;
+        later.quorum_certificate.binding.candidate_incarnation = later.candidate_incarnation;
+        later.quorum_certificate.binding.lease_not_before_ms = later.lease.not_before_ms;
+        later.quorum_certificate.binding.lease_expires_at_ms = later.lease.expires_at_ms;
+        let later_binding = later.quorum_certificate.binding.clone();
+        let later_candidate = result_or_abort(SignedVote::sign(
+            &later_binding,
+            id("node-a"),
+            id("key-1"),
+            &SigningKey::from_bytes(&CANDIDATE_SEED),
+        ));
+        later.fence_receipt = result_or_abort(FenceReceipt::sign(
+            &later_binding,
+            None,
+            id("witness"),
+            id("key-1"),
+            FenceMechanism::Bootstrap,
+            11_995,
+            [13; 32],
+            &SigningKey::from_bytes(&WITNESS_SEED),
+        ));
+        later.quorum_certificate = result_or_abort(QuorumCertificate::new(
+            later_binding,
+            2,
+            vec![later_candidate, earlier_witness],
+        ));
+        let signed = result_or_abort(SignedPromotionEnvelope::sign(
+            later,
+            id("key-1"),
+            &SigningKey::from_bytes(&CANDIDATE_SEED),
+        ));
+        assert!(matches!(
+            signed.verify(&TestResolver::all()),
+            Err(EnvelopeError::InvalidSignature { principal, .. }) if principal == "witness"
+        ));
+    }
+
+    #[test]
     fn version_downgrade_is_rejected() {
         let mut bytes = result_or_abort(envelope().to_canonical_bytes());
         let Some(version) = bytes.get_mut(8..10) else {
