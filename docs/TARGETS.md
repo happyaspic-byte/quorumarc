@@ -28,8 +28,9 @@ hardware, storage, network, fence mechanism, percentile, and sample count.
 
 The Gate 1A workflow's bounded logical-lab metric runs on a noisy GitHub shared
 host with controller-supplied deterministic time and a test sink. The retained
-artifact separates failure-to-effect, failure-detection, lease-wait, promotion,
-and effect-operation percentiles so a slower durability path cannot be hidden
+artifact separates failure-to-effect, failure-detection, lease-wait,
+post-lease promotion-readiness, promotion, and effect-operation percentiles so
+a slower durability path cannot be hidden
 inside one aggregate. It is a CI regression gate, not a service RTO, VIP
 outage, or physical failover claim.
 

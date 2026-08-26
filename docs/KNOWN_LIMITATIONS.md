@@ -52,7 +52,8 @@ validation classes; exact-head GitHub success is tracked in the Draft PR.
 Physical enforcement and production end-to-end PASS classes remain incomplete.
 Extended Safety computes p50/p95/p99/max and failure rate only for the bounded
 logical-time controller path. It separates transport-miss confirmation,
-lease-wait, durable promotion, and test-sink effect timing; client-observed
+lease-wait, post-lease promotion-readiness, durable promotion, and test-sink
+effect timing; client-observed
 failover and write-latency distributions do not exist.
 
 ## Evidence classification and current measurements

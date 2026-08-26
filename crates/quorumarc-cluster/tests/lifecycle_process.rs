@@ -589,6 +589,11 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
         "event=controller_promotion node=node-b epoch=2",
         "lease_wait_ms",
     );
+    let promotion_readiness_ms = trace_metric(
+        &trace,
+        "event=controller_promotion node=node-b epoch=2",
+        "promotion_readiness_ms",
+    );
     assert!(failure_detection_ms > 0);
     assert!(lease_wait_ms > 0);
     let promotion_ms = trace_metric(
@@ -613,7 +618,7 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
     );
     kill_child(&mut lab.node_b);
     eprintln!(
-        "scenario=2 name=autonomous_controller_process_sigkill seed=1 class=github-process-auto-executor status=PASS single_writer_violations=0 acknowledged_write_loss=0 metric=bounded_logical_failover failure_to_effect_ms={failure_to_effect_ms} failure_detection_ms={failure_detection_ms} lease_wait_ms={lease_wait_ms} promotion_ms={promotion_ms} effect_ms={effect_ms} logical_successor_epoch=2"
+        "scenario=2 name=autonomous_controller_process_sigkill seed=1 class=github-process-auto-executor status=PASS single_writer_violations=0 acknowledged_write_loss=0 metric=bounded_logical_failover failure_to_effect_ms={failure_to_effect_ms} failure_detection_ms={failure_detection_ms} lease_wait_ms={lease_wait_ms} promotion_readiness_ms={promotion_readiness_ms} promotion_ms={promotion_ms} effect_ms={effect_ms} logical_successor_epoch=2"
     );
 }
 

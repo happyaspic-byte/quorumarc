@@ -135,9 +135,10 @@ jobs:
               failures=$((failures + 1))
             fi
           done
-          printf 'samples=20\nfailures=%s\n' "${failures}" \
+          failure_rate_percent="$(awk -v failures="${failures}" 'BEGIN { printf "%.2f", failures * 100 / 20 }')"
+          printf 'samples=20\nfailures=%s\nfailure_rate_percent=%s\n' \
+            "${failures}" "${failure_rate_percent}" \
             | tee safety-artifacts/lifecycle-failover-sample-status.log
-          test "${failures}" -eq 0
 
       - name: Gate bounded logical failover percentiles
         shell: bash
@@ -157,7 +158,6 @@ jobs:
               }
             }' safety-artifacts/lifecycle-failover-samples.log \
               | sort -n > "${metric_path}"
-            test "$(wc -l < "${metric_path}")" -eq 20
           }
           percentile() {
             local metric_path="$1"
@@ -174,18 +174,31 @@ jobs:
           failover_metric="${metrics_directory}/failover"
           detection_metric="${metrics_directory}/detection"
           lease_wait_metric="${metrics_directory}/lease-wait"
+          readiness_metric="${metrics_directory}/promotion-readiness"
           promotion_metric="${metrics_directory}/promotion"
           effect_metric="${metrics_directory}/effect"
           extract_metric failure_to_effect_ms "${failover_metric}"
           extract_metric failure_detection_ms "${detection_metric}"
           extract_metric lease_wait_ms "${lease_wait_metric}"
+          extract_metric promotion_readiness_ms "${readiness_metric}"
           extract_metric promotion_ms "${promotion_metric}"
           extract_metric effect_ms "${effect_metric}"
           failover_p50_ms="$(percentile "${failover_metric}" 50)"
           failover_p95_ms="$(percentile "${failover_metric}" 95)"
           failover_p99_ms="$(percentile "${failover_metric}" 99)"
           failures="$(awk -F= '$1 == "failures" { print $2 }' safety-artifacts/lifecycle-failover-sample-status.log)"
-          failure_rate_percent="$(awk -v failures="${failures}" 'BEGIN { printf "%.2f", failures * 100 / 20 }')"
+          successes=$((20 - failures))
+          failure_rate_percent="$(awk -F= '$1 == "failure_rate_percent" { print $2 }' safety-artifacts/lifecycle-failover-sample-status.log)"
+          for metric_path in \
+            "${failover_metric}" \
+            "${detection_metric}" \
+            "${lease_wait_metric}" \
+            "${readiness_metric}" \
+            "${promotion_metric}" \
+            "${effect_metric}"; do
+            test "$(wc -l < "${metric_path}")" -eq "${successes}"
+          done
+          test "${successes}" -gt 0
           {
             echo "metric=bounded_logical_failover"
             echo "scope=github_shared_host_monotonic_quantized_lab_time_test_sink"
@@ -204,6 +217,10 @@ jobs:
             echo "lease_wait_p95_ms=$(percentile "${lease_wait_metric}" 95)"
             echo "lease_wait_p99_ms=$(percentile "${lease_wait_metric}" 99)"
             echo "lease_wait_max_ms=$(maximum "${lease_wait_metric}")"
+            echo "promotion_readiness_p50_ms=$(percentile "${readiness_metric}" 50)"
+            echo "promotion_readiness_p95_ms=$(percentile "${readiness_metric}" 95)"
+            echo "promotion_readiness_p99_ms=$(percentile "${readiness_metric}" 99)"
+            echo "promotion_readiness_max_ms=$(maximum "${readiness_metric}")"
             echo "promotion_p50_ms=$(percentile "${promotion_metric}" 50)"
             echo "promotion_p95_ms=$(percentile "${promotion_metric}" 95)"
             echo "promotion_p99_ms=$(percentile "${promotion_metric}" 99)"

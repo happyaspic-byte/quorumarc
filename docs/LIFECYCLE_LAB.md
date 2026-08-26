@@ -84,8 +84,9 @@ replication progress expected by the capsule.
 
 Extended Safety repeats the focused controller `SIGKILL` path twenty times,
 measures host elapsed time from fault injection to successor test effect, and
-records failure-detection, lease-wait, promotion, and EffectGate stages
-separately. It computes p50/p95/p99/max plus failure rate and rejects p95 above
+records failure-detection, lease-wait, post-lease promotion-readiness,
+promotion, and EffectGate stages separately. It computes p50/p95/p99/max plus
+failure rate and rejects p95 above
 5 seconds. The artifact class is `bounded_logical_failover`; it is not client
 downtime or a physical RTO measurement. Observation I/O uses a shorter timeout
 than durable promotion I/O so a slow status probe cannot consume the authority

@@ -1053,6 +1053,15 @@ impl LifecycleClient {
         self.send(CommandKind::Promote, now_ms, epoch, [0; 16])
     }
 
+    pub(crate) fn promote_with_timeout(
+        &mut self,
+        epoch: u64,
+        now_ms: u64,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
+        self.send_with_timeout(CommandKind::Promote, now_ms, epoch, [0; 16], timeout)
+    }
+
     pub fn tick(&mut self, now_ms: u64) -> Result<LifecycleReport, ClusterError> {
         self.send(CommandKind::Tick, now_ms, 0, [0; 16])
     }
@@ -1064,6 +1073,16 @@ impl LifecycleClient {
         operation_id: [u8; 16],
     ) -> Result<LifecycleReport, ClusterError> {
         self.send(CommandKind::Emit, now_ms, epoch, operation_id)
+    }
+
+    pub(crate) fn emit_with_timeout(
+        &mut self,
+        epoch: u64,
+        now_ms: u64,
+        operation_id: [u8; 16],
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
+        self.send_with_timeout(CommandKind::Emit, now_ms, epoch, operation_id, timeout)
     }
 
     /// Confirms an exact stable-operation retry from this Active node's
@@ -1101,6 +1120,19 @@ impl LifecycleClient {
             )
         })?;
         self.exchange(&signed)
+    }
+
+    pub(crate) fn retry_last_command_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
+        let signed = self.last_command.clone().ok_or_else(|| {
+            err(
+                "LIFECYCLE_COMMAND_RETRY_REFUSED",
+                "no prior signed controller command is available",
+            )
+        })?;
+        self.exchange_with_timeout(&signed, timeout)
     }
 
     fn send(

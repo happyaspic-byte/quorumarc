@@ -115,25 +115,43 @@ pub fn run_lifecycle_controller(
             ));
         }
         let now_ms = controller_now_ms(logical_start_ms, elapsed, config.logical_step_ms)?;
+        let observation_timeout = runtime_timeout(
+            remaining_runtime(started, config.max_runtime),
+            config.observation_timeout,
+        )?;
+        let observation_started_a = started.elapsed().as_millis();
         let report_a = observe(
             &mut node_a,
             now_ms,
-            config.observation_timeout,
+            observation_timeout,
             &mut trace,
             LifecycleNodeId::NodeA,
             &mut last_observation_a,
         )?;
+        failover_timing.record_observation(
+            LifecycleNodeId::NodeA,
+            report_a.as_ref(),
+            observation_started_a,
+        );
+        let observation_timeout = runtime_timeout(
+            remaining_runtime(started, config.max_runtime),
+            config.observation_timeout,
+        )?;
+        let observation_started_b = started.elapsed().as_millis();
         let report_b = observe(
             &mut node_b,
             now_ms,
-            config.observation_timeout,
+            observation_timeout,
             &mut trace,
             LifecycleNodeId::NodeB,
             &mut last_observation_b,
         )?;
+        failover_timing.record_observation(
+            LifecycleNodeId::NodeB,
+            report_b.as_ref(),
+            observation_started_b,
+        );
         let elapsed_ms = started.elapsed().as_millis();
-        failover_timing.record_observation(LifecycleNodeId::NodeA, report_a.is_some(), elapsed_ms);
-        failover_timing.record_observation(LifecycleNodeId::NodeB, report_b.is_some(), elapsed_ms);
         let decision = controller.evaluate(now_ms, report_a.as_ref(), report_b.as_ref(), true)?;
         failover_timing.record_decision(decision, elapsed_ms);
         let decision_label = decision_label(decision);
@@ -146,6 +164,10 @@ pub fn run_lifecycle_controller(
 
         match decision {
             LifecycleAutoDecision::Promote { candidate, epoch } => {
+                let promotion_timeout = runtime_timeout(
+                    remaining_runtime(started, config.max_runtime),
+                    config.authority_timeout,
+                )?;
                 let client = match candidate {
                     LifecycleNodeId::NodeA => &mut node_a,
                     LifecycleNodeId::NodeB => &mut node_b,
@@ -153,7 +175,8 @@ pub fn run_lifecycle_controller(
                 let promotion_started_ms = started.elapsed().as_millis();
                 let stages = failover_timing.stages(promotion_started_ms);
                 let promotion_started = Instant::now();
-                let promotion = match client.promote(epoch, now_ms) {
+                let promotion = match client.promote_with_timeout(epoch, now_ms, promotion_timeout)
+                {
                     Ok(report) => report,
                     Err(first_error) => {
                         trace.record(&format!(
@@ -161,17 +184,23 @@ pub fn run_lifecycle_controller(
                             candidate.as_str(),
                             first_error.reason_code()
                         ))?;
-                        client.retry_last_command().map_err(|retry_error| {
-                            err(
-                                "LIFECYCLE_CONTROLLER_PROMOTION_AMBIGUOUS",
-                                format!(
-                                    "node={} epoch={epoch} first={} retry={}",
-                                    candidate.as_str(),
-                                    first_error.reason_code(),
-                                    retry_error.reason_code()
-                                ),
-                            )
-                        })?
+                        let retry_timeout = runtime_timeout(
+                            remaining_runtime(started, config.max_runtime),
+                            config.authority_timeout,
+                        )?;
+                        client
+                            .retry_last_command_with_timeout(retry_timeout)
+                            .map_err(|retry_error| {
+                                err(
+                                    "LIFECYCLE_CONTROLLER_PROMOTION_AMBIGUOUS",
+                                    format!(
+                                        "node={} epoch={epoch} first={} retry={}",
+                                        candidate.as_str(),
+                                        first_error.reason_code(),
+                                        retry_error.reason_code()
+                                    ),
+                                )
+                            })?
                     }
                 };
                 let promotion_ms = promotion_started.elapsed().as_millis();
@@ -199,11 +228,17 @@ pub fn run_lifecycle_controller(
                         "promotion counter overflow",
                     )
                 })?;
-                let (failure_detection_ms, lease_wait_ms) = stages
-                    .map(|value| (value.failure_detection_ms, value.lease_wait_ms))
-                    .unwrap_or((0, 0));
+                let (failure_detection_ms, lease_wait_ms, promotion_readiness_ms) = stages
+                    .map(|value| {
+                        (
+                            value.failure_detection_ms,
+                            value.lease_wait_ms,
+                            value.promotion_readiness_ms,
+                        )
+                    })
+                    .unwrap_or((0, 0, 0));
                 trace.record(&format!(
-                    "event=controller_promotion node={} epoch={epoch} now_ms={now_ms} code={} promotions={promotions} elapsed_ms={} failure_detection_ms={failure_detection_ms} lease_wait_ms={lease_wait_ms} promotion_ms={promotion_ms}",
+                    "event=controller_promotion node={} epoch={epoch} now_ms={now_ms} code={} promotions={promotions} elapsed_ms={} failure_detection_ms={failure_detection_ms} lease_wait_ms={lease_wait_ms} promotion_readiness_ms={promotion_readiness_ms} promotion_ms={promotion_ms}",
                     candidate.as_str(),
                     promotion.reason_code.as_str(),
                     started.elapsed().as_millis()
@@ -212,8 +247,13 @@ pub fn run_lifecycle_controller(
                 let mut effect_ms = 0;
                 if config.emit_test_effect {
                     let operation_id = controller_operation_id(epoch, candidate);
+                    let effect_timeout = runtime_timeout(
+                        remaining_runtime(started, config.max_runtime),
+                        config.authority_timeout,
+                    )?;
                     let effect_started = Instant::now();
-                    final_report = client.emit(epoch, now_ms, operation_id)?;
+                    final_report =
+                        client.emit_with_timeout(epoch, now_ms, operation_id, effect_timeout)?;
                     effect_ms = effect_started.elapsed().as_millis();
                     if !final_report.reason_code.effect_succeeded() {
                         trace.record(&format!(
@@ -263,8 +303,30 @@ pub fn run_lifecycle_controller(
             }
             LifecycleAutoDecision::Stable { .. } | LifecycleAutoDecision::Hold { .. } => {}
         }
-        thread::sleep(config.poll_interval);
+        let remaining = remaining_runtime(started, config.max_runtime);
+        if remaining.is_zero() {
+            trace.record("event=controller_halt reason=MAX_RUNTIME_EXCEEDED")?;
+            return Err(err(
+                "LIFECYCLE_CONTROLLER_TIMEOUT",
+                "bounded automatic controller exceeded max runtime",
+            ));
+        }
+        thread::sleep(config.poll_interval.min(remaining));
     }
+}
+
+fn remaining_runtime(started: Instant, max_runtime: Duration) -> Duration {
+    max_runtime.saturating_sub(started.elapsed())
+}
+
+fn runtime_timeout(remaining: Duration, configured: Duration) -> Result<Duration, ClusterError> {
+    if remaining < configured {
+        return Err(err(
+            "LIFECYCLE_CONTROLLER_TIMEOUT",
+            "remaining runtime is shorter than the next I/O deadline",
+        ));
+    }
+    Ok(configured)
 }
 
 fn controller_now_ms(
@@ -348,16 +410,10 @@ fn validate_config(config: &LifecycleControllerConfig) -> Result<(), ClusterErro
         "max runtime",
         "LIFECYCLE_CONTROLLER_POLICY_REFUSED",
     )?;
-    if config.authority_timeout < config.observation_timeout {
+    if config.max_runtime <= config.authority_timeout.max(config.observation_timeout) {
         return Err(err(
             "LIFECYCLE_CONTROLLER_POLICY_REFUSED",
-            "authority timeout must be at least the observation timeout",
-        ));
-    }
-    if config.max_runtime <= config.authority_timeout {
-        return Err(err(
-            "LIFECYCLE_CONTROLLER_POLICY_REFUSED",
-            "max runtime must exceed the authority timeout",
+            "max runtime must exceed both I/O timeouts",
         ));
     }
     Ok(())
@@ -465,6 +521,7 @@ enum ObservationState {
 struct FailoverStages {
     failure_detection_ms: u128,
     lease_wait_ms: u128,
+    promotion_readiness_ms: u128,
 }
 
 #[derive(Default)]
@@ -472,49 +529,58 @@ struct FailoverTiming {
     active: Option<LifecycleNodeId>,
     failure_started_ms: Option<u128>,
     failure_detected_ms: Option<u128>,
+    lease_ready_ms: Option<u128>,
 }
 
 impl FailoverTiming {
-    fn record_observation(&mut self, node: LifecycleNodeId, available: bool, elapsed_ms: u128) {
+    fn record_observation(
+        &mut self,
+        node: LifecycleNodeId,
+        report: Option<&crate::lifecycle::LifecycleReport>,
+        observation_started_ms: u128,
+    ) {
         if self.active != Some(node) {
             return;
         }
-        if available {
-            self.failure_started_ms = None;
-            self.failure_detected_ms = None;
-        } else if self.failure_started_ms.is_none() {
-            self.failure_started_ms = Some(elapsed_ms);
+        match report.map(|value| value.state) {
+            Some(crate::lifecycle::LifecycleState::Active) => self.reset_failure(),
+            None
+            | Some(
+                crate::lifecycle::LifecycleState::SelfFenced
+                | crate::lifecycle::LifecycleState::Draining,
+            ) => {
+                if self.failure_started_ms.is_none() {
+                    self.failure_started_ms = Some(observation_started_ms);
+                }
+            }
+            Some(_) => {}
         }
     }
 
     fn record_promotion(&mut self, active: LifecycleNodeId) {
         self.active = Some(active);
-        self.failure_started_ms = None;
-        self.failure_detected_ms = None;
+        self.reset_failure();
     }
 
     fn record_decision(&mut self, decision: LifecycleAutoDecision, elapsed_ms: u128) {
         match decision {
             LifecycleAutoDecision::Stable { active, .. } => {
                 self.active = Some(active);
-                self.failure_started_ms = None;
-                self.failure_detected_ms = None;
+                self.reset_failure();
             }
             LifecycleAutoDecision::Hold {
                 reason: LifecycleAutoReason::WaitingForLeaseGuard,
-            }
-            | LifecycleAutoDecision::Hold {
-                reason: LifecycleAutoReason::WitnessUnavailable,
-            }
-            | LifecycleAutoDecision::Hold {
-                reason: LifecycleAutoReason::CandidateUnavailable,
-            }
-            | LifecycleAutoDecision::Hold {
-                reason: LifecycleAutoReason::CandidateLagging,
+            } => self.record_detection(elapsed_ms),
+            LifecycleAutoDecision::Hold {
+                reason:
+                    LifecycleAutoReason::WitnessUnavailable
+                    | LifecycleAutoReason::CandidateUnavailable
+                    | LifecycleAutoReason::CandidateLagging,
             }
             | LifecycleAutoDecision::Promote { .. } => {
-                if self.failure_started_ms.is_some() && self.failure_detected_ms.is_none() {
-                    self.failure_detected_ms = Some(elapsed_ms);
+                self.record_detection(elapsed_ms);
+                if self.lease_ready_ms.is_none() {
+                    self.lease_ready_ms = Some(elapsed_ms);
                 }
             }
             LifecycleAutoDecision::Hold { .. } | LifecycleAutoDecision::Halt { .. } => {}
@@ -524,10 +590,24 @@ impl FailoverTiming {
     fn stages(&self, promotion_started_ms: u128) -> Option<FailoverStages> {
         let failure_started_ms = self.failure_started_ms?;
         let failure_detected_ms = self.failure_detected_ms?;
+        let lease_ready_ms = self.lease_ready_ms?;
         Some(FailoverStages {
             failure_detection_ms: failure_detected_ms.saturating_sub(failure_started_ms),
-            lease_wait_ms: promotion_started_ms.saturating_sub(failure_detected_ms),
+            lease_wait_ms: lease_ready_ms.saturating_sub(failure_detected_ms),
+            promotion_readiness_ms: promotion_started_ms.saturating_sub(lease_ready_ms),
         })
+    }
+
+    fn record_detection(&mut self, elapsed_ms: u128) {
+        if self.failure_started_ms.is_some() && self.failure_detected_ms.is_none() {
+            self.failure_detected_ms = Some(elapsed_ms);
+        }
+    }
+
+    fn reset_failure(&mut self) {
+        self.failure_started_ms = None;
+        self.failure_detected_ms = None;
+        self.lease_ready_ms = None;
     }
 }
 
@@ -635,38 +715,140 @@ mod tests {
             validate_config(&invalid).map_err(|error| error.reason_code()),
             Err("LIFECYCLE_CONTROLLER_POLICY_REFUSED")
         );
+        let mut independent = config();
+        independent.observation_timeout = Duration::from_millis(100);
+        independent.authority_timeout = Duration::from_millis(25);
+        independent.max_runtime = Duration::from_millis(200);
+        assert_eq!(validate_config(&independent), Ok(()));
+    }
+
+    #[test]
+    fn runtime_timeout_refuses_io_that_cannot_finish_before_deadline() {
+        assert_eq!(
+            runtime_timeout(Duration::from_millis(2), Duration::from_secs(5))
+                .map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_CONTROLLER_TIMEOUT")
+        );
+        assert_eq!(
+            runtime_timeout(Duration::from_secs(5), Duration::from_secs(3)),
+            Ok(Duration::from_secs(3))
+        );
     }
 
     #[test]
     fn failover_timing_separates_detection_from_lease_wait() {
         let mut timing = FailoverTiming::default();
-        timing.record_decision(
-            LifecycleAutoDecision::Stable {
-                active: LifecycleNodeId::NodeA,
-                epoch: 1,
-            },
-            100,
-        );
-        timing.record_observation(LifecycleNodeId::NodeA, false, 120);
+        timing.record_promotion(LifecycleNodeId::NodeA);
+        timing.record_observation(LifecycleNodeId::NodeA, None, 100);
         timing.record_decision(
             LifecycleAutoDecision::Hold {
                 reason: LifecycleAutoReason::WaitingForFailureThreshold,
             },
             120,
         );
-        timing.record_observation(LifecycleNodeId::NodeA, false, 145);
+        timing.record_observation(LifecycleNodeId::NodeA, None, 120);
         timing.record_decision(
             LifecycleAutoDecision::Hold {
                 reason: LifecycleAutoReason::WaitingForLeaseGuard,
             },
             145,
         );
+        timing.record_decision(
+            LifecycleAutoDecision::Promote {
+                candidate: LifecycleNodeId::NodeB,
+                epoch: 2,
+            },
+            225,
+        );
 
         assert_eq!(
             timing.stages(225),
             Some(FailoverStages {
-                failure_detection_ms: 25,
+                failure_detection_ms: 45,
                 lease_wait_ms: 80,
+                promotion_readiness_ms: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn failover_timing_counts_authenticated_self_fence_as_detection() {
+        let mut timing = FailoverTiming::default();
+        timing.record_promotion(LifecycleNodeId::NodeA);
+        let report = crate::lifecycle::LifecycleReport {
+            node_id: LifecycleNodeId::NodeA,
+            reason_code: LifecycleReasonCode::Status,
+            state: crate::lifecycle::LifecycleState::SelfFenced,
+            highest_epoch: 1,
+            incarnation: 1,
+            store_generation: 1,
+            effect_count: 0,
+            commit_index: 1,
+            state_root: [1; 32],
+            lease_expires_at_ms: 0,
+        };
+        timing.record_observation(LifecycleNodeId::NodeA, Some(&report), 300);
+        timing.record_decision(
+            LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WaitingForLeaseGuard,
+            },
+            325,
+        );
+        timing.record_decision(
+            LifecycleAutoDecision::Promote {
+                candidate: LifecycleNodeId::NodeB,
+                epoch: 2,
+            },
+            400,
+        );
+
+        assert_eq!(
+            timing.stages(400),
+            Some(FailoverStages {
+                failure_detection_ms: 25,
+                lease_wait_ms: 75,
+                promotion_readiness_ms: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn failover_timing_keeps_post_lease_candidate_delay_out_of_lease_wait() {
+        let mut timing = FailoverTiming::default();
+        timing.record_promotion(LifecycleNodeId::NodeA);
+        timing.record_observation(LifecycleNodeId::NodeA, None, 100);
+        timing.record_decision(
+            LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WaitingForLeaseGuard,
+            },
+            145,
+        );
+        timing.record_decision(
+            LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::CandidateUnavailable,
+            },
+            225,
+        );
+        timing.record_decision(
+            LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::CandidateUnavailable,
+            },
+            725,
+        );
+        timing.record_decision(
+            LifecycleAutoDecision::Promote {
+                candidate: LifecycleNodeId::NodeB,
+                epoch: 2,
+            },
+            730,
+        );
+
+        assert_eq!(
+            timing.stages(730),
+            Some(FailoverStages {
+                failure_detection_ms: 45,
+                lease_wait_ms: 80,
+                promotion_readiness_ms: 505,
             })
         );
     }
