@@ -293,17 +293,59 @@ fn same_existing_file(_left: &Path, _right: &Path) -> Result<bool, ClusterError>
 
 pub(crate) fn write_ready_file(path: &Path, contents: &str) -> Result<(), ClusterError> {
     prepare_file_parent(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(err(
+                "READY_FILE_FAILED",
+                format!("{} already exists", path.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(err(
+                "READY_FILE_FAILED",
+                format!("{}: {error}", path.display()),
+            ));
+        }
+    }
+    let staging = ready_staging_path(path);
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(path)
-        .map_err(|error| err("READY_FILE_FAILED", format!("{}: {error}", path.display())))?;
+        .open(&staging)
+        .map_err(|error| {
+            err(
+                "READY_FILE_FAILED",
+                format!("{}: {error}", staging.display()),
+            )
+        })?;
     file.write_all(contents.as_bytes())
-        .map_err(|error| err("READY_FILE_FAILED", format!("{}: {error}", path.display())))?;
-    file.sync_all()
-        .map_err(|error| err("READY_FILE_FAILED", format!("{}: {error}", path.display())))?;
-    sync_parent(path)
-        .map_err(|error| err("READY_FILE_FAILED", format!("{}: {error}", path.display())))
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            let _cleanup = fs::remove_file(&staging);
+            err(
+                "READY_FILE_FAILED",
+                format!("{}: {error}", staging.display()),
+            )
+        })?;
+    // A sibling hard link publishes the fully synced inode atomically and,
+    // unlike rename, can never replace a readiness file created in the gap
+    // between the initial existence check and publication.
+    fs::hard_link(&staging, path).map_err(|error| {
+        let _cleanup = fs::remove_file(&staging);
+        err("READY_FILE_FAILED", format!("{}: {error}", path.display()))
+    })?;
+    if let Err(error) = fs::remove_file(&staging) {
+        let _cleanup = fs::remove_file(path);
+        return Err(err(
+            "READY_FILE_FAILED",
+            format!("{}: {error}", staging.display()),
+        ));
+    }
+    sync_parent(path).map_err(|error| {
+        let _cleanup = fs::remove_file(path);
+        err("READY_FILE_FAILED", format!("{}: {error}", path.display()))
+    })
 }
 
 #[derive(Debug)]
@@ -349,6 +391,14 @@ fn file_lock_path(file: &Path) -> PathBuf {
         .file_name()
         .map_or_else(|| OsString::from("state"), OsString::from);
     name.push(".quorumarc.owner");
+    file_parent(file).join(name)
+}
+
+fn ready_staging_path(file: &Path) -> PathBuf {
+    let mut name = file
+        .file_name()
+        .map_or_else(|| OsString::from("ready"), OsString::from);
+    name.push(".quorumarc.staging");
     file_parent(file).join(name)
 }
 
@@ -401,6 +451,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
 
     use super::*;
 
@@ -450,6 +501,61 @@ mod tests {
         let error = require_ready_disjoint(&lock, &[], None, Some(&wal))
             .expect_err("ready path equal to lock must fail");
         assert_eq!(error.reason_code(), "PATH_ALIAS_REFUSED");
+        fs::remove_dir_all(root).expect("remove path test directory");
+    }
+
+    #[test]
+    fn readiness_is_published_only_after_complete_staging_write() {
+        let root = directory();
+        let ready = root.join("node.ready");
+        let staging = ready_staging_path(&ready);
+        write_ready_file(&ready, "127.0.0.1:12345").expect("publish readiness");
+        assert_eq!(
+            fs::read_to_string(&ready).expect("read readiness"),
+            "127.0.0.1:12345"
+        );
+        assert!(!staging.exists());
+        let duplicate = write_ready_file(&ready, "127.0.0.1:54321")
+            .expect_err("existing readiness must not be overwritten");
+        assert_eq!(duplicate.reason_code(), "READY_FILE_FAILED");
+        assert_eq!(
+            fs::read_to_string(&ready).expect("read original readiness"),
+            "127.0.0.1:12345"
+        );
+        fs::remove_dir_all(root).expect("remove path test directory");
+    }
+
+    #[test]
+    fn concurrent_readiness_publish_has_exactly_one_complete_winner() {
+        let root = directory();
+        let ready = root.join("node.ready");
+        let barrier = Arc::new(Barrier::new(3));
+        let (first, second) = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first_ready = &ready;
+            let first = scope.spawn(move || {
+                first_barrier.wait();
+                write_ready_file(first_ready, "127.0.0.1:12345")
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second_ready = &ready;
+            let second = scope.spawn(move || {
+                second_barrier.wait();
+                write_ready_file(second_ready, "127.0.0.1:54321")
+            });
+            barrier.wait();
+            (
+                first.join().expect("join first publisher"),
+                second.join().expect("join second publisher"),
+            )
+        });
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let published = fs::read_to_string(&ready).expect("read readiness winner");
+        assert!(matches!(
+            published.as_str(),
+            "127.0.0.1:12345" | "127.0.0.1:54321"
+        ));
+        assert!(!ready_staging_path(&ready).exists());
         fs::remove_dir_all(root).expect("remove path test directory");
     }
 

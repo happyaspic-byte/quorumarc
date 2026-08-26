@@ -331,6 +331,19 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
         self.store.state().highest_epoch()
     }
 
+    /// Candidate bound to the most recent durable vote, when one exists.
+    ///
+    /// Lifecycle coordinators may use this only to validate the target of a
+    /// subsequent fence receipt. The returned identity is not, by itself,
+    /// proof that the candidate ever activated or still holds authority.
+    #[must_use]
+    pub fn last_durable_candidate(&self) -> Option<&str> {
+        self.store
+            .state()
+            .last_vote()
+            .map(quorumarc_store::VoteRecord::candidate)
+    }
+
     /// Current durable frame generation.
     #[must_use]
     pub const fn durable_generation(&self) -> u64 {

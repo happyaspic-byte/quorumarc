@@ -1,12 +1,10 @@
-//! Bounded, localhost-only three-process integration named
-//! `LAB_GENESIS_ONE_SHOT`.
+//! Bounded, localhost-only three-process integrations.
 //!
-//! This crate exercises one RPO-0 demonstration write, one durable witness
-//! vote, one canonical promotion proof, durable candidate authority state and
-//! one gated test-sink effect. It is deliberately not a failover controller,
-//! consensus implementation, production fence, production clock, or proof of
-//! a globally unique genesis. The fixed clock and one-shot epoch are test
-//! fixtures only.
+//! The one-shot path exercises one RPO-0 demonstration write and bootstrap
+//! activation. The command-driven lifecycle path keeps identical Node A/B
+//! services and a durable Witness alive across signed, lease-guarded authority
+//! transfers and process faults. It is deliberately not an automatic failover
+//! controller, production fence, trusted clock, or proof of global uniqueness.
 
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
@@ -17,6 +15,7 @@
 
 mod bootstrap;
 mod keys;
+mod lifecycle;
 mod path_guard;
 mod peer;
 mod protocol;
@@ -28,6 +27,11 @@ use std::fmt::{self, Display, Formatter};
 
 pub use bootstrap::{BootstrapConfig, BootstrapReport, run_bootstrap};
 pub use keys::{load_private_seed, load_public_key};
+pub use lifecycle::{
+    LifecycleClient, LifecycleNodeConfig, LifecycleNodeId, LifecycleReasonCode, LifecycleReport,
+    LifecycleState, LifecycleStoreFault, LifecycleWitnessConfig, lifecycle_lease,
+    lifecycle_policy_hash, serve_lifecycle_node, serve_lifecycle_witness,
+};
 pub use peer::{PeerConfig, serve_peer};
 pub use self_test::{SelfTestConfig, SelfTestReport, run_self_test};
 pub use witness::{WitnessConfig, serve_witness};

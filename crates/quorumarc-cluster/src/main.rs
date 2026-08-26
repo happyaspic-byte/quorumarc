@@ -6,8 +6,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use quorumarc_cluster::{
-    BootstrapConfig, ClusterError, PeerConfig, SelfTestConfig, WitnessConfig, run_bootstrap,
-    run_self_test, serve_peer, serve_witness,
+    BootstrapConfig, ClusterError, LifecycleNodeConfig, LifecycleNodeId, LifecycleStoreFault,
+    LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig, lifecycle_policy_hash,
+    run_bootstrap, run_self_test, serve_lifecycle_node, serve_lifecycle_witness, serve_peer,
+    serve_witness,
 };
 
 fn main() -> ExitCode {
@@ -89,6 +91,72 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 candidate_public_key_file: options.path("--candidate-public-key")?,
                 max_connections: options.u64("--max-connections")?,
                 io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+            })
+        }
+        "lifecycle-node" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--node",
+                    "--listen",
+                    "--ready-file",
+                    "--wal",
+                    "--store",
+                    "--signing-key",
+                    "--witness-public-key",
+                    "--witness",
+                    "--max-connections",
+                    "--timeout-ms",
+                    "--policy-byte",
+                    "--store-fault",
+                ],
+                &["--allow-lifecycle-lab"],
+            )?;
+            require_lifecycle_opt_in(&options)?;
+            let policy_hash = [options.u8_or("--policy-byte", lifecycle_policy_hash()[0])?; 32];
+            serve_lifecycle_node(LifecycleNodeConfig {
+                node_id: LifecycleNodeId::parse(options.value("--node")?)?,
+                listen: options.socket("--listen")?,
+                ready_file: options.path("--ready-file")?,
+                wal_path: options.path("--wal")?,
+                store_directory: options.path("--store")?,
+                signing_key_file: options.path("--signing-key")?,
+                witness_public_key_file: options.path("--witness-public-key")?,
+                witness_address: options.socket("--witness")?,
+                max_connections: options.u64("--max-connections")?,
+                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+                policy_hash,
+                store_fault: parse_store_fault(options.optional_value("--store-fault"))?,
+            })
+        }
+        "lifecycle-witness" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--listen",
+                    "--ready-file",
+                    "--store",
+                    "--signing-key",
+                    "--node-a-public-key",
+                    "--node-b-public-key",
+                    "--max-connections",
+                    "--timeout-ms",
+                    "--policy-byte",
+                ],
+                &["--allow-lifecycle-lab"],
+            )?;
+            require_lifecycle_opt_in(&options)?;
+            let policy_hash = [options.u8_or("--policy-byte", lifecycle_policy_hash()[0])?; 32];
+            serve_lifecycle_witness(LifecycleWitnessConfig {
+                listen: options.socket("--listen")?,
+                ready_file: options.path("--ready-file")?,
+                store_directory: options.path("--store")?,
+                signing_key_file: options.path("--signing-key")?,
+                node_a_public_key_file: options.path("--node-a-public-key")?,
+                node_b_public_key_file: options.path("--node-b-public-key")?,
+                max_connections: options.u64("--max-connections")?,
+                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+                policy_hash,
             })
         }
         "bootstrap" => {
@@ -176,7 +244,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
 
 fn print_help() {
     println!(
-        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThey are not production automatic failover or fencing.",
+        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe lifecycle modes are command-driven safety tests, not automatic failure detection,\nproduction failover, trusted time, or physical fencing.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -195,7 +263,10 @@ impl Options {
             let argument = arguments
                 .get(index)
                 .ok_or_else(|| cli_error("argument index invalid"))?;
-            if argument == "--allow-lab-genesis" || argument == "--keep-state" {
+            if argument == "--allow-lab-genesis"
+                || argument == "--keep-state"
+                || argument == "--allow-lifecycle-lab"
+            {
                 if flags.iter().any(|value| value == argument) {
                     return Err(cli_error("duplicate flag"));
                 }
@@ -243,6 +314,13 @@ impl Options {
             .map(|(_, value)| PathBuf::from(value))
     }
 
+    fn optional_value(&self, name: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
     fn socket(&self, name: &str) -> Result<SocketAddr, ClusterError> {
         SocketAddr::from_str(self.value(name)?)
             .map_err(|error| cli_error(format!("invalid {name}: {error}")))
@@ -267,6 +345,15 @@ impl Options {
         } else {
             Ok(default)
         }
+    }
+
+    fn u8_or(&self, name: &str, default: u8) -> Result<u8, ClusterError> {
+        let value = if self.values.iter().any(|(key, _)| key == name) {
+            self.u64(name)?
+        } else {
+            u64::from(default)
+        };
+        u8::try_from(value).map_err(|_| cli_error(format!("{name} must be at most 255")))
     }
 
     fn flag(&self, name: &str) -> bool {
@@ -294,6 +381,28 @@ impl Options {
 
 fn cli_error(detail: impl Into<String>) -> ClusterError {
     ClusterError::new("CLI_INVALID", detail)
+}
+
+fn require_lifecycle_opt_in(options: &Options) -> Result<(), ClusterError> {
+    if options.flag("--allow-lifecycle-lab") {
+        Ok(())
+    } else {
+        Err(ClusterError::new(
+            "LIFECYCLE_LAB_DISABLED",
+            "lifecycle service requires explicit --allow-lifecycle-lab",
+        ))
+    }
+}
+
+fn parse_store_fault(value: Option<&str>) -> Result<LifecycleStoreFault, ClusterError> {
+    match value {
+        None | Some("none") => Ok(LifecycleStoreFault::None),
+        Some("promotion-write") => Ok(LifecycleStoreFault::PromotionWriteError),
+        Some("promotion-partial") => Ok(LifecycleStoreFault::PromotionPartialWrite),
+        Some(_) => Err(cli_error(
+            "--store-fault must be none, promotion-write, or promotion-partial",
+        )),
+    }
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
