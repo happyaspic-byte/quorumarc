@@ -57,7 +57,7 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 | `quorumarc-core` | Promotion-proof validation and logical fail-closed EffectGate | In-memory safety kernel |
 | `quorumarc-sim` | Deterministic compact-model schedule explorer | One serial metadata view and trusted logical clock |
 | `quorumarc-wire` | Strict canonical envelope and domain-separated Ed25519 verification | Component protocol; not a complete authority transaction |
-| `quorumarc-store` | Checksummed atomic authority journal with fault injection | File-store model; not proof for every disk/filesystem |
+| `quorumarc-store` | Identity-bound v3 atomic authority journal, read-only inspection, and fault injection | CRC/file-store model; not malicious anti-rollback or proof for every disk/filesystem |
 | `quorumarc-runtime` | Bounded frames, durable Witness actor, and test EffectGate sink | Component runtime only |
 | `quorumarc-rpo0` | Two-replica WAL-backed monotonic-counter demonstration | Demonstration workload, not a general database |
 | `quorumarc-lab` | Real localhost TCP Witness process and deterministic fault cases | No complete Node A/Node B active-writer lifecycle |

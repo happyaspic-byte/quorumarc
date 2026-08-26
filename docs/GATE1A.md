@@ -123,10 +123,11 @@ or unavailable Witness must result in a typed refusal and a closed gate.
 The earlier proposal/final-digest dependency cycle is resolved in source. A
 domain-separated digest covers the complete canonical quorum binding before
 votes exist. The Witness persists that proposal digest; a promotion record in
-authority journal format v2 persists both that value and the digest of the
-complete signed envelope. Promotion recovery matches vote to proposal, while
-activation matches its receipt to the final signed-envelope digest. Format v1
-is deliberately rejected rather than ambiguously migrated.
+authority journal format v3 persists both that value and the digest of the
+complete signed envelope, together with cluster/workload/node/role/store
+identity. Promotion recovery matches vote to proposal, while activation matches
+its receipt to the final signed-envelope digest. Format v1 and v2 are
+deliberately rejected rather than ambiguously migrated.
 
 The explicit lab-genesis candidate threads these materials through three
 processes and a test sink. Its evidence is synthetic: fixed logical time, a
@@ -135,10 +136,11 @@ is not the normal agent control plane and does not implement election, failure
 detection, lease renewal, failover, or failback. The agent therefore continues
 to refuse `run` with `ACTIVATION_CONTROL_PLANE_UNAVAILABLE`.
 
-No local protocol can detect a perfect clone of every trusted store and the
-Witness credential. Production safety additionally needs protected Witness
-ownership, immutable cluster/workload/store identity, independently verified
-replication progress, and real fencing or safe expiry.
+No local protocol can detect a perfect clone of every trusted store, its v3
+expected identity/configuration, and the Witness credential. Production safety
+additionally needs protected Witness ownership, independently enforced
+anti-rollback identity, independently verified replication progress, and real
+fencing or safe expiry.
 
 ## Incremental delivery
 

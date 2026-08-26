@@ -84,7 +84,7 @@ work:
 | Unknown protocol field/version | Strict canonical decoder and explicit compatible versions | Reject; never guess semantics |
 | Stolen/retired key | Key IDs, authorization set, rotation and revocation interface | Reject unauthorized or retired key |
 | Cloned authority instance | Protected Witness ownership, identity-bound stores, external uniqueness, and effect fencing | Outside the GitHub one-shot lab claim; never treat local path locks as global proof |
-| Valid journal transplant | Bind cluster, workload, node, and role inside a future authenticated store format | Current v2 format cannot detect every compatible transplant; require repair with effects closed |
+| Valid journal transplant | V3 binds cluster, workload, node, role, and store ID; future authenticated anti-rollback format | Refuse expected/durable identity mismatch; a perfect clone or malicious replacement still requires external fencing and closed-gate repair |
 | Undeclared output path | Continuity Capsule inventory and adapter review | Workload is ineligible for automatic promotion |
 | Check/use race | Generation-scoped adapter operation and enforcement at I/O boundary | Fail closed; user-space test sink is not production fencing |
 

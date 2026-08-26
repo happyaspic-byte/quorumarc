@@ -144,7 +144,14 @@ that to the journal. Example inspection:
 ```bash
 systemctl status quorumarc-agent-check.service
 journalctl -u quorumarc-agent-check.service --since today --no-pager
+quorumarc-agent inspect-store --store /var/lib/quorumarc/agent
+quorumarc-witness inspect-store --store /var/lib/quorumarc/witness
 ```
+
+Store inspection decodes the committed frame read-only and reports the v3
+cluster, workload, node, role, store ID, generation, and durable authority
+summary. It does not open a writable store, remove
+`authority.journal.tmp`, verify global uniqueness, or grant authority.
 
 The runtime libraries expose stable reason-code strings for frame refusals,
 witness vote decisions/recovery, and test-effect refusals. A future service
@@ -205,8 +212,9 @@ procedure is an offline evidence copy:
 1. Disable any external automation and record that automatic promotion is off.
 2. Close the real workload's external effects independently and stop all
    QuorumArc/workload writers for the protected workload.
-3. Record node identities, current incarnations/epochs/generations, policy and
-   membership hashes, binary/source digest, workload commit/root, and time.
+3. Record cluster/workload/node/role/store IDs, current
+   incarnations/epochs/generations, policy and membership hashes,
+   binary/source digest, workload commit/root, and time.
    Current shells cannot report these fields; if they cannot be established,
    abort the backup rather than guessing.
 4. Copy each role's `authority.journal`, matching workload WAL/checkpoint,
@@ -230,9 +238,16 @@ Restore is safe only if an operator can establish that no node retains or can
 regain a later authority/lease, all old effects are physically or independently
 fenced, and the chosen authority snapshot matches the recovered workload
 commit/root and key/policy history. The current store cannot detect restoration
-of an older but internally valid frame. There is no implemented command that
-proves these preconditions, so unattended restore is **NOT-IMPLEMENTED** and a
+of an older but internally valid frame or a perfect clone carrying the same v3
+identity/configuration. There is no implemented command that proves these
+preconditions, so unattended restore is **NOT-IMPLEMENTED** and a
 rollback-ambiguous restore must remain blocked.
+
+Authority journal v3 deliberately refuses v1/v2 frames. There is no in-place
+migration command. Keep effects fenced, archive the old frame and matching
+workload evidence, and do not relabel or edit its version. Creating a fresh v3
+store starts a new authority history and is permitted only in the bounded lab;
+it is not an operational recovery procedure.
 
 For laboratory diagnosis, retain both damaged and backup copies, work on a
 third copy, and report the event as recovery/repair evidence—not successful

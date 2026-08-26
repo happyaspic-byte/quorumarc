@@ -160,8 +160,9 @@ Ed25519 signing:
 The durable/audit envelope digest is SHA-256 over
 `quorumarc/promotion-envelope/sha256/v1\0` followed by the complete canonical
 signed frame. The Witness durably records the proposal digest above before
-releasing a vote. Authority journal format v2 later records both the proposal
-digest and the final signed-envelope digest. Changing a field in the quorum
+releasing a vote. Authority journal format v3 later records both the proposal
+digest and the final signed-envelope digest plus its immutable local store
+identity. Changing a field in the quorum
 binding changes the proposal digest and every vote statement; changing a voter,
 key ID, signature, or certificate ordering leaves the proposal digest unchanged
 but changes the final signed-envelope digest.

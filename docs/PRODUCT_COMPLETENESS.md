@@ -16,7 +16,7 @@ implemented and physically validated.
 
 | Product dimension | Required QuorumArc outcome | Current evidence |
 |---|---|---|
-| Safe authority | Signed proof binds quorum, fence/expiry, lease, policy, health, commit and root | Component and bounded one-shot lab |
+| Safe authority | Signed proof binds quorum, fence/expiry, lease, policy, health, commit and root | Component and bounded one-shot lab; v3 authority stores are bound to cluster/workload/node/role/store ID |
 | Automatic lifecycle | Long-running identical A/B agents perform election, failover and safe failback | Not implemented |
 | External uniqueness | At least one real enforced endpoint/effect adapter plus verified fence read-back | Not implemented |
 | Data continuity | Named synchronous workload profiles with a durable client-ack boundary and recovery proof | Counter component demonstration only |
@@ -26,7 +26,7 @@ implemented and physically validated.
 | Security lifecycle | Provisioning, least privilege, rotation, revocation, SBOM, provenance and independent review | Partial cryptographic interfaces and CI dependency checks |
 | Availability evidence | 25 integrated scenarios, latency percentiles, zero single-writer violations and zero acknowledged loss | Component/model evidence; 0/25 global PASS |
 | Physical evidence | Two data hosts, independent Witness, NIC/switch/power/storage/fence/VIP campaigns | Not performed |
-| Serviceability | Backup, restore, node replacement, upgrade, rollback, support bundle and runbooks | Documentation sketches only |
+| Serviceability | Backup, restore, node replacement, upgrade, rollback, support bundle and runbooks | Read-only identity-aware proof/store inspection plus documentation sketches |
 | FT continuity | Supported memory/device/session continuity profiles | Later research gate |
 
 ## Priority classes
@@ -42,6 +42,12 @@ implemented and physically validated.
 5. Integrated synchronous workload acknowledgement and recovery.
 6. All 25 failure scenarios with retained traces and exact CI evidence.
 7. Physical three-host validation before any production claim.
+
+The identity-bound portion of P0.1 is implemented in authority frame v3 and
+covered by exact-recovery, copied-store mismatch, role/workload/node/cluster/
+store-ID misuse, malformed identity, crash-boundary, and staging-preservation
+tests. Rollback awareness is not complete: a perfect clone or older internally
+valid v3 frame still requires an external anti-rollback/uniqueness root.
 
 ### P1 — deployability and operations
 

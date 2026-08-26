@@ -59,9 +59,10 @@ met by meaningful tests, not lowered or described as passing when they are not.
 The earlier proposal/final-digest cycle is resolved in source. The wire crate
 computes a domain-separated digest of the canonical pre-certificate quorum
 binding. The Witness persists it before releasing a vote. Authority journal
-format v2 stores that proposal digest separately from the digest of the final
-signed envelope; promotion and activation recovery compare the appropriate
-values. Format v1 is rejected fail-closed and has no automatic migration.
+format v3 stores that proposal digest separately from the digest of the final
+signed envelope and binds the local store identity; promotion and activation
+recovery compare the appropriate values. Format v1 and v2 are rejected
+fail-closed and have no automatic migration.
 
 This does not create an activation path. Trusted time, real fencing, lease
 activation, and an enforced EffectGate are not connected through identical
@@ -137,13 +138,17 @@ They cannot prove that arbitrary disks, controllers, filesystems, hypervisors,
 or firmware honor flushes, nor defeat an undetectable rollback of every trusted
 copy.
 
-The authority frame has no immutable cluster/workload/node/role store identity,
-and the base store has no inter-process lock or compare-and-swap. A valid frame
-can be transplanted to a compatible path, and a perfect copy of every trusted
-directory plus a Witness credential creates an authority clone that the first
-instance cannot observe. Global single-writer safety needs an external
-uniqueness root, protected Witness ownership, identity-bound stores, and real
-effect fencing; a local filesystem lock cannot supply those properties.
+Authority frame v3 binds cluster/workload/node/role and a non-zero provisioned
+store-instance ID. A frame opened with any different expected identity is
+refused before staging cleanup. This prevents accidental cross-node,
+cross-workload, and data-node/Witness journal reuse, but it is not a global
+uniqueness root: a perfect copy of the journal, expected identity/configuration,
+and Witness credential creates an authority clone that the first instance
+cannot observe. The CRC is damage detection, not malicious-frame
+authentication, and the base store has no inter-process lock or compare-and-swap.
+Global single-writer safety still needs protected Witness ownership,
+hardware-backed or authenticated anti-rollback identity, and real effect
+fencing; a local identity or filesystem lock cannot supply those properties.
 
 ### Capability and acknowledgement boundaries
 

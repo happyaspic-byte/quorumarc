@@ -66,6 +66,24 @@ is irrelevant. A practical starting point is:
 | Node B | Same class as A | Use a separate physical PC and power connection |
 | Witness | 1-2 cores, 1-2 GiB RAM, small durable disk, Ubuntu or supported container host | Mini PC, Raspberry Pi-class device, NAS VM/container, or isolated VM; must not run on A or B for independence claims |
 
+Node A and Node B do not need identical model numbers for the planned
+application/service HA profile. Mixed specifications are acceptable only when:
+
+- both use a compatible CPU architecture, Ubuntu/userspace, application build,
+  data format, sector/filesystem behavior, and network protocol;
+- either node alone can carry the declared peak workload plus recovery work;
+- capacity policy uses the weaker node as the failover ceiling; and
+- synchronous RPO-0 latency and timeout budgets are qualified against the
+  slower disk, NIC, and network path.
+
+Matching CPU generation, NIC count/speed, storage class, firmware, and memory
+capacity is strongly preferred because it reduces untested behavior and makes
+failover/failback performance predictable. An asymmetric development pair is
+useful for exposing assumptions, but a faster active node must not acknowledge
+load that the weaker standby cannot safely sustain after takeover. VM
+lockstep/memory-continuity profiles are a separate future scope and may require
+much stricter hardware symmetry than the service-restart profile.
+
 Suggested logical networks are management, replication, and service. They may
 share a switch in an initial functional lab, but a shared switch is then a
 documented common failure domain. Production-oriented testing should introduce

@@ -19,6 +19,7 @@ controllers, firmware, power loss, or independent hosts are
 
 One committed snapshot contains:
 
+- immutable cluster, workload, logical node, role, and provisioned store IDs;
 - the highest accepted or voted epoch;
 - the durable process incarnation;
 - the last vote (epoch, candidate, proposal digest);
@@ -67,23 +68,36 @@ must not infer failure from the absence of an acknowledgement.
 
 ## Frame and recovery rules
 
-The internal store frame is version 2, little-endian, and limited to 1 MiB. It
+The internal store frame is version 3, little-endian, and limited to 1 MiB. It
 contains magic `QARCJNL1`, format version, zero reserved header field,
 generation, payload length, payload, IEEE CRC-32, and trailer `QARCEND1`.
 CRC-32 detects accidental damage; it is not authentication and does not resist
 malicious replacement.
 
-Format v2 adds separate proposal and final signed-envelope digests to promotion
-state. A v1 frame or any other unsupported version is rejected fail-closed;
-there is no automatic migration. Operators must not edit a v1 frame or change
-its version field. A future migration tool needs a separately reviewed,
-closed-gate procedure and coherent proof/workload evidence.
+Format v3 includes an immutable `cluster_id`, `workload_id`, `node_id`,
+`data-node|witness` role, and non-zero 128-bit provisioned `store_id` in every
+committed frame. It retains the separate proposal and final signed-envelope
+digests introduced by v2. The writable open API requires the complete expected
+identity and compares it with the durable identity before removing a staging
+file. A valid journal copied to a different cluster, workload, node, role, or
+store instance is therefore refused with a typed identity-mismatch error.
 
-Open reads only `authority.journal`, validates the whole frame and state
-invariants, then removes any staging file. Bad magic/version/reserved fields,
-truncation, oversized or mismatched length, checksum/trailer damage,
-non-canonical fields, invalid identifiers, generation zero, or inconsistent
-state refuses recovery. A staging file can never grant authority.
+V1, v2, and any unknown version are rejected fail-closed; there is no automatic
+migration. Operators must not edit an old frame or change its version field.
+Until a reviewed migration command exists, a retained v2 laboratory store must
+remain effect-closed and be archived; provisioning a fresh v3 lab store is a
+new authority history, not an in-place recovery. Operational migration requires
+coherent proof/workload evidence, a higher safe epoch, and an independently
+verified closed-gate procedure, none of which is implemented yet.
+
+Open reads only `authority.journal`, validates the whole frame, identity, and
+state invariants, compares the expected and durable identities, then removes
+any staging file. Bad magic/version/reserved fields, truncation, oversized or
+mismatched length, checksum/trailer damage, non-canonical fields, invalid or
+unknown identity, generation zero, inconsistent state, or identity mismatch
+refuses recovery. A staging file can never grant authority. The inspection API
+decodes committed bytes read-only and never opens a writable store or cleans a
+live staging path.
 
 A missing committed file creates a fresh empty state. Consequently an operator
 must never point an existing identity at an accidentally empty directory: doing
@@ -117,13 +131,16 @@ declared fault points, hostile rollback, bit rot after validation, concurrent
 writers, or physical power loss. Those require both additional design and, for
 literal hardware claims, **PHYSICAL-REQUIRED** tests.
 
-The v2 frame does not bind an immutable cluster, workload, node, role, or store
-identity. A structurally valid compatible journal can therefore be copied to a
-different path and still pass format validation. The store API also contains no
-inter-process lock or compare-and-swap. The bounded cluster wrapper uses one
-role-independent local owner-lock name per declared store or WAL path, but that
-lock is not distributed fencing and cannot establish global uniqueness after a
-directory or credential clone.
+The v3 identity detects a journal opened under a different expected cluster,
+workload, node, role, or store-instance ID. It does not detect a perfect clone
+that includes both the journal and the same expected identity/configuration. A
+malicious actor can also replace a CRC-protected frame because CRC is not
+authentication. The store API contains no inter-process lock or compare-and-swap.
+The bounded cluster wrapper uses one role-independent local owner-lock name per
+declared store or WAL path, but that lock is not distributed fencing and cannot
+establish global uniqueness after a complete directory/configuration/credential
+clone. Production use still requires protected provisioning, authenticated or
+hardware-backed anti-rollback state, and real effect fencing.
 
 ## Safe handling rules
 
