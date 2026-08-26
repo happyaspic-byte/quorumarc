@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Signer};
 use quorumarc_rpo0::{OperationId, WalEntry};
+use quorumarc_store::{StoreIdentity, StoreRole};
 use quorumarc_wire::{CanonicalId, MessageId, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -10,6 +11,7 @@ pub(crate) const MAX_CLUSTER_FRAME: usize = 131_072;
 pub(crate) const LAB_REQUEST_ID: [u8; 16] = [44; 16];
 pub(crate) const LAB_MESSAGE_ID: [u8; 16] = [55; 16];
 pub(crate) const LAB_KEY_ID: &str = "key-1";
+pub(crate) const LAB_CLUSTER: &str = "gate1a-lab";
 pub(crate) const LAB_WORKLOAD: &str = "orders";
 pub(crate) const LAB_CANDIDATE: &str = "node-a";
 pub(crate) const LAB_PEER: &str = "node-b";
@@ -19,6 +21,30 @@ pub(crate) const LAB_EPOCH: u64 = 1;
 pub(crate) const LAB_INCARNATION: u64 = 7;
 pub(crate) const LAB_NOW_MS: u64 = 10_000;
 pub(crate) const LAB_LEASE_EXPIRES_MS: u64 = 10_500;
+const CANDIDATE_STORE_ID: [u8; 16] = [61; 16];
+const WITNESS_STORE_ID: [u8; 16] = [71; 16];
+
+pub(crate) fn candidate_store_identity() -> Result<StoreIdentity, ClusterError> {
+    StoreIdentity::new(
+        LAB_CLUSTER,
+        LAB_WORKLOAD,
+        LAB_CANDIDATE,
+        StoreRole::DataNode,
+        CANDIDATE_STORE_ID,
+    )
+    .map_err(|error| err("CANDIDATE_STORE_IDENTITY_INVALID", error.to_string()))
+}
+
+pub(crate) fn witness_store_identity() -> Result<StoreIdentity, ClusterError> {
+    StoreIdentity::new(
+        LAB_CLUSTER,
+        LAB_WORKLOAD,
+        LAB_WITNESS,
+        StoreRole::Witness,
+        WITNESS_STORE_ID,
+    )
+    .map_err(|error| err("WITNESS_STORE_IDENTITY_INVALID", error.to_string()))
+}
 
 const PEER_REQUEST_MAGIC: &[u8; 8] = b"QACPRQ\0\0";
 const PEER_RESPONSE_MAGIC: &[u8; 8] = b"QACPRS\0\0";

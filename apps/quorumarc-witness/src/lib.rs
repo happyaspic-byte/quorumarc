@@ -12,10 +12,11 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_runtime::{FrameCodec, FrameReasonCode};
-use quorumarc_store::{AuthorityState, DurableAuthorityStore, FileBackend, StoreError, StorePaths};
+use quorumarc_store::{AuthoritySnapshot, Corruption, StorePaths};
 use quorumarc_wire::{MAX_SIGNED_ENVELOPE_SIZE, SignedPromotionEnvelope};
 
 const EXIT_NOT_READY: u8 = 1;
@@ -26,7 +27,9 @@ const EXIT_SOFTWARE: u8 = 70;
 const EXIT_IO: u8 = 74;
 const EXIT_UNAVAILABLE: u8 = 78;
 const MAX_STORE_SNAPSHOT_SIZE: usize = 1_048_576;
+#[cfg(test)]
 const SNAPSHOT_ATTEMPTS: u8 = 32;
+#[cfg(test)]
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const REASON_CONFIG_MISSING: &str = "RUN_REFUSED_CONFIG_NOT_CONFIGURED";
@@ -330,15 +333,21 @@ fn inspect_store<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) 
         );
         return write_exit(result, stderr);
     }
-    let (state, generation) = match recover_store_snapshot(&paths) {
+    let recovered = match recover_store_snapshot(&paths) {
         Ok(recovered) => recovered,
-        Err(InspectStoreError::Store(error)) => return store_open_error(error, stderr),
         Err(error) => return store_snapshot_error(error, stderr),
     };
+    let state = recovered.state();
+    let identity = recovered.identity();
     let result = writeln!(
         stdout,
-        "store=recovered authority=false mode=inspection generation={} highest_epoch={} incarnation={} commit_index={} vote_present={} promotion_present={} activation_present={}",
-        generation,
+        "store=recovered authority=false mode=inspection cluster_id={} workload_id={} node_id={} store_role={} store_id={} generation={} highest_epoch={} incarnation={} commit_index={} vote_present={} promotion_present={} activation_present={}",
+        identity.cluster_id(),
+        identity.workload_id(),
+        identity.node_id(),
+        identity.role(),
+        hex(identity.store_id()),
+        recovered.generation(),
         state.highest_epoch(),
         state.incarnation(),
         state.commit_index(),
@@ -425,16 +434,6 @@ fn output_error<E: Write>(error: io::Error, stderr: &mut E) -> u8 {
     EXIT_IO
 }
 
-fn store_open_error<E: Write>(error: StoreError, stderr: &mut E) -> u8 {
-    let (reason, code) = match error {
-        StoreError::Corrupt(_) => ("WITNESS_STORE_CORRUPT", EXIT_DATA),
-        StoreError::Io { .. } => ("WITNESS_STORE_IO", EXIT_IO),
-        _ => ("WITNESS_STORE_INVARIANT", EXIT_SOFTWARE),
-    };
-    let result = writeln!(stderr, "store=refused authority=false reason={reason}");
-    write_error_exit(result, code)
-}
-
 fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u8 {
     let (reason, detail, code) = match error {
         InspectStoreError::Read(ReadBoundedError::TooLarge { actual, maximum }) => (
@@ -455,12 +454,9 @@ fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u
             "committed frame must be a regular file".to_owned(),
             EXIT_DATA,
         ),
-        InspectStoreError::SnapshotIo { operation, error } => (
-            "WITNESS_STORE_SNAPSHOT_IO",
-            format!("{operation}: {error}"),
-            EXIT_IO,
-        ),
-        InspectStoreError::Store(error) => return store_open_error(error, stderr),
+        InspectStoreError::Corrupt(error) => {
+            ("WITNESS_STORE_CORRUPT", error.to_string(), EXIT_DATA)
+        }
     };
     let result = writeln!(
         stderr,
@@ -469,25 +465,13 @@ fn store_snapshot_error<E: Write>(error: InspectStoreError, stderr: &mut E) -> u
     write_error_exit(result, code)
 }
 
-fn recover_store_snapshot(source: &StorePaths) -> Result<(AuthorityState, u64), InspectStoreError> {
+fn recover_store_snapshot(source: &StorePaths) -> Result<AuthoritySnapshot, InspectStoreError> {
     let bytes = read_bounded(source.committed(), MAX_STORE_SNAPSHOT_SIZE)
         .map_err(InspectStoreError::Read)?;
-    let snapshot = create_snapshot_directory().map_err(|error| InspectStoreError::SnapshotIo {
-        operation: "create inspection snapshot",
-        error,
-    })?;
-    let snapshot_paths = StorePaths::new(snapshot.path());
-    fs::write(snapshot_paths.committed(), bytes).map_err(|error| {
-        InspectStoreError::SnapshotIo {
-            operation: "write inspection snapshot",
-            error,
-        }
-    })?;
-    let store = DurableAuthorityStore::open(snapshot_paths, FileBackend)
-        .map_err(InspectStoreError::Store)?;
-    Ok((store.state().clone(), store.generation()))
+    AuthoritySnapshot::decode(&bytes).map_err(InspectStoreError::Corrupt)
 }
 
+#[cfg(test)]
 fn create_snapshot_directory() -> io::Result<SnapshotDirectory> {
     for _attempt in 0..SNAPSHOT_ATTEMPTS {
         let sequence = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -507,14 +491,17 @@ fn create_snapshot_directory() -> io::Result<SnapshotDirectory> {
     ))
 }
 
+#[cfg(test)]
 struct SnapshotDirectory(PathBuf);
 
+#[cfg(test)]
 impl SnapshotDirectory {
     fn path(&self) -> &Path {
         &self.0
     }
 }
 
+#[cfg(test)]
 impl Drop for SnapshotDirectory {
     fn drop(&mut self) {
         let _cleanup_result = fs::remove_dir_all(&self.0);
@@ -523,11 +510,7 @@ impl Drop for SnapshotDirectory {
 
 enum InspectStoreError {
     Read(ReadBoundedError),
-    SnapshotIo {
-        operation: &'static str,
-        error: io::Error,
-    },
-    Store(StoreError),
+    Corrupt(Corruption),
 }
 
 fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ReadBoundedError> {
@@ -632,6 +615,7 @@ impl Error for CliError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quorumarc_store::{DurableAuthorityStore, FileBackend, StoreIdentity, StoreRole};
 
     fn output(arguments: &[&str]) -> (u8, String, String) {
         let mut stdout = Vec::new();
@@ -731,7 +715,17 @@ mod tests {
             Err(_) => std::process::abort(),
         };
         let paths = StorePaths::new(source.path());
-        let mut store = match DurableAuthorityStore::open(paths.clone(), FileBackend) {
+        let identity = match StoreIdentity::new(
+            "cluster-a",
+            "orders",
+            "witness",
+            StoreRole::Witness,
+            [91; 16],
+        ) {
+            Ok(identity) => identity,
+            Err(_) => std::process::abort(),
+        };
+        let mut store = match DurableAuthorityStore::open(paths.clone(), identity, FileBackend) {
             Ok(store) => store,
             Err(_) => std::process::abort(),
         };
@@ -746,6 +740,10 @@ mod tests {
         let (code, stdout, stderr) = output(&["inspect-store", "--store", &path]);
         assert_eq!(code, 0);
         assert!(stdout.contains("mode=inspection"));
+        assert!(stdout.contains("cluster_id=cluster-a"));
+        assert!(stdout.contains("workload_id=orders"));
+        assert!(stdout.contains("node_id=witness"));
+        assert!(stdout.contains("store_role=witness"));
         assert!(stderr.is_empty());
         assert_eq!(
             fs::read(paths.temporary()).ok().as_deref(),

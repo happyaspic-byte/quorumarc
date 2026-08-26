@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use quorumarc_lab::{
     RequestId, TEST_KEY_ID, TestPeerKeys, VoteRequest, WitnessServerConfig, lab_binding,
-    lab_policy, lab_witness_signing_key, probe_loopback, request_vote, serve_witness,
+    lab_policy, lab_witness_signing_key, lab_witness_store_identity, probe_loopback, request_vote,
+    serve_witness,
 };
 use quorumarc_runtime::WitnessVoteActor;
 use quorumarc_store::FileBackend;
@@ -63,6 +64,7 @@ fn run_witness(mut options: ParsedOptions) -> Result<(), CliError> {
         lab_policy().map_err(CliError::boxed)?,
         lab_witness_signing_key(),
         store,
+        lab_witness_store_identity().map_err(CliError::boxed)?,
         FileBackend,
     )
     .map_err(CliError::boxed)?;

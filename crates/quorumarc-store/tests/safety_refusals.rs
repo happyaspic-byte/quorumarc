@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use quorumarc_store::{
     ActivationReceipt, DurableAuthorityStore, FaultInjectingBackend, FaultMode, FaultOperation,
     FaultRule, FileBackend, LeaseBounds, ModelError, PromotionRecord, StateRoot, StoreError,
-    TransitionOutcome, VoteRecord,
+    StoreIdentity, StoreRole, TransitionOutcome, VoteRecord,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -60,6 +60,16 @@ fn promotion(
     )
 }
 
+fn test_identity() -> Result<StoreIdentity, ModelError> {
+    StoreIdentity::new(
+        "cluster-a",
+        "orders",
+        "node-a",
+        StoreRole::DataNode,
+        [23; 16],
+    )
+}
+
 #[test]
 fn model_constructors_reject_authority_sentinels_and_noncanonical_ids() {
     assert!(matches!(
@@ -98,12 +108,33 @@ fn model_constructors_reject_authority_sentinels_and_noncanonical_ids() {
         ActivationReceipt::new(1, "node-a", 1, [2; 32], 200, 200),
         Err(ModelError::InvalidActivationTime)
     ));
+    assert!(matches!(
+        StoreIdentity::new(
+            "cluster-a",
+            "orders",
+            "node-a",
+            StoreRole::DataNode,
+            [0; 16]
+        ),
+        Err(ModelError::ZeroStoreId)
+    ));
+    assert!(matches!(
+        StoreIdentity::new(
+            "cluster/a",
+            "orders",
+            "node-a",
+            StoreRole::DataNode,
+            [1; 16]
+        ),
+        Err(ModelError::InvalidIdentifierCharacter)
+    ));
 }
 
 #[test]
 fn promotion_requires_the_exact_durable_proposal_and_is_idempotent() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new("promotion")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
 
     let missing_vote = store.record_promotion(promotion(7, [1; 32], [2; 32])?);
     assert!(matches!(
@@ -140,7 +171,8 @@ fn promotion_requires_the_exact_durable_proposal_and_is_idempotent() -> Result<(
 #[test]
 fn activation_must_match_holder_incarnation_final_digest_and_lease() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new("activation")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     store.allocate_incarnation(7)?;
     store.record_vote(vote(9, "node-a", [1; 32])?)?;
     store.record_promotion(promotion(9, [1; 32], [2; 32])?)?;
@@ -197,7 +229,7 @@ fn recovery_io_failures_for_create_read_and_cleanup_are_typed() -> Result<(), Bo
                 mode: FaultMode::Error(io::ErrorKind::PermissionDenied),
             }],
         );
-        let result = DurableAuthorityStore::open_in(&target, backend);
+        let result = DurableAuthorityStore::open_in(&target, test_identity()?, backend);
         let Err(StoreError::Io {
             kind: io::ErrorKind::PermissionDenied,
             ..

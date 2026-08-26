@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use quorumarc_store::{
     ActivationReceipt, Corruption, DurableAuthorityStore, FaultInjectingBackend, FaultMode,
     FaultOperation, FaultRule, FileBackend, LeaseBounds, PromotionRecord, StateRoot, StoreError,
-    StorePaths, TransitionOutcome, VoteRecord,
+    StoreIdentity, StorePaths, StoreRole, TransitionOutcome, VoteRecord,
 };
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -51,6 +51,16 @@ fn sample_vote(
     Ok(VoteRecord::new(epoch, candidate, digest)?)
 }
 
+fn test_identity() -> Result<StoreIdentity, Box<dyn Error>> {
+    Ok(StoreIdentity::new(
+        "cluster-a",
+        "orders",
+        "node-a",
+        StoreRole::DataNode,
+        [17; 16],
+    )?)
+}
+
 fn sample_promotion(
     epoch: u64,
     proposal_digest: [u8; 32],
@@ -72,7 +82,8 @@ fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
     let proposal_digest = [7; 32];
     let signed_envelope_digest = [8; 32];
     let generation = {
-        let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+        let mut store =
+            DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
         store.allocate_incarnation(12)?;
         store.record_vote(sample_vote(5, "node-a", proposal_digest)?)?;
         store.record_promotion(sample_promotion(
@@ -87,7 +98,8 @@ fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
         receipt.generation()
     };
 
-    let recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let recovered =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     assert_eq!(recovered.generation(), generation);
     assert_eq!(recovered.state().highest_epoch(), 5);
     assert_eq!(recovered.state().incarnation(), 12);
@@ -127,7 +139,8 @@ fn restart_recovers_complete_authority_state() -> Result<(), Box<dyn Error>> {
 #[test]
 fn exact_vote_retry_is_idempotent_but_double_vote_is_rejected() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("double-vote")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     let vote = sample_vote(8, "node-a", [1; 32])?;
     let first = store.record_vote(vote.clone())?;
     let retry = store.record_vote(vote)?;
@@ -149,7 +162,8 @@ fn exact_vote_retry_is_idempotent_but_double_vote_is_rejected() -> Result<(), Bo
 #[test]
 fn stale_epoch_is_rejected_without_a_write() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("stale-epoch")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     store.record_vote(sample_vote(11, "node-a", [1; 32])?)?;
     let generation = store.generation();
     let error = store
@@ -172,13 +186,13 @@ fn truncated_committed_frame_fails_closed() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("truncated")?;
     let paths = StorePaths::new(directory.path());
     {
-        let mut store = DurableAuthorityStore::open(paths.clone(), FileBackend)?;
+        let mut store = DurableAuthorityStore::open(paths.clone(), test_identity()?, FileBackend)?;
         store.allocate_incarnation(1)?;
     }
     let mut bytes = fs::read(paths.committed())?;
     bytes.truncate(bytes.len() / 2);
     fs::write(paths.committed(), bytes)?;
-    let error = DurableAuthorityStore::open(paths, FileBackend)
+    let error = DurableAuthorityStore::open(paths, test_identity()?, FileBackend)
         .err()
         .ok_or("truncated frame unexpectedly recovered")?;
     assert!(matches!(error, StoreError::Corrupt(_)));
@@ -190,7 +204,7 @@ fn checksum_corruption_fails_closed() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("corrupt")?;
     let paths = StorePaths::new(directory.path());
     {
-        let mut store = DurableAuthorityStore::open(paths.clone(), FileBackend)?;
+        let mut store = DurableAuthorityStore::open(paths.clone(), test_identity()?, FileBackend)?;
         store.allocate_incarnation(2)?;
     }
     let mut bytes = fs::read(paths.committed())?;
@@ -200,7 +214,7 @@ fn checksum_corruption_fails_closed() -> Result<(), Box<dyn Error>> {
         .ok_or("test frame was unexpectedly short")?;
     *byte ^= 0x5a;
     fs::write(paths.committed(), bytes)?;
-    let error = DurableAuthorityStore::open(paths, FileBackend)
+    let error = DurableAuthorityStore::open(paths, test_identity()?, FileBackend)
         .err()
         .ok_or("corrupt frame unexpectedly recovered")?;
     assert!(matches!(error, StoreError::Corrupt(_)));
@@ -211,7 +225,8 @@ fn checksum_corruption_fails_closed() -> Result<(), Box<dyn Error>> {
 fn partial_write_cannot_replace_previous_durable_state() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("partial-write")?;
     {
-        let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+        let mut store =
+            DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
         store.allocate_incarnation(3)?;
     }
     let fault = FaultRule {
@@ -224,7 +239,8 @@ fn partial_write_cannot_replace_previous_durable_state() -> Result<(), Box<dyn E
     };
     {
         let backend = FaultInjectingBackend::new(FileBackend, vec![fault]);
-        let mut store = DurableAuthorityStore::open_in(directory.path(), backend)?;
+        let mut store =
+            DurableAuthorityStore::open_in(directory.path(), test_identity()?, backend)?;
         let error = store
             .allocate_incarnation(4)
             .err()
@@ -233,7 +249,8 @@ fn partial_write_cannot_replace_previous_durable_state() -> Result<(), Box<dyn E
         assert!(store.is_poisoned());
         assert_eq!(store.state().incarnation(), 3);
     }
-    let recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let recovered =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     assert_eq!(recovered.state().incarnation(), 3);
     Ok(())
 }
@@ -252,7 +269,8 @@ fn write_sync_and_rename_failures_never_acknowledge() -> Result<(), Box<dyn Erro
             mode: FaultMode::Error(io::ErrorKind::Other),
         };
         let backend = FaultInjectingBackend::new(FileBackend, vec![fault]);
-        let mut store = DurableAuthorityStore::open_in(directory.path(), backend)?;
+        let mut store =
+            DurableAuthorityStore::open_in(directory.path(), test_identity()?, backend)?;
         let error = store
             .allocate_incarnation(1)
             .err()
@@ -262,7 +280,8 @@ fn write_sync_and_rename_failures_never_acknowledge() -> Result<(), Box<dyn Erro
         assert_eq!(store.generation(), 0);
         drop(store);
 
-        let recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+        let recovered =
+            DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
         assert_eq!(recovered.generation(), 0);
         assert_eq!(recovered.state().incarnation(), 0);
     }
@@ -278,7 +297,7 @@ fn directory_sync_failure_is_unknown_and_requires_recovery() -> Result<(), Box<d
         mode: FaultMode::Error(io::ErrorKind::Other),
     };
     let backend = FaultInjectingBackend::new(FileBackend, vec![fault]);
-    let mut store = DurableAuthorityStore::open_in(directory.path(), backend)?;
+    let mut store = DurableAuthorityStore::open_in(directory.path(), test_identity()?, backend)?;
     let error = store
         .allocate_incarnation(9)
         .err()
@@ -290,7 +309,8 @@ fn directory_sync_failure_is_unknown_and_requires_recovery() -> Result<(), Box<d
 
     // Rename completed before the directory-sync failure. Recovery reads the
     // visible complete frame and still never revives less authority than disk.
-    let recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let recovered =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     assert_eq!(recovered.state().incarnation(), 9);
     assert_eq!(recovered.generation(), 1);
     Ok(())
@@ -299,7 +319,8 @@ fn directory_sync_failure_is_unknown_and_requires_recovery() -> Result<(), Box<d
 #[test]
 fn promotion_requires_matching_durable_vote() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("vote-binding")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     store.allocate_incarnation(1)?;
     store.record_vote(sample_vote(2, "node-a", [1; 32])?)?;
     let error = store
@@ -314,7 +335,8 @@ fn promotion_requires_matching_durable_vote() -> Result<(), Box<dyn Error>> {
 #[test]
 fn activation_requires_final_signed_envelope_digest() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("activation-final-digest")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     let proposal_digest = [4; 32];
     let signed_envelope_digest = [5; 32];
     store.allocate_incarnation(9)?;
@@ -340,18 +362,18 @@ fn old_and_unknown_journal_versions_fail_closed() -> Result<(), Box<dyn Error>> 
     let directory = TestDirectory::create("unsupported-version")?;
     let paths = StorePaths::new(directory.path());
     {
-        let mut store = DurableAuthorityStore::open(paths.clone(), FileBackend)?;
+        let mut store = DurableAuthorityStore::open(paths.clone(), test_identity()?, FileBackend)?;
         store.allocate_incarnation(1)?;
     }
     let current = fs::read(paths.committed())?;
-    for version in [1_u16, 3_u16, u16::MAX] {
+    for version in [1_u16, 2_u16, u16::MAX] {
         let mut changed = current.clone();
         let version_bytes = changed
             .get_mut(8..10)
             .ok_or("journal frame was unexpectedly shorter than its header")?;
         version_bytes.copy_from_slice(&version.to_le_bytes());
         fs::write(paths.committed(), changed)?;
-        let error = DurableAuthorityStore::open(paths.clone(), FileBackend)
+        let error = DurableAuthorityStore::open(paths.clone(), test_identity()?, FileBackend)
             .err()
             .ok_or("unsupported journal version unexpectedly recovered")?;
         assert!(matches!(
@@ -365,7 +387,8 @@ fn old_and_unknown_journal_versions_fail_closed() -> Result<(), Box<dyn Error>> 
 #[test]
 fn progress_cannot_regress_or_change_root_at_same_index() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create("progress")?;
-    let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+    let mut store =
+        DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
     store.record_progress(20, StateRoot::new([1; 32]))?;
     let regression = store
         .record_progress(19, StateRoot::new([1; 32]))

@@ -16,7 +16,7 @@ mod service;
 
 pub use fixture::{
     FixtureError, TEST_KEY_ID, TEST_POLICY_HASH, TEST_STATE_ROOT, TestPeerKeys, lab_binding,
-    lab_policy, lab_witness_signing_key,
+    lab_policy, lab_witness_signing_key, lab_witness_store_identity,
 };
 pub use protocol::{
     DecisionCode, MAX_LAB_FRAME_SIZE, PeerKeyResolver, ProtocolError, RequestId, VoteProof,

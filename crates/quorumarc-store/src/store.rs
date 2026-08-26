@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::backend::StorageBackend;
 use crate::codec::{Corruption, decode, encode};
 use crate::model::{
-    ActivationReceipt, AuthorityState, ModelError, PromotionRecord, StateRoot, VoteRecord,
+    ActivationReceipt, AuthorityState, ModelError, PromotionRecord, StateRoot, StoreIdentity,
+    VoteRecord,
 };
 
 /// Fixed paths used for an authority snapshot journal and its staging file.
@@ -80,10 +81,50 @@ impl DurabilityReceipt {
     }
 }
 
+/// Read-only decoded view of one committed authority frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthoritySnapshot {
+    identity: StoreIdentity,
+    state: AuthorityState,
+    generation: u64,
+}
+
+impl AuthoritySnapshot {
+    /// Strictly decodes one complete committed frame without opening a writable
+    /// store or touching any staging file.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Corruption> {
+        let (identity, state, generation) = decode(bytes)?;
+        Ok(Self {
+            identity,
+            state,
+            generation,
+        })
+    }
+
+    /// Immutable identity recovered from the frame.
+    #[must_use]
+    pub const fn identity(&self) -> &StoreIdentity {
+        &self.identity
+    }
+
+    /// Exact authority state recovered from the frame.
+    #[must_use]
+    pub const fn state(&self) -> &AuthorityState {
+        &self.state
+    }
+
+    /// Durable frame generation.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 /// Fail-closed local durable authority store.
 pub struct DurableAuthorityStore<B> {
     backend: B,
     paths: StorePaths,
+    identity: StoreIdentity,
     state: AuthorityState,
     generation: u64,
     poisoned: bool,
@@ -92,16 +133,30 @@ pub struct DurableAuthorityStore<B> {
 impl<B: StorageBackend> DurableAuthorityStore<B> {
     /// Recovers a store, rejecting any corrupt, truncated, or inconsistent
     /// committed frame. A stale temporary frame never grants authority.
-    pub fn open(paths: StorePaths, mut backend: B) -> Result<Self, StoreError> {
+    pub fn open(
+        paths: StorePaths,
+        expected_identity: StoreIdentity,
+        mut backend: B,
+    ) -> Result<Self, StoreError> {
         backend
             .create_dir_all(paths.directory())
             .map_err(|error| StoreError::io("create store directory", error))?;
         let recovered = backend
             .read_file(paths.committed())
             .map_err(|error| StoreError::io("read committed authority frame", error))?;
-        let (state, generation) = match recovered {
-            Some(bytes) => decode(&bytes).map_err(StoreError::Corrupt)?,
-            None => (AuthorityState::default(), 0),
+        let (identity, state, generation) = match recovered {
+            Some(bytes) => {
+                let (durable_identity, state, generation) =
+                    decode(&bytes).map_err(StoreError::Corrupt)?;
+                if durable_identity != expected_identity {
+                    return Err(StoreError::IdentityMismatch {
+                        expected: Box::new(expected_identity),
+                        durable: Box::new(durable_identity),
+                    });
+                }
+                (durable_identity, state, generation)
+            }
+            None => (expected_identity, AuthorityState::default(), 0),
         };
         backend
             .remove_file_if_exists(paths.temporary())
@@ -109,6 +164,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
         Ok(Self {
             backend,
             paths,
+            identity,
             state,
             generation,
             poisoned: false,
@@ -116,8 +172,18 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
     }
 
     /// Opens a store in `directory` using the standard filenames.
-    pub fn open_in(directory: impl Into<PathBuf>, backend: B) -> Result<Self, StoreError> {
-        Self::open(StorePaths::new(directory), backend)
+    pub fn open_in(
+        directory: impl Into<PathBuf>,
+        identity: StoreIdentity,
+        backend: B,
+    ) -> Result<Self, StoreError> {
+        Self::open(StorePaths::new(directory), identity, backend)
+    }
+
+    /// Immutable identity expected by this writable store instance.
+    #[must_use]
+    pub const fn identity(&self) -> &StoreIdentity {
+        &self.identity
     }
 
     /// Exact state recovered from or committed to durable storage.
@@ -346,7 +412,7 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
             .generation
             .checked_add(1)
             .ok_or(StoreError::GenerationExhausted)?;
-        let bytes = encode(&next, generation);
+        let bytes = encode(&self.identity, &next, generation);
 
         if let Err(error) = self.backend.remove_file_if_exists(self.paths.temporary()) {
             return self.fail("prepare authority staging file", error);
@@ -397,6 +463,13 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
 pub enum StoreError {
     /// A committed frame was malformed or damaged. No state is returned.
     Corrupt(Corruption),
+    /// A valid committed frame belongs to another immutable store identity.
+    IdentityMismatch {
+        /// Identity supplied by the local role configuration.
+        expected: Box<StoreIdentity>,
+        /// Identity recovered from the committed frame.
+        durable: Box<StoreIdentity>,
+    },
     /// Filesystem durability operation failed.
     Io {
         /// Operation whose durability contract failed.
@@ -487,6 +560,10 @@ impl Display for StoreError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Corrupt(error) => write!(formatter, "authority recovery refused: {error}"),
+            Self::IdentityMismatch { expected, durable } => write!(
+                formatter,
+                "authority store identity mismatch: expected [{expected}] but durable [{durable}]",
+            ),
             Self::Io {
                 operation,
                 kind,

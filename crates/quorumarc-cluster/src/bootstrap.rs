@@ -29,7 +29,7 @@ use crate::peer::RemotePeerReplica;
 use crate::protocol::{
     LAB_CANDIDATE, LAB_EPOCH, LAB_INCARNATION, LAB_KEY_ID, LAB_LEASE_EXPIRES_MS, LAB_MESSAGE_ID,
     LAB_NOW_MS, LAB_PEER, LAB_POLICY_HASH, LAB_WITNESS, LAB_WORKLOAD, MAX_CLUSTER_FRAME,
-    WitnessResponse, id, witness_request_digest,
+    WitnessResponse, candidate_store_identity, id, witness_request_digest,
 };
 use crate::{ClusterError, err};
 
@@ -97,8 +97,12 @@ pub fn run_bootstrap(config: BootstrapConfig) -> Result<BootstrapReport, Cluster
     let _store_lock = OwnerLock::for_store(&config.store_directory, "candidate")?;
     let _wal_lock = OwnerLock::for_file(&config.local_wal_path, "candidate")?;
 
-    let mut store = DurableAuthorityStore::open_in(&config.store_directory, FileBackend)
-        .map_err(|error| err("CANDIDATE_STORE_OPEN_REFUSED", error.to_string()))?;
+    let mut store = DurableAuthorityStore::open_in(
+        &config.store_directory,
+        candidate_store_identity()?,
+        FileBackend,
+    )
+    .map_err(|error| err("CANDIDATE_STORE_OPEN_REFUSED", error.to_string()))?;
     require_empty_candidate_store(&store)?;
     require_empty_wal(&config.local_wal_path)?;
 

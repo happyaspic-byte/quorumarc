@@ -18,7 +18,7 @@ use crate::path_guard::{
 use crate::protocol::{
     LAB_CANDIDATE, LAB_EPOCH, LAB_INCARNATION, LAB_KEY_ID, LAB_LEASE_EXPIRES_MS, LAB_MESSAGE_ID,
     LAB_NOW_MS, LAB_POLICY_HASH, LAB_WITNESS, LAB_WORKLOAD, MAX_CLUSTER_FRAME, WitnessDecision,
-    WitnessResponse, id, witness_request_digest,
+    WitnessResponse, id, witness_request_digest, witness_store_identity,
 };
 use crate::{ClusterError, err};
 
@@ -75,8 +75,14 @@ pub fn serve_witness(config: WitnessConfig) -> Result<(), ClusterError> {
     )
     .map_err(|error| err("WITNESS_POLICY_INVALID", error.to_string()))?;
     let actor_key = SigningKey::from_bytes(witness_signing_key.as_bytes());
-    let mut actor = WitnessVoteActor::open(policy, actor_key, &config.store_directory, FileBackend)
-        .map_err(|error| err("WITNESS_STORE_OPEN_REFUSED", error.to_string()))?;
+    let mut actor = WitnessVoteActor::open(
+        policy,
+        actor_key,
+        &config.store_directory,
+        witness_store_identity()?,
+        FileBackend,
+    )
+    .map_err(|error| err("WITNESS_STORE_OPEN_REFUSED", error.to_string()))?;
     let listener = TcpListener::bind(config.listen)
         .map_err(|error| err("WITNESS_BIND_FAILED", format!("{}: {error}", config.listen)))?;
     let local = listener

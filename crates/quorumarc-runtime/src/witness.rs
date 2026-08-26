@@ -4,7 +4,8 @@ use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 
 use quorumarc_store::{
-    DurableAuthorityStore, StorageBackend, StoreError, TransitionOutcome, VoteRecord,
+    DurableAuthorityStore, StorageBackend, StoreError, StoreIdentity, StoreRole, TransitionOutcome,
+    VoteRecord,
 };
 use quorumarc_wire::{CanonicalId, PROTOCOL_VERSION, QuorumBinding, SignedVote, SigningKey};
 
@@ -239,9 +240,19 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
         policy: WitnessPolicy,
         signing_key: SigningKey,
         directory: impl Into<PathBuf>,
+        store_identity: StoreIdentity,
         backend: B,
     ) -> Result<Self, WitnessOpenError> {
-        let store = DurableAuthorityStore::open_in(directory, backend)
+        if store_identity.role() != StoreRole::Witness
+            || store_identity.node_id() != policy.witness_id.as_str()
+            || store_identity.workload_id() != policy.workload_id.as_str()
+        {
+            return Err(WitnessOpenError::identity_policy_mismatch(
+                &policy,
+                store_identity,
+            ));
+        }
+        let store = DurableAuthorityStore::open_in(directory, store_identity, backend)
             .map_err(WitnessOpenError::from_store)?;
         Ok(Self {
             policy,
@@ -353,6 +364,7 @@ fn map_store_error(error: &StoreError) -> VoteReasonCode {
         StoreError::Io { .. } => VoteReasonCode::RefusedDurabilityIo,
         StoreError::GenerationExhausted => VoteReasonCode::RefusedGenerationExhausted,
         StoreError::Corrupt(_)
+        | StoreError::IdentityMismatch { .. }
         | StoreError::MissingVote { .. }
         | StoreError::VoteDigestMismatch { .. }
         | StoreError::ConflictingPromotion { .. }
@@ -372,6 +384,8 @@ pub enum WitnessOpenReasonCode {
     CorruptAuthorityState,
     /// Filesystem recovery I/O failed.
     StorageIo,
+    /// Configured store identity contradicts the Witness policy or durable frame.
+    IdentityPolicyMismatch,
     /// Recovery returned an impossible non-recovery store error.
     StoreInvariant,
 }
@@ -383,7 +397,46 @@ impl WitnessOpenReasonCode {
         match self {
             Self::CorruptAuthorityState => "WITNESS_OPEN_REFUSED_CORRUPT_AUTHORITY_STATE",
             Self::StorageIo => "WITNESS_OPEN_REFUSED_STORAGE_IO",
+            Self::IdentityPolicyMismatch => "WITNESS_OPEN_REFUSED_IDENTITY_POLICY_MISMATCH",
             Self::StoreInvariant => "WITNESS_OPEN_REFUSED_STORE_INVARIANT",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum WitnessOpenCause {
+    Store(StoreError),
+    IdentityPolicyMismatch {
+        policy_witness_id: String,
+        policy_workload_id: String,
+        identity: Box<StoreIdentity>,
+    },
+}
+
+impl Display for WitnessOpenCause {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => Display::fmt(error, formatter),
+            Self::IdentityPolicyMismatch {
+                policy_witness_id,
+                policy_workload_id,
+                identity,
+            } => write!(
+                formatter,
+                "witness policy expects node={policy_witness_id} workload={policy_workload_id} role=witness but store identity has node={} workload={} role={}",
+                identity.node_id(),
+                identity.workload_id(),
+                identity.role(),
+            ),
+        }
+    }
+}
+
+impl Error for WitnessOpenCause {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::IdentityPolicyMismatch { .. } => None,
         }
     }
 }
@@ -392,7 +445,7 @@ impl WitnessOpenReasonCode {
 #[derive(Debug)]
 pub struct WitnessOpenError {
     code: WitnessOpenReasonCode,
-    source: StoreError,
+    cause: WitnessOpenCause,
 }
 
 impl WitnessOpenError {
@@ -400,9 +453,24 @@ impl WitnessOpenError {
         let code = match &source {
             StoreError::Corrupt(_) => WitnessOpenReasonCode::CorruptAuthorityState,
             StoreError::Io { .. } => WitnessOpenReasonCode::StorageIo,
+            StoreError::IdentityMismatch { .. } => WitnessOpenReasonCode::IdentityPolicyMismatch,
             _ => WitnessOpenReasonCode::StoreInvariant,
         };
-        Self { code, source }
+        Self {
+            code,
+            cause: WitnessOpenCause::Store(source),
+        }
+    }
+
+    fn identity_policy_mismatch(policy: &WitnessPolicy, identity: StoreIdentity) -> Self {
+        Self {
+            code: WitnessOpenReasonCode::IdentityPolicyMismatch,
+            cause: WitnessOpenCause::IdentityPolicyMismatch {
+                policy_witness_id: policy.witness_id.as_str().to_owned(),
+                policy_workload_id: policy.workload_id.as_str().to_owned(),
+                identity: Box::new(identity),
+            },
+        }
     }
 
     /// Stable recovery refusal code.
@@ -414,12 +482,12 @@ impl WitnessOpenError {
 
 impl Display for WitnessOpenError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.code.as_str(), self.source)
+        write!(formatter, "{}: {}", self.code.as_str(), self.cause)
     }
 }
 
 impl Error for WitnessOpenError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
+        Some(&self.cause)
     }
 }

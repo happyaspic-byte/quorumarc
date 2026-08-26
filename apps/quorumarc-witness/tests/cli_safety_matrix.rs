@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use quorumarc_store::{DurableAuthorityStore, FileBackend};
+use quorumarc_store::{DurableAuthorityStore, FileBackend, StoreIdentity, StoreRole};
 use quorumarc_wire::MAX_SIGNED_ENVELOPE_SIZE;
 use quorumarc_witness::execute;
 
@@ -200,13 +200,24 @@ fn store_inspection_is_read_only_and_corruption_is_never_authority() -> Result<(
     assert!(empty_stdout.contains("WITNESS_STORE_NO_COMMITTED_FRAME"));
     assert!(empty_stderr.is_empty());
 
-    let mut store = DurableAuthorityStore::open_in(&store_path, FileBackend)?;
+    let identity = StoreIdentity::new(
+        "cluster-a",
+        "orders",
+        "witness",
+        StoreRole::Witness,
+        [97; 16],
+    )?;
+    let mut store = DurableAuthorityStore::open_in(&store_path, identity, FileBackend)?;
     store.allocate_incarnation(4)?;
     fs::write(store.paths().temporary(), b"live-writer-staging")?;
     let (code, stdout, stderr) = invoke(path_arguments("inspect-store", "--store", &store_path));
     assert_eq!(code, 0);
     assert!(stdout.contains("store=recovered"));
     assert!(stdout.contains("authority=false"));
+    assert!(stdout.contains("cluster_id=cluster-a"));
+    assert!(stdout.contains("workload_id=orders"));
+    assert!(stdout.contains("node_id=witness"));
+    assert!(stdout.contains("store_role=witness"));
     assert!(stdout.contains("incarnation=4"));
     assert!(stderr.is_empty());
     assert_eq!(fs::read(store.paths().temporary())?, b"live-writer-staging");

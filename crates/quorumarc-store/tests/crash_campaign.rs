@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use quorumarc_store::{
     ActivationReceipt, AuthorityState, DurableAuthorityStore, FaultInjectingBackend, FaultMode,
     FaultOperation, FaultRule, FileBackend, LeaseBounds, PromotionRecord, StateRoot, StoreError,
-    StorePaths, TransitionOutcome, VoteRecord,
+    StoreIdentity, StorePaths, StoreRole, TransitionOutcome, VoteRecord,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -80,12 +80,22 @@ struct FaultCase {
     rename_was_visible: bool,
 }
 
+fn test_identity() -> TestResult<StoreIdentity> {
+    Ok(StoreIdentity::new(
+        "cluster-a",
+        "orders",
+        "node-a",
+        StoreRole::DataNode,
+        [19; 16],
+    )?)
+}
+
 fn recover_exact(
     directory: &Path,
     expected_generation: u64,
     expected_state: &AuthorityState,
 ) -> TestResult<DurableAuthorityStore<FileBackend>> {
-    let recovered = DurableAuthorityStore::open_in(directory, FileBackend)?;
+    let recovered = DurableAuthorityStore::open_in(directory, test_identity()?, FileBackend)?;
     assert_eq!(recovered.generation(), expected_generation);
     assert_eq!(recovered.state(), expected_state);
     Ok(recovered)
@@ -99,7 +109,7 @@ fn require_store_error<T>(result: Result<T, StoreError>, context: &str) -> TestR
 }
 
 fn require_corrupt_recovery(paths: StorePaths, context: &str) -> TestResult {
-    match DurableAuthorityStore::open(paths, FileBackend) {
+    match DurableAuthorityStore::open(paths, test_identity()?, FileBackend) {
         Err(StoreError::Corrupt(_)) => Ok(()),
         Err(error) => Err(io::Error::other(format!(
             "{context} returned a non-corruption error: {error}"
@@ -114,7 +124,8 @@ fn acknowledged_generations_recover_exactly_across_fixed_seed_campaign() -> Test
     for (seed_index, seed) in FIXED_SEEDS.into_iter().enumerate() {
         let directory = TestDirectory::create(&format!("ack-{seed:016x}"))?;
         let mut random = Deterministic::new(seed);
-        let mut store = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+        let mut store =
+            DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
         let mut expected_generation = 0_u64;
         let incarnation = random.next_u64() % 10_000 + 1;
 
@@ -298,7 +309,11 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             )?;
 
             let (before_generation, before_state) = {
-                let mut bootstrap = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+                let mut bootstrap = DurableAuthorityStore::open_in(
+                    directory.path(),
+                    test_identity()?,
+                    FileBackend,
+                )?;
                 bootstrap.allocate_incarnation(incarnation)?;
                 bootstrap.record_vote(VoteRecord::new(epoch, "node-a", digest)?)?;
                 bootstrap.record_promotion(PromotionRecord::new(
@@ -314,7 +329,8 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             assert!(before_state.activation_receipt().is_none());
 
             let backend = FaultInjectingBackend::new(FileBackend, vec![fault_case.rule]);
-            let mut faulted = DurableAuthorityStore::open_in(directory.path(), backend)?;
+            let mut faulted =
+                DurableAuthorityStore::open_in(directory.path(), test_identity()?, backend)?;
             let failed = require_store_error(
                 faulted.record_activation(activation.clone()),
                 "fault-injected activation persist",
@@ -336,7 +352,8 @@ fn failed_or_ambiguous_activation_persist_never_issues_authority_receipt() -> Te
             // that complete new frame, but the failed call emitted no
             // DurabilityReceipt. The caller must retry the same operation and
             // obtain a receipt before using durability as an authority input.
-            let mut recovered = DurableAuthorityStore::open_in(directory.path(), FileBackend)?;
+            let mut recovered =
+                DurableAuthorityStore::open_in(directory.path(), test_identity()?, FileBackend)?;
             if fault_case.rename_was_visible {
                 assert_eq!(recovered.generation(), before_generation + 1);
                 assert_eq!(recovered.state().activation_receipt(), Some(&activation));
@@ -403,7 +420,8 @@ fn corrupt_and_truncated_committed_frames_fail_closed_across_fixed_seeds() -> Te
         let lease_start = random.next_u64() % 1_000_000 + 1_000;
         let lease_end = lease_start + 1_000;
         {
-            let mut source = DurableAuthorityStore::open(source_paths.clone(), FileBackend)?;
+            let mut source =
+                DurableAuthorityStore::open(source_paths.clone(), test_identity()?, FileBackend)?;
             source.allocate_incarnation(incarnation)?;
             source.record_vote(VoteRecord::new(epoch, "node-a", digest)?)?;
             source.record_promotion(PromotionRecord::new(

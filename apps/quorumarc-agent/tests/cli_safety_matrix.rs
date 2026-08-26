@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_agent::{CliReport, execute};
+use quorumarc_store::{DurableAuthorityStore, FileBackend, StoreIdentity, StoreRole};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -227,5 +228,33 @@ fn missing_and_corrupt_store_inspection_are_closed_refusals() -> Result<(), Box<
     let corrupt = with_path("inspect-store", "--store", directory.path());
     assert!(output(&corrupt).contains("STORE_CORRUPT"));
     assert_closed(&corrupt);
+    Ok(())
+}
+
+#[test]
+fn valid_store_inspection_reports_identity_without_touching_staging() -> Result<(), Box<dyn Error>>
+{
+    let directory = TestDirectory::new("identity-store")?;
+    let identity = StoreIdentity::new(
+        "cluster-a",
+        "orders",
+        "node-a",
+        StoreRole::DataNode,
+        [101; 16],
+    )?;
+    let mut store = DurableAuthorityStore::open_in(directory.path(), identity, FileBackend)?;
+    store.allocate_incarnation(4)?;
+    fs::write(store.paths().temporary(), b"live-writer-staging")?;
+
+    let report = with_path("inspect-store", "--store", directory.path());
+    let text = output(&report);
+    assert_eq!(report.exit_code(), 0);
+    assert!(text.contains("\"cluster_id\":\"cluster-a\""));
+    assert!(text.contains("\"workload_id\":\"orders\""));
+    assert!(text.contains("\"node_id\":\"node-a\""));
+    assert!(text.contains("\"store_role\":\"data-node\""));
+    assert!(text.contains("\"incarnation\":\"4\""));
+    assert_closed(&report);
+    assert_eq!(fs::read(store.paths().temporary())?, b"live-writer-staging");
     Ok(())
 }

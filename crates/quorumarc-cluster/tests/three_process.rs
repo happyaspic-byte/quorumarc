@@ -13,10 +13,32 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use quorumarc_rpo0::recover_wal;
-use quorumarc_store::{DurableAuthorityStore, FileBackend};
+use quorumarc_store::{DurableAuthorityStore, FileBackend, StoreIdentity, StoreRole};
 use quorumarc_wire::SigningKey;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+
+fn candidate_store_identity() -> StoreIdentity {
+    StoreIdentity::new(
+        "gate1a-lab",
+        "orders",
+        "node-a",
+        StoreRole::DataNode,
+        [61; 16],
+    )
+    .expect("valid candidate fixture identity")
+}
+
+fn witness_store_identity() -> StoreIdentity {
+    StoreIdentity::new(
+        "gate1a-lab",
+        "orders",
+        "witness",
+        StoreRole::Witness,
+        [71; 16],
+    )
+    .expect("valid witness fixture identity")
+}
 
 struct Fixture {
     root: PathBuf,
@@ -107,14 +129,16 @@ fn three_child_processes_complete_one_shot_genesis() {
     assert_eq!(recovered.commit_index, 1);
     assert_eq!(recovered.value, 1);
 
-    let candidate_state = DurableAuthorityStore::open_in(&candidate_store, FileBackend)
-        .expect("recover candidate authority");
+    let candidate_state =
+        DurableAuthorityStore::open_in(&candidate_store, candidate_store_identity(), FileBackend)
+            .expect("recover candidate authority");
     assert_eq!(candidate_state.generation(), 4);
     assert_eq!(candidate_state.state().highest_epoch(), 1);
     assert_eq!(candidate_state.state().incarnation(), 7);
     assert!(candidate_state.state().activation_receipt().is_some());
-    let witness_state = DurableAuthorityStore::open_in(&witness_store, FileBackend)
-        .expect("recover witness authority");
+    let witness_state =
+        DurableAuthorityStore::open_in(&witness_store, witness_store_identity(), FileBackend)
+            .expect("recover witness authority");
     assert_eq!(witness_state.generation(), 1);
     assert_eq!(witness_state.state().highest_epoch(), 1);
 

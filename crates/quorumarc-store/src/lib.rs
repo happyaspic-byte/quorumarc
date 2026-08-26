@@ -20,8 +20,9 @@ pub use backend::{
 pub use codec::Corruption;
 pub use model::{
     ActivationReceipt, AuthorityState, LeaseBounds, ModelError, PromotionRecord, StateRoot,
-    VoteRecord,
+    StoreIdentity, StoreRole, VoteRecord,
 };
 pub use store::{
-    DurabilityReceipt, DurableAuthorityStore, StoreError, StorePaths, TransitionOutcome,
+    AuthoritySnapshot, DurabilityReceipt, DurableAuthorityStore, StoreError, StorePaths,
+    TransitionOutcome,
 };

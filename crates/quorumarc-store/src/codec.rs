@@ -2,13 +2,13 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::model::{
-    ActivationReceipt, AuthorityState, LeaseBounds, PromotionRecord, StateRoot, VoteRecord,
-    validate_identifier,
+    ActivationReceipt, AuthorityState, LeaseBounds, PromotionRecord, StateRoot, StoreIdentity,
+    StoreRole, VoteRecord, validate_identifier,
 };
 
 const MAGIC: &[u8; 8] = b"QARCJNL1";
 const TRAILER: &[u8; 8] = b"QARCEND1";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 const HEADER_LENGTH: usize = 24;
 const CHECKSUM_LENGTH: usize = 4;
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
@@ -39,6 +39,8 @@ pub enum Corruption {
     InvalidIdentifier,
     /// Recovered fields violate authority invariants.
     InvariantViolation,
+    /// Store identity is malformed, unknown, or uses a reserved sentinel.
+    InvalidIdentity,
     /// Generation zero appeared in a committed frame.
     InvalidGeneration,
 }
@@ -71,6 +73,9 @@ impl Display for Corruption {
             Self::InvariantViolation => {
                 formatter.write_str("recovered durable authority invariants are inconsistent")
             }
+            Self::InvalidIdentity => {
+                formatter.write_str("durable authority store identity is invalid")
+            }
             Self::InvalidGeneration => {
                 formatter.write_str("committed durable authority generation is zero")
             }
@@ -80,8 +85,13 @@ impl Display for Corruption {
 
 impl Error for Corruption {}
 
-pub(crate) fn encode(state: &AuthorityState, generation: u64) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(320);
+pub(crate) fn encode(identity: &StoreIdentity, state: &AuthorityState, generation: u64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(768);
+    push_identifier(&mut payload, identity.cluster_id());
+    push_identifier(&mut payload, identity.workload_id());
+    push_identifier(&mut payload, identity.node_id());
+    payload.push(identity.role().tag());
+    payload.extend_from_slice(identity.store_id());
     push_u64(&mut payload, state.highest_epoch);
     push_u64(&mut payload, state.incarnation);
 
@@ -148,7 +158,7 @@ pub(crate) fn encode(state: &AuthorityState, generation: u64) -> Vec<u8> {
     frame
 }
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<(AuthorityState, u64), Corruption> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<(StoreIdentity, AuthorityState, u64), Corruption> {
     let minimum_length = HEADER_LENGTH + CHECKSUM_LENGTH + TRAILER.len();
     if bytes.len() < minimum_length {
         return Err(Corruption::Truncated);
@@ -203,6 +213,15 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(AuthorityState, u64), Corruption> 
         .get(HEADER_LENGTH..checksum_offset)
         .ok_or(Corruption::Truncated)?;
     let mut reader = Reader::new(payload);
+    let cluster_id = reader.read_identifier()?;
+    let workload_id = reader.read_identifier()?;
+    let node_id = reader.read_identifier()?;
+    let role = StoreRole::from_tag(reader.read_u8()?).ok_or(Corruption::InvalidIdentity)?;
+    let store_id = reader.read_array_16()?;
+    let identity = StoreIdentity::from_validated(cluster_id, workload_id, node_id, role, store_id);
+    identity
+        .validate()
+        .map_err(|_| Corruption::InvalidIdentity)?;
     let highest_epoch = reader.read_u64()?;
     let incarnation = reader.read_u64()?;
     let last_vote = if reader.read_presence()? {
@@ -272,7 +291,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(AuthorityState, u64), Corruption> 
     state
         .validate()
         .map_err(|_| Corruption::InvariantViolation)?;
-    Ok((state, generation))
+    Ok((identity, state, generation))
 }
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {
@@ -330,6 +349,10 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
+    fn read_u8(&mut self) -> Result<u8, Corruption> {
+        self.take(1)?.first().copied().ok_or(Corruption::Truncated)
+    }
+
     fn read_u16(&mut self) -> Result<u16, Corruption> {
         let bytes: [u8; 2] = self
             .take(2)?
@@ -352,6 +375,10 @@ impl<'a> Reader<'a> {
             .try_into()
             .map_err(|_| Corruption::Truncated)?;
         Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn read_array_16(&mut self) -> Result<[u8; 16], Corruption> {
+        self.take(16)?.try_into().map_err(|_| Corruption::Truncated)
     }
 
     fn read_presence(&mut self) -> Result<bool, Corruption> {
@@ -382,8 +409,48 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Corruption, decode, encode};
-    use crate::{AuthorityState, StateRoot};
+    use super::{CHECKSUM_LENGTH, Corruption, HEADER_LENGTH, crc32, decode, encode};
+    use crate::{AuthorityState, StateRoot, StoreIdentity, StoreRole};
+
+    fn identity() -> Result<StoreIdentity, Corruption> {
+        StoreIdentity::new(
+            "cluster-a",
+            "counter",
+            "node-a",
+            StoreRole::DataNode,
+            [7; 16],
+        )
+        .map_err(|_| Corruption::InvalidIdentity)
+    }
+
+    fn identity_role_offset(frame: &[u8]) -> Result<usize, Corruption> {
+        let mut offset = HEADER_LENGTH;
+        for _ in 0..3 {
+            let length_end = offset.checked_add(2).ok_or(Corruption::Truncated)?;
+            let length_bytes: [u8; 2] = frame
+                .get(offset..length_end)
+                .ok_or(Corruption::Truncated)?
+                .try_into()
+                .map_err(|_| Corruption::Truncated)?;
+            offset = length_end
+                .checked_add(usize::from(u16::from_le_bytes(length_bytes)))
+                .ok_or(Corruption::Truncated)?;
+        }
+        Ok(offset)
+    }
+
+    fn refresh_checksum(frame: &mut [u8]) -> Result<(), Corruption> {
+        let checksum_offset = frame
+            .len()
+            .checked_sub(CHECKSUM_LENGTH + super::TRAILER.len())
+            .ok_or(Corruption::Truncated)?;
+        let checksum = crc32(frame.get(..checksum_offset).ok_or(Corruption::Truncated)?);
+        frame
+            .get_mut(checksum_offset..checksum_offset + CHECKSUM_LENGTH)
+            .ok_or(Corruption::Truncated)?
+            .copy_from_slice(&checksum.to_le_bytes());
+        Ok(())
+    }
 
     #[test]
     fn encoding_is_deterministic_and_round_trips() -> Result<(), Corruption> {
@@ -392,12 +459,36 @@ mod tests {
             state_root: Some(StateRoot::new([9; 32])),
             ..AuthorityState::default()
         };
-        let first = encode(&state, 4);
-        let second = encode(&state, 4);
+        let identity = identity()?;
+        let first = encode(&identity, &state, 4);
+        let second = encode(&identity, &state, 4);
         assert_eq!(first, second);
-        let (decoded, generation) = decode(&first)?;
+        let (decoded_identity, decoded, generation) = decode(&first)?;
+        assert_eq!(decoded_identity, identity);
         assert_eq!(decoded, state);
         assert_eq!(generation, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_role_and_zero_store_id_fail_closed_with_valid_checksum() -> Result<(), Corruption> {
+        let original = encode(&identity()?, &AuthorityState::default(), 1);
+        let role_offset = identity_role_offset(&original)?;
+
+        let mut unknown_role = original.clone();
+        *unknown_role
+            .get_mut(role_offset)
+            .ok_or(Corruption::Truncated)? = u8::MAX;
+        refresh_checksum(&mut unknown_role)?;
+        assert_eq!(decode(&unknown_role), Err(Corruption::InvalidIdentity));
+
+        let mut zero_store_id = original;
+        zero_store_id
+            .get_mut(role_offset + 1..role_offset + 17)
+            .ok_or(Corruption::Truncated)?
+            .fill(0);
+        refresh_checksum(&mut zero_store_id)?;
+        assert_eq!(decode(&zero_store_id), Err(Corruption::InvalidIdentity));
         Ok(())
     }
 }

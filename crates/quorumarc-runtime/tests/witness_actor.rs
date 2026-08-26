@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use quorumarc_runtime::{
     VoteReasonCode, WitnessOpenReasonCode, WitnessPolicy, WitnessPolicyError, WitnessVoteActor,
 };
-use quorumarc_store::{FaultInjectingBackend, FaultMode, FaultOperation, FaultRule, FileBackend};
+use quorumarc_store::{
+    FaultInjectingBackend, FaultMode, FaultOperation, FaultRule, FileBackend, StoreIdentity,
+    StoreRole,
+};
 use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SigningKey};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -69,6 +72,25 @@ fn policy_with_key(key_id: &str) -> WitnessPolicy {
     ))
 }
 
+fn witness_store_identity() -> StoreIdentity {
+    configured_store_identity("orders", "witness", StoreRole::Witness, [29; 16])
+}
+
+fn configured_store_identity(
+    workload: &str,
+    node: &str,
+    role: StoreRole,
+    store_id: [u8; 16],
+) -> StoreIdentity {
+    value_or_abort(StoreIdentity::new(
+        "cluster-a",
+        workload,
+        node,
+        role,
+        store_id,
+    ))
+}
+
 fn binding(candidate: &str, epoch: u64) -> QuorumBinding {
     QuorumBinding {
         protocol_version: PROTOCOL_VERSION,
@@ -95,6 +117,7 @@ fn exact_retry_is_idempotent_across_process_restart() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     let granted = first.handle_vote(&request);
@@ -108,6 +131,7 @@ fn exact_retry_is_idempotent_across_process_restart() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     assert_eq!(recovered.highest_durable_epoch(), 19);
@@ -124,6 +148,7 @@ fn conflicting_candidate_is_refused_after_restart_without_signature() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     assert!(first.handle_vote(&binding("node-a", 7)).is_granted());
@@ -133,6 +158,7 @@ fn conflicting_candidate_is_refused_after_restart_without_signature() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     let refused = recovered.handle_vote(&binding("node-b", 7));
@@ -149,6 +175,7 @@ fn conflicting_binding_digest_is_refused_after_restart() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     assert!(first.handle_vote(&request).is_granted());
@@ -161,6 +188,7 @@ fn conflicting_binding_digest_is_refused_after_restart() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     let refused = recovered.handle_vote(&changed);
@@ -176,6 +204,7 @@ fn key_rotation_preserves_the_durable_proposal_identity() {
         policy_with_key("key-1"),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     assert!(first.handle_vote(&request).is_granted());
@@ -185,6 +214,7 @@ fn key_rotation_preserves_the_durable_proposal_identity() {
         policy_with_key("key-2"),
         SigningKey::from_bytes(&[31; 32]),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     let granted = rotated.handle_vote(&request);
@@ -214,6 +244,7 @@ fn durability_failure_never_releases_a_signature_and_poisons_actor() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         backend,
     ));
 
@@ -234,6 +265,7 @@ fn malformed_or_policy_mismatched_binding_does_not_advance_store() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
 
@@ -268,12 +300,69 @@ fn stale_epoch_is_refused_after_a_newer_durable_vote() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
     assert!(actor.handle_vote(&binding("node-a", 12)).is_granted());
     let stale = actor.handle_vote(&binding("node-a", 11));
     assert_eq!(stale.code(), VoteReasonCode::RefusedStaleEpoch);
     assert!(stale.signed_vote().is_none());
+}
+
+#[test]
+fn witness_store_identity_is_checked_against_policy_and_durable_history() {
+    for (label, identity) in [
+        (
+            "role",
+            configured_store_identity("orders", "witness", StoreRole::DataNode, [29; 16]),
+        ),
+        (
+            "node",
+            configured_store_identity("orders", "node-a", StoreRole::Witness, [29; 16]),
+        ),
+        (
+            "workload",
+            configured_store_identity("payments", "witness", StoreRole::Witness, [29; 16]),
+        ),
+    ] {
+        let directory = value_or_abort(TestDirectory::new(label));
+        let result = WitnessVoteActor::open(
+            policy(),
+            SigningKey::from_bytes(&WITNESS_KEY),
+            directory.path(),
+            identity,
+            FileBackend,
+        );
+        let Err(error) = result else {
+            std::process::abort();
+        };
+        assert_eq!(error.code(), WitnessOpenReasonCode::IdentityPolicyMismatch);
+    }
+
+    let directory = value_or_abort(TestDirectory::new("durable-store-id"));
+    let mut first = value_or_abort(WitnessVoteActor::open(
+        policy(),
+        SigningKey::from_bytes(&WITNESS_KEY),
+        directory.path(),
+        witness_store_identity(),
+        FileBackend,
+    ));
+    assert!(first.handle_vote(&binding("node-a", 1)).is_granted());
+    drop(first);
+
+    let copied_identity =
+        configured_store_identity("orders", "witness", StoreRole::Witness, [30; 16]);
+    let result = WitnessVoteActor::open(
+        policy(),
+        SigningKey::from_bytes(&WITNESS_KEY),
+        directory.path(),
+        copied_identity,
+        FileBackend,
+    );
+    let Err(error) = result else {
+        std::process::abort();
+    };
+    assert_eq!(error.code(), WitnessOpenReasonCode::IdentityPolicyMismatch);
 }
 
 #[test]
@@ -287,6 +376,7 @@ fn corrupt_committed_state_refuses_actor_recovery() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     );
     let Err(error) = result else {
@@ -379,6 +469,7 @@ fn malformed_binding_matrix_never_mutates_or_signs() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
 
@@ -424,6 +515,7 @@ fn workload_and_candidate_admission_failures_leave_no_durable_trace() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         directory.path(),
+        witness_store_identity(),
         FileBackend,
     ));
 
@@ -458,6 +550,7 @@ fn workload_and_candidate_admission_failures_leave_no_durable_trace() {
         policy(),
         SigningKey::from_bytes(&WITNESS_KEY),
         faulted_directory.path(),
+        witness_store_identity(),
         backend,
     );
     let Err(error) = result else {

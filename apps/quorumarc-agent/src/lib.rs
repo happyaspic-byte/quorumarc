@@ -13,9 +13,10 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use quorumarc_store::{AuthorityState, DurableAuthorityStore, FileBackend, StoreError, StorePaths};
+use quorumarc_store::{
+    AuthoritySnapshot, AuthorityState, Corruption, StoreIdentity, StorePaths, StoreRole,
+};
 use quorumarc_wire::{
     CanonicalId, MAX_SIGNED_ENVELOPE_SIZE, SignedPromotionEnvelope, VerificationKeyResolver,
     VerifyingKey,
@@ -29,8 +30,6 @@ const EXIT_IO: u8 = 74;
 const EXIT_CONFIG: u8 = 78;
 const MAX_CONFIG_SIZE: usize = 65_536;
 const MAX_STORE_SNAPSHOT_SIZE: usize = 1_048_576;
-const SNAPSHOT_ATTEMPTS: u8 = 32;
-static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Captured command output and its portable process exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -705,6 +704,11 @@ fn inspect_store(path: &Path) -> CliReport {
                 ("event", "inspect-store".to_owned()),
                 ("status", "recovered-safe-view".to_owned()),
                 ("reason_code", "STORE_RECOVERED".to_owned()),
+                ("cluster_id", recovered.identity.cluster_id().to_owned()),
+                ("workload_id", recovered.identity.workload_id().to_owned()),
+                ("node_id", recovered.identity.node_id().to_owned()),
+                ("store_role", recovered.identity.role().to_string()),
+                ("store_id", hex_encode(recovered.identity.store_id())),
                 ("generation", recovered.generation.to_string()),
                 ("highest_epoch", state.highest_epoch().to_string()),
                 ("incarnation", state.incarnation().to_string()),
@@ -774,6 +778,7 @@ struct MaterialSummary {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecoveredAuthority {
+    identity: StoreIdentity,
     state: AuthorityState,
     generation: u64,
 }
@@ -794,6 +799,27 @@ fn inspect_material_consistency(config: &AgentConfig) -> Result<MaterialSummary,
         )
     })?;
     let recovered = recover_store_snapshot(store_path)?;
+    if recovered.identity.role() != StoreRole::DataNode {
+        return Err(Failure::new(
+            "STORE_ROLE_MISMATCH",
+            "durable store identity is not a data-node store",
+            EXIT_DATA,
+        ));
+    }
+    if recovered.identity.node_id() != config.node_id.as_str() {
+        return Err(Failure::new(
+            "STORE_NODE_MISMATCH",
+            "durable store identity does not match the configured node",
+            EXIT_DATA,
+        ));
+    }
+    if recovered.identity.workload_id() != config.workload_id.as_str() {
+        return Err(Failure::new(
+            "STORE_WORKLOAD_MISMATCH",
+            "durable store identity does not match the configured workload",
+            EXIT_DATA,
+        ));
+    }
     let signed = read_signed_proof(proof_path)?;
     if config.keys.is_empty() {
         return Err(Failure::new(
@@ -930,76 +956,16 @@ fn verify_material_digests(
 fn recover_store_snapshot(path: &Path) -> Result<RecoveredAuthority, Failure> {
     let source = StorePaths::new(path);
     let bytes = read_bounded(source.committed(), MAX_STORE_SNAPSHOT_SIZE, "STORE")?;
-    let snapshot_directory = create_snapshot_directory()?;
-    let snapshot_paths = StorePaths::new(&snapshot_directory);
-    if let Err(error) = fs::write(snapshot_paths.committed(), bytes) {
-        return cleanup_after_snapshot_error(
-            &snapshot_directory,
-            Failure::new("STORE_SNAPSHOT_WRITE_FAILED", error.to_string(), EXIT_IO),
-        );
-    }
-    let recovered = DurableAuthorityStore::open(snapshot_paths, FileBackend);
-    let result = match recovered {
-        Ok(store) => Ok(RecoveredAuthority {
-            state: store.state().clone(),
-            generation: store.generation(),
-        }),
-        Err(error) => Err(map_store_error(error)),
-    };
-    match fs::remove_dir_all(&snapshot_directory) {
-        Ok(()) => result,
-        Err(error) => Err(Failure::new(
-            "STORE_SNAPSHOT_CLEANUP_FAILED",
-            error.to_string(),
-            EXIT_IO,
-        )),
-    }
+    let snapshot = AuthoritySnapshot::decode(&bytes).map_err(map_store_corruption)?;
+    Ok(RecoveredAuthority {
+        identity: snapshot.identity().clone(),
+        state: snapshot.state().clone(),
+        generation: snapshot.generation(),
+    })
 }
 
-fn create_snapshot_directory() -> Result<PathBuf, Failure> {
-    for _attempt in 0..SNAPSHOT_ATTEMPTS {
-        let sequence = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!(
-            "quorumarc-authority-inspect-{}-{sequence}",
-            std::process::id()
-        ));
-        match fs::create_dir(&directory) {
-            Ok(()) => return Ok(directory),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(Failure::new(
-                    "STORE_SNAPSHOT_CREATE_FAILED",
-                    error.to_string(),
-                    EXIT_IO,
-                ));
-            }
-        }
-    }
-    Err(Failure::new(
-        "STORE_SNAPSHOT_CREATE_FAILED",
-        "could not allocate a unique inspection directory",
-        EXIT_IO,
-    ))
-}
-
-fn cleanup_after_snapshot_error<T>(directory: &Path, failure: Failure) -> Result<T, Failure> {
-    match fs::remove_dir_all(directory) {
-        Ok(()) => Err(failure),
-        Err(error) => Err(Failure::new(
-            "STORE_SNAPSHOT_CLEANUP_FAILED",
-            format!("{}; original error: {}", error, failure.detail),
-            EXIT_IO,
-        )),
-    }
-}
-
-fn map_store_error(error: StoreError) -> Failure {
-    match error {
-        StoreError::Corrupt(corruption) => {
-            Failure::new("STORE_CORRUPT", corruption.to_string(), EXIT_DATA)
-        }
-        other => Failure::new("STORE_OPEN_FAILED", other.to_string(), EXIT_IO),
-    }
+fn map_store_corruption(corruption: Corruption) -> Failure {
+    Failure::new("STORE_CORRUPT", corruption.to_string(), EXIT_DATA)
 }
 
 fn read_signed_proof(path: &Path) -> Result<SignedPromotionEnvelope, Failure> {

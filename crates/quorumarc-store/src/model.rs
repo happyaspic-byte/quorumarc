@@ -1,6 +1,154 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+/// Immutable purpose of one durable authority store.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StoreRole {
+    /// Authority and replicated progress for a workload-capable data node.
+    DataNode,
+    /// Vote history for a non-workload Witness.
+    Witness,
+}
+
+impl StoreRole {
+    /// Stable human-readable role name used in diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DataNode => "data-node",
+            Self::Witness => "witness",
+        }
+    }
+
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::DataNode => 1,
+            Self::Witness => 2,
+        }
+    }
+
+    pub(crate) const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::DataNode),
+            2 => Some(Self::Witness),
+            _ => None,
+        }
+    }
+}
+
+impl Display for StoreRole {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Immutable identity bound into every committed authority frame.
+///
+/// `store_id` is a provisioning identifier, not a secret. Copying both a
+/// journal and its complete expected identity remains a perfect clone and
+/// requires an external fence or hardware identity to detect.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct StoreIdentity {
+    cluster_id: String,
+    workload_id: String,
+    node_id: String,
+    role: StoreRole,
+    store_id: [u8; 16],
+}
+
+impl StoreIdentity {
+    /// Creates a canonical immutable store identity.
+    pub fn new(
+        cluster_id: impl Into<String>,
+        workload_id: impl Into<String>,
+        node_id: impl Into<String>,
+        role: StoreRole,
+        store_id: [u8; 16],
+    ) -> Result<Self, ModelError> {
+        if store_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::ZeroStoreId);
+        }
+        Ok(Self {
+            cluster_id: validate_identifier(cluster_id.into())?,
+            workload_id: validate_identifier(workload_id.into())?,
+            node_id: validate_identifier(node_id.into())?,
+            role,
+            store_id,
+        })
+    }
+
+    /// Cluster namespace that owns this authority history.
+    #[must_use]
+    pub fn cluster_id(&self) -> &str {
+        &self.cluster_id
+    }
+
+    /// Workload whose progress and authority are stored.
+    #[must_use]
+    pub fn workload_id(&self) -> &str {
+        &self.workload_id
+    }
+
+    /// Logical node allowed to open this store.
+    #[must_use]
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    /// Immutable data-node or Witness purpose.
+    #[must_use]
+    pub const fn role(&self) -> StoreRole {
+        self.role
+    }
+
+    /// Provisioned store-instance identifier.
+    #[must_use]
+    pub const fn store_id(&self) -> &[u8; 16] {
+        &self.store_id
+    }
+
+    pub(crate) fn from_validated(
+        cluster_id: String,
+        workload_id: String,
+        node_id: String,
+        role: StoreRole,
+        store_id: [u8; 16],
+    ) -> Self {
+        Self {
+            cluster_id,
+            workload_id,
+            node_id,
+            role,
+            store_id,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ModelError> {
+        Self::new(
+            self.cluster_id.clone(),
+            self.workload_id.clone(),
+            self.node_id.clone(),
+            self.role,
+            self.store_id,
+        )
+        .map(|_| ())
+    }
+}
+
+impl Display for StoreIdentity {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "cluster={} workload={} node={} role={} store_id=",
+            self.cluster_id, self.workload_id, self.node_id, self.role
+        )?;
+        for byte in self.store_id {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Fixed-width state digest stored with durable commit progress.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct StateRoot([u8; 32]);
@@ -438,6 +586,8 @@ pub enum ModelError {
     IdentifierTooLong,
     /// Node identifier contains a byte outside the canonical alphabet.
     InvalidIdentifierCharacter,
+    /// Store-instance identifier used the all-zero sentinel.
+    ZeroStoreId,
     /// Non-zero commit progress has no corresponding state root.
     MissingStateRoot,
     /// Recovered or constructed state fields contradict one another.
@@ -458,6 +608,7 @@ impl Display for ModelError {
             Self::InvalidIdentifierCharacter => {
                 formatter.write_str("identifier contains a non-canonical character")
             }
+            Self::ZeroStoreId => formatter.write_str("store identifier is the zero sentinel"),
             Self::MissingStateRoot => formatter.write_str("commit progress has no state root"),
             Self::InvalidState => {
                 formatter.write_str("authority state invariants are inconsistent")

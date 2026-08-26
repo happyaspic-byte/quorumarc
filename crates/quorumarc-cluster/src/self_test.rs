@@ -15,7 +15,9 @@ use quorumarc_wire::SigningKey;
 
 use crate::bootstrap::{BootstrapConfig, run_bootstrap};
 use crate::path_guard::reject_symlink_components;
-use crate::protocol::{LAB_EPOCH, LAB_INCARNATION};
+use crate::protocol::{
+    LAB_EPOCH, LAB_INCARNATION, candidate_store_identity, witness_store_identity,
+};
 use crate::{ClusterError, err};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -494,10 +496,18 @@ fn verify_durable_outputs(
         ));
     }
 
-    let candidate = DurableAuthorityStore::open_in(&paths.candidate_store, FileBackend)
-        .map_err(|error| err("SELF_TEST_STORE_REFUSED", error.to_string()))?;
-    let witness = DurableAuthorityStore::open_in(&paths.witness_store, FileBackend)
-        .map_err(|error| err("SELF_TEST_STORE_REFUSED", error.to_string()))?;
+    let candidate = DurableAuthorityStore::open_in(
+        &paths.candidate_store,
+        candidate_store_identity()?,
+        FileBackend,
+    )
+    .map_err(|error| err("SELF_TEST_STORE_REFUSED", error.to_string()))?;
+    let witness = DurableAuthorityStore::open_in(
+        &paths.witness_store,
+        witness_store_identity()?,
+        FileBackend,
+    )
+    .map_err(|error| err("SELF_TEST_STORE_REFUSED", error.to_string()))?;
     let activation = candidate.state().activation_receipt().ok_or_else(|| {
         err(
             "SELF_TEST_STORE_REFUSED",

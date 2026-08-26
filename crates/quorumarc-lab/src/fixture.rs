@@ -1,6 +1,7 @@
 //! Deterministic public fixtures used only by the GitHub-hosted lab.
 
 use quorumarc_runtime::{WitnessPolicy, WitnessPolicyError};
+use quorumarc_store::{ModelError, StoreIdentity, StoreRole};
 use quorumarc_wire::{
     CanonicalId, EnvelopeError, MessageId, PROTOCOL_VERSION, QuorumBinding, SigningKey,
     VerifyingKey,
@@ -68,6 +69,18 @@ pub fn lab_witness_signing_key() -> SigningKey {
     SigningKey::from_bytes(&WITNESS_SEED)
 }
 
+/// Returns the immutable identity bound into the deterministic lab Witness store.
+pub fn lab_witness_store_identity() -> Result<StoreIdentity, FixtureError> {
+    StoreIdentity::new(
+        "gate1a-process-lab",
+        "orders",
+        "witness",
+        StoreRole::Witness,
+        [83; 16],
+    )
+    .map_err(FixtureError::StoreIdentity)
+}
+
 /// Builds a deterministic binding for one lab candidate and epoch.
 pub fn lab_binding(
     candidate: &str,
@@ -101,6 +114,8 @@ pub enum FixtureError {
     Identifier(EnvelopeError),
     /// The built-in witness policy was internally inconsistent.
     Policy(WitnessPolicyError),
+    /// The built-in durable store identity was internally inconsistent.
+    StoreIdentity(ModelError),
 }
 
 impl std::fmt::Display for FixtureError {
@@ -108,6 +123,9 @@ impl std::fmt::Display for FixtureError {
         match self {
             Self::Identifier(error) => write!(formatter, "invalid lab identifier: {error}"),
             Self::Policy(error) => write!(formatter, "invalid lab witness policy: {error}"),
+            Self::StoreIdentity(error) => {
+                write!(formatter, "invalid lab store identity: {error}")
+            }
         }
     }
 }
@@ -117,6 +135,7 @@ impl std::error::Error for FixtureError {
         match self {
             Self::Identifier(error) => Some(error),
             Self::Policy(error) => Some(error),
+            Self::StoreIdentity(error) => Some(error),
         }
     }
 }
