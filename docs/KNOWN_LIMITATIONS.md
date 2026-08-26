@@ -6,19 +6,24 @@ The completed safety baseline is Gate 0: in-memory promotion validation, logical
 EffectGate transitions, and a deliberately compact single-view model. Gate 1A
 adds a substantial **component foundation**—wire, durable store, Witness
 runtime, RPO-0 demonstration, process harness, and refusal CLIs—but does not yet
-connect those pieces into a complete three-role failover system. A bounded lab
-composes a peer, Witness, and explicitly enabled bootstrap
-process for one lab-genesis activation, but it is not a failover service.
+connect those pieces into a complete automatic three-role failover system. A
+bounded lab composes a peer, Witness, and explicitly enabled bootstrap process
+for one lab-genesis activation. A second command-driven lifecycle lab keeps
+Node A, Node B, and the Witness alive across multiple authority epochs, but it
+is not an automatic failover service.
 The release binary can now orchestrate that same bounded transaction through a
-one-command self-test. This removes manual fixture assembly only; it adds no new
-authority lifecycle, topology independence, or production enforcement.
+one-command self-test. This removes manual fixture assembly only; the separate
+lifecycle modes add test authority transfer but no topology independence or
+production enforcement.
 
-The bounded lab starts Node B as a durable peer, a Witness, and Node A as
-a one-shot bootstrap candidate. It can emit one logical test effect after its
-local durable transaction. It does not keep both nodes running as authority
-participants, fail the Active, or safely activate the other. Consequently,
-automatic promotion, Active failover/failback, global single-writer safety, and
-end-to-end RPO-0 are not implemented claims.
+The command-driven lifecycle lab starts identical long-running data-node
+services plus a durable Witness. It exercises Active kill, lease-guarded
+promotion, failback, pause/resume, replay, policy/root mismatch, and injected
+promotion-store failures against a generation-scoped test sink. The control
+command supplies logical time and initiates each transition. Consequently,
+automatic promotion, trusted failure detection, externally enforced global
+single-writer safety, and end-to-end client-observed RPO-0 remain unimplemented
+claims.
 
 The localhost process lab runs a real Witness child and exchanges authenticated,
 bounded frames. It includes focused kill/restart, conflict, replay, concurrency,
@@ -36,9 +41,11 @@ not a missing-success test to bypass.
 
 The public repository and workflow artifacts are useful reproducibility
 evidence, but neither is a certification, formal proof, independent audit, or
-production-readiness claim. None of the 25 required scenarios has a global
-end-to-end PASS. p50/p95/p99 failover and write-latency measurements for an
-integrated flow do not exist.
+production-readiness claim. Lifecycle source tests now cover 16 required
+scenario IDs in a shared-host, command-driven validation class; exact-head
+GitHub success is tracked in the Draft PR. The remaining scenarios, physical
+enforcement, and production end-to-end PASS class remain incomplete.
+p50/p95/p99 automatic failover and write-latency measurements do not exist.
 
 ## Evidence classification and current measurements
 
@@ -47,7 +54,7 @@ integrated flow do not exist.
 | Exact-head workspace tests | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the exact commit, run, inventory, and artifact | These are component/process results, not global scenario PASS results |
 | Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
 | Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
-| GitHub-hosted process | Client plus Witness child on localhost TCP | Shared host and no Node A/Node B activation or failover |
+| GitHub-hosted process | Long-running Node A/B plus Witness, alongside the earlier focused Witness and one-shot labs | Shared host, controller-supplied logical time, test sink, and no automatic failure detector |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for
@@ -65,10 +72,11 @@ signed envelope and binds the local store identity; promotion and activation
 recovery compare the appropriate values. Format v1 and v2 are rejected
 fail-closed and have no automatic migration.
 
-This does not create an activation path. Trusted time, real fencing, lease
-activation, and an enforced EffectGate are not connected through identical
-Node A/B services and the Witness. The safe-default agent can inspect both
-digests but still refuses `run` with
+The lifecycle lab connects those transitions through identical Node A/B
+services and the Witness using a fixed logical lease schedule and test
+EffectGate. Trusted time, real fencing, continuous replication, automatic
+control, and external enforcement are still absent. The safe-default agent is
+not wired to this lab and continues to refuse `run` with
 `ACTIVATION_CONTROL_PLANE_UNAVAILABLE`.
 
 ## Gate 0 limitations

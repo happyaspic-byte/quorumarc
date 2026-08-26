@@ -7,16 +7,19 @@ contains a canonical signed envelope, durable authority store, Witness actor,
 bounded framing, test EffectGate, RPO-0 demonstration workload, safe-default
 CLIs, and focused process/fault tests. A bounded integration also connects one
 candidate, one peer, and one Witness in an explicitly enabled
-`LAB_GENESIS_ONE_SHOT` transaction. It is not a long-running Node A/Node B
-authority lifecycle.
+`LAB_GENESIS_ONE_SHOT` transaction. A separate command-driven lifecycle lab
+runs long-lived Node A, Node B, and Witness processes through multiple signed
+authority epochs. It is not an automatic HA controller.
 
-The test starts three processes, attempts one two-copy demo write,
+The one-shot test starts three processes, attempts one two-copy demo write,
 obtains a durable Witness decision, persists candidate authority, and emits one
 logical test effect. It neither kills an Active nor promotes the other node.
 Exact-head GitHub results are recorded in the Draft PR; even a green run is
 only bounded one-host process evidence. The project does not claim completed
 failover, failback, zero downtime, global
-single-writer enforcement, or production RPO 0.
+single-writer enforcement, or production RPO 0. The lifecycle test adds actual
+Active kill/pause and safe logical transfer against the test sink, while its
+controller-supplied time and explicit promote command remain lab boundaries.
 
 The GitHub-hosted lab also shares one virtual machine, kernel, clock, power
 source, and storage stack. It can validate software components and controlled
@@ -29,12 +32,12 @@ The following facts must not be conflated:
 
 | Evidence class | Current evidence | Claim limit |
 |---|---|---|
-| Implemented in source | Wire, store, runtime, demo workload, process harness, refusal CLIs, and a bounded three-process genesis lab are present | Presence or compilation is not an end-to-end PASS |
+| Implemented in source | Wire, store, runtime, demo workload, refusal CLIs, bounded genesis, and command-driven long-running lifecycle lab | Presence or compilation is not a successful exact-head run |
 | Exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its current head | Applies only to that model revision and its assumptions |
 | Exact-head coverage | The Draft PR links the generated workspace and per-file coverage report | A workspace percentage does not establish aggregate critical-path compliance |
 | Exact-head workspace tests | The Draft PR links the exact commit, run, test inventory, and artifact digest | Component/process success is not an integrated failover PASS |
-| GitHub-hosted process scope | The PR exact-head evidence covers the process suites associated with that commit | Neither the Witness-only nor three-process one-shot scope is Active/Standby failover |
-| Required scenario campaign | Individual model, component, or process analogues cover parts of the matrix | None of the 25 rows has a global end-to-end PASS result |
+| GitHub-hosted process scope | The PR exact-head evidence covers the process suites associated with that commit | Shared host, logical clock, test sink, and explicit control commands remain |
+| Required scenario campaign | Lifecycle source covers 16 scenario IDs and emits bounded trace fields | Exact-head workflow evidence is required; nine rows and physical classes remain |
 | Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |
 
 Run numbers without an exact commit and artifact are historical diagnostics,
@@ -165,7 +168,8 @@ behavior.
 
 ### Gate 1A.1 — three-process control plane
 
-**Status: bounded one-shot lab; lifecycle incomplete.**
+**Status: bounded one-shot lab plus command-driven long-running lifecycle;
+automatic controller incomplete.**
 
 - Run identical agent binaries for Node A and Node B, plus a Witness that can
   vote but cannot host or activate a workload.
@@ -175,11 +179,14 @@ behavior.
   restart controls to a deterministic fault proxy or equivalent.
 - Record every safety decision with stable reason codes and replayable seeds.
 
-The one-shot lab advances protocol composition, but does not satisfy this
-substage's long-running lifecycle, fault proxy, safe authority transfer, or
-all-scenario trace requirements. Wrapping that exact transaction in the
-one-command self-test improves setup and release diagnostics but does not turn
-it into election or failover evidence.
+The [lifecycle laboratory](LIFECYCLE_LAB.md) now runs identical long-lived data
+node services and a distinct durable Witness. It performs signed, durable,
+lease-guarded authority transfers and real process kill/pause tests. Promotion
+is still initiated by a deterministic test command, so automatic failure
+detection, an authenticated management plane, network fault proxy, production
+time/fence adapters, and all-scenario completion remain open. The one-shot
+self-test remains the packaged installation diagnostic and is not election or
+failover evidence.
 
 ### Gate 1A.2 — RPO-0 demonstration workload
 

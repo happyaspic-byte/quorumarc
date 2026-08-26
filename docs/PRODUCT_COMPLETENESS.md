@@ -17,14 +17,14 @@ implemented and physically validated.
 | Product dimension | Required QuorumArc outcome | Current evidence |
 |---|---|---|
 | Safe authority | Signed proof binds quorum, fence/expiry, lease, policy, health, commit and root | Component and bounded one-shot lab; v3 authority stores are bound to cluster/workload/node/role/store ID |
-| Automatic lifecycle | Long-running identical A/B agents perform election, failover and safe failback | Not implemented |
+| Automatic lifecycle | Long-running identical A/B agents perform election, failover and safe failback | Command-driven long-running lifecycle implemented; automatic detection/election not implemented |
 | External uniqueness | At least one real enforced endpoint/effect adapter plus verified fence read-back | Not implemented |
 | Data continuity | Named synchronous workload profiles with a durable client-ack boundary and recovery proof | Counter component demonstration only |
 | Setup | Validated package, configuration wizard, one-command preflight and rollback-safe upgrade | One-command bounded self-test implemented; installer not implemented |
 | Operations | Local Web/API status, topology, alarms, reason codes, receipts and guided repair | CLI diagnostics only |
 | Workload coverage | systemd and container profiles first; KVM and supported databases later | Not implemented |
 | Security lifecycle | Provisioning, least privilege, rotation, revocation, SBOM, provenance and independent review | Partial cryptographic interfaces and CI dependency checks |
-| Availability evidence | 25 integrated scenarios, latency percentiles, zero single-writer violations and zero acknowledged loss | Component/model evidence; 0/25 global PASS |
+| Availability evidence | 25 integrated scenarios, latency percentiles, zero single-writer violations and zero acknowledged loss | Lifecycle source covers 16/25 on a shared host; exact-head and remaining/physical evidence required |
 | Physical evidence | Two data hosts, independent Witness, NIC/switch/power/storage/fence/VIP campaigns | Not performed |
 | Serviceability | Backup, restore, node replacement, upgrade, rollback, support bundle and runbooks | Read-only identity-aware proof/store inspection plus documentation sketches |
 | FT continuity | Supported memory/device/session continuity profiles | Later research gate |

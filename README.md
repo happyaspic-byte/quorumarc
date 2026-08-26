@@ -45,10 +45,12 @@ flowchart TD
 5. Missing or ambiguous evidence closes the gate; it never fails open.
 
 These invariants are currently checked within the scopes of individual
-components and the compact model. They have not yet been demonstrated by one
-end-to-end Node A/Node B/Witness activation and failover campaign. See the
+components and the compact model. A command-driven three-process lifecycle now
+tests a bounded subset against the logical sink, but automatic and physically
+enforced end-to-end failover remains unproven. See the
 [safety model](docs/SAFETY.md), [Gate 1A scope](docs/GATE1A.md), and
-[failure matrix](docs/FAILURE_MATRIX.md).
+[failure matrix](docs/FAILURE_MATRIX.md). The exact lifecycle boundary is in
+[the lifecycle lab guide](docs/LIFECYCLE_LAB.md).
 
 ## Workspace
 
@@ -61,7 +63,7 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 | `quorumarc-runtime` | Bounded frames, durable Witness actor, and test EffectGate sink | Component runtime only |
 | `quorumarc-rpo0` | Two-replica WAL-backed monotonic-counter demonstration | Demonstration workload, not a general database |
 | `quorumarc-lab` | Real localhost TCP Witness process and deterministic fault cases | No complete Node A/Node B active-writer lifecycle |
-| `quorumarc-cluster` | Same-binary peer/Witness/bootstrap modes for one explicit lab genesis | Bounded one-shot lab only; no failover/failback or production authority claim |
+| `quorumarc-cluster` | Same-binary genesis plus long-running Node A/B/Witness lifecycle modes | Command-driven shared-host lab; no automatic or production authority claim |
 | `quorumarc-agent` | Safe-default inspection/refusal CLI | Automatic promotion deliberately disabled |
 | `quorumarc-witness` | Safe-default Witness inspection/refusal CLI | No production network voting service |
 
@@ -69,10 +71,10 @@ end-to-end Node A/Node B/Witness activation and failover campaign. See the
 
 | Classification | Current status |
 |---|---|
-| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, and a bounded three-process one-shot genesis lab |
+| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, bounded genesis, and command-driven long-running A/B/Witness lifecycle |
 | Latest exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its exact head; the counts apply only to that model revision and assumptions |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
-| Not yet end-to-end verified | Long-running Node A/B election, Active failure recovery, real failover/failback, repeated authority transfer, and all 25 scenarios as global PASS results |
+| Not yet end-to-end verified | Automatic election/failure detection, enforced external effects, continuous replication/client recovery, nine remaining scenarios, and physical validation |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
 Exact test inventory, repetitions, coverage, model counts, commit, workflow,
@@ -111,11 +113,12 @@ inventory, model report, coverage report, and scenario-by-scenario evidence.
 
 ## Primary unresolved blocker
 
-The bounded lab adds an explicitly enabled `LAB_GENESIS_ONE_SHOT` path
-that joins a candidate, one durable peer, and a Witness to one signed envelope
-and one test-sink effect. It deliberately uses fixed fixture time/fencing and
-does not implement Active failure, authority transfer, lease renewal, failover,
-or failback. The normal agent still reports
+The bounded genesis and lifecycle modes join data nodes and a Witness through
+signed envelopes, durable authority transitions, fixed logical lease guards,
+and a test-sink effect. The lifecycle modes test Active process failure and
+authority transfer, but do not implement automatic failure detection, lease
+renewal, trusted time, continuous data replication, or real fencing. The normal
+agent still reports
 `ACTIVATION_CONTROL_PLANE_UNAVAILABLE` and remains closed.
 
 External uniqueness and enforcement remain decisive blockers. If every trusted

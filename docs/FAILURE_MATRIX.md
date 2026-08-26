@@ -19,6 +19,11 @@ not declare the row passed as an integrated failover scenario.
   The same exact path is also exposed as a one-command release self-test. The
   Draft PR carries exact-head CI evidence; a green result is still not failover
   evidence.
+- **LIFECYCLE PROCESS SOURCE:** identical long-running Node A/B services and a
+  durable Witness execute a command-driven, signed, lease-guarded authority
+  lifecycle against the test EffectGate. The class uses one shared host and a
+  controller-supplied logical clock. Source presence is not a successful run;
+  exact-head results belong in the Draft PR and workflow artifact.
 - **NOT INTEGRATED:** no complete three-role Active/Standby scenario exists.
 - **PHYSICAL-ONLY:** the literal hardware assertion requires independent hosts
   or a real fence/effect adapter.
@@ -28,40 +33,41 @@ coverage are taken from the Draft PR's linked artifact. Static source
 documentation does not retain an older workflow result as a current
 measurement.
 
-**None of rows 1–25 currently has a global end-to-end PASS result.** Partial
-component/model coverage must not be added together and reported as though Node
-A failed over to Node B. A row becomes PASS only when one integrated test emits
-the required trace and is linked to the exact successful workflow and commit.
+This static file does not turn source presence into a global PASS result. The
+lifecycle suite emits scenario, seed, validation class, single-writer, and
+acknowledged-loss fields for 16 rows; the Draft PR must link an exact successful
+workflow before those executions are reported as GitHub-process PASS. Physical
+and production enforcement remain separate validation classes.
 
 ## Required scenarios
 
 | # | Scenario | Present limited evidence | Evidence status / missing exit condition |
 |---:|---|---|---|
-| 1 | Normal boot and first Active selection | The model explores promotion; the bounded lab composes one peer, Witness, bootstrap, authority store, and test sink | MODEL; THREE-PROCESS LAB; NOT PASS — fixed Node A genesis is not leader election, global uniqueness, or an Active lifecycle |
-| 2 | Active process `SIGKILL` | The model includes a crash action; the process lab kills and restarts a **Witness**, preserving its vote | MODEL; WITNESS PROCESS SOURCE; NOT INTEGRATED — kill an actual Active and prove fence/expiry, non-overlap, and recovery |
-| 3 | Graceful Active shutdown | A bounded Witness can exit cleanly after an authenticated request | WITNESS PROCESS SOURCE; NOT INTEGRATED — close Active effects, durably relinquish/expire authority, and transfer safely |
-| 4 | Standby process shutdown | The model includes a participant crash analogue | MODEL; NOT INTEGRATED — stop a real Standby and prove the writer gains no authority and two-copy writes stop |
-| 5 | Witness shutdown | The model stops/restarts the Witness; a process test observes connection refusal and a separately closed test gate | MODEL; WITNESS PROCESS SOURCE; NOT INTEGRATED — prove the integrated cluster cannot form new quorum authority |
+| 1 | Normal boot and first Active selection | The model and one-shot lab cover bootstrap; the lifecycle starts both Standbys and command-selects one signed Active | MODEL; THREE-PROCESS LAB; LIFECYCLE PROCESS SOURCE — command-driven selection is not automatic election |
+| 2 | Active process `SIGKILL` | The lifecycle kills an effective Active, refuses early promotion, then promotes the Standby after lease plus guard | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — test sink and logical clock only |
+| 3 | Graceful Active shutdown | The lifecycle closes and exits the Active, still withholding transfer until safe expiry | WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — no production planned-switch controller |
+| 4 | Standby process shutdown | The lifecycle stops a real Standby and verifies the Active test effect remains singular | MODEL; LIFECYCLE PROCESS SOURCE — continuous RPO-0 writes are not integrated |
+| 5 | Witness shutdown | The lifecycle kills the Witness and obtains a signed node refusal with zero effects | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE |
 | 6 | A/B network partition | Compact control-path partitions are explored | MODEL; NOT INTEGRATED — isolate actual A/B replication and control channels without treating disconnect as fencing |
 | 7 | Only A can reach Witness | A compact partition analogue exists | MODEL; NOT INTEGRATED — preserve old authority or promote A only after every proof condition succeeds |
 | 8 | Only B can reach Witness | Same compact analogue with identities reversed | MODEL; NOT INTEGRATED — same assertion as #7 for B |
 | 9 | Complete network partition | Compact partition combinations check the model's writer invariant | MODEL; NOT INTEGRATED — real three-process paths must never emit two effective writers |
 | 10 | Message delay, duplication, and reordering | Process tests cover simultaneous duplicate request IDs and a delayed old epoch | WITNESS PROCESS SOURCE; NOT INTEGRATED — add bounded delay/reorder queues across every role and data path |
-| 11 | Candidate data lag | Core proof rules and RPO-0 recovery tests compare commit/root progress | COMPONENT SOURCE; MODEL; NOT INTEGRATED — a lagging real candidate must be denied in the activation transaction |
-| 12 | Old PromotionProof replay | Core/wire/store tests reject stale or altered evidence within component boundaries | COMPONENT SOURCE; NOT INTEGRATED — replay final certified bytes after a later durable activation and restart |
+| 11 | Candidate data lag | A long-running candidate with an empty WAL is denied before Witness authority | COMPONENT SOURCE; MODEL; LIFECYCLE PROCESS SOURCE |
+| 12 | Old PromotionProof replay | The active lifecycle node re-evaluates its retained signed envelope against durable accepted authority and refuses replay | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — restart replay remains to be integrated |
 | 13 | Old vote replay | A Witness process test sends an older epoch after a newer durable vote | WITNESS PROCESS SOURCE; NOT INTEGRATED — replay a correctly signed obsolete vote through final certification |
-| 14 | Simultaneous candidates in one epoch | Concurrent Witness requests retain one same-epoch grant; the bounded lab also serializes candidates sharing one local authority path | WITNESS PROCESS SOURCE; THREE-PROCESS LAB; NOT INTEGRATED — local locks cannot prevent independently cloned credentials/stores from activating |
-| 15 | Promotion before lease expiry | The core/model requires old gate inactivity or fence evidence | MODEL; COMPONENT SOURCE; NOT INTEGRATED — test before, at, and after conservative expiry in the real authority path |
-| 16 | Clock rollback | Core logic self-fences on observed rollback; CLI simulation remains effect-free | MODEL; COMPONENT SOURCE; NOT INTEGRATED — inject rollback around a genuinely active process and effect calls |
-| 17 | Durable-store failure | Fixed-seed store campaigns inject declared write, sync, rename, and directory-sync failures and withhold receipts | COMPONENT SOURCE; NOT INTEGRATED — exercise the same failures inside promotion and activation |
-| 18 | Partial write and corrupt journal | Store campaigns truncate frames and alter checksums; recovery fails closed | COMPONENT SOURCE; NOT INTEGRATED — cover every integrated crash boundary and retained trace |
+| 14 | Simultaneous candidates in one epoch | Concurrent long-running candidates use distinct stores; one Witness vote and one effective test writer result | WITNESS PROCESS SOURCE; THREE-PROCESS LAB; LIFECYCLE PROCESS SOURCE — cloned Witness credentials remain outside scope |
+| 15 | Promotion before lease expiry | The lifecycle refuses at 1249 ms and accepts the same next epoch only at its 1250 ms safe bound | MODEL; COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |
+| 16 | Clock rollback | A genuinely active lifecycle node emits once, observes rollback, self-fences, and refuses later effects | MODEL; COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |
+| 17 | Durable-store failure | A promotion-frame write error poisons the live node store before gate opening | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — other store operations retain component coverage |
+| 18 | Partial write and corrupt journal | A partial promotion-frame write poisons and self-fences the lifecycle process before effects | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — arbitrary crash boundaries remain open |
 | 19 | Restart with an older epoch | Store/Witness tests preserve highest accepted epoch and refuse stale input after restart | COMPONENT SOURCE; WITNESS PROCESS SOURCE; NOT INTEGRATED — include rolled-back complete-node fixtures and documented trust assumptions |
 | 20 | Duplicate workload operation | RPO-0 tests deduplicate operation IDs; exact durable-tail retry returns the same receipt after response loss | COMPONENT SOURCE; NOT INTEGRATED — retry through real failover and prove one application plus an authenticated acknowledgement boundary |
-| 21 | State-root mismatch | Core and signed-envelope validation bind state evidence; RPO-0 recovery detects mismatch | COMPONENT SOURCE; NOT INTEGRATED — alter the root across the full signed/durable activation path |
-| 22 | Policy-hash mismatch | Core/wire rules bind policy data | COMPONENT SOURCE; NOT INTEGRATED — cover configuration change, stale signature, and restart in the live control plane |
+| 21 | State-root mismatch | A valid but different WAL root is refused by the live candidate before activation | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |
+| 22 | Policy-hash mismatch | A data node with a different capsule hash receives a fail-closed lifecycle refusal | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — rotation/restart remains open |
 | 23 | Witness double-vote attempt | Durable Witness tests refuse a different candidate/proposal for the same workload and epoch | COMPONENT SOURCE; WITNESS PROCESS SOURCE; NOT INTEGRATED — prove the refusal prevents a second certified activation |
-| 24 | Process pause then resume | A Witness child is paused/resumed and returns vote evidence while a separate test gate remains closed | WITNESS PROCESS SOURCE; NOT INTEGRATED; physical timing remains PHYSICAL-ONLY — pause an Active beyond lease and self-fence before effects |
-| 25 | Repeated failover and failback | The compact model explores bounded histories | MODEL; NOT INTEGRATED — run seeded repeated real-role cycles with monotonic durable authority and recovered writes |
+| 24 | Process pause then resume | A real Active is stopped, a later epoch activates on the peer, and the resumed old process self-fences before effect | WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE; physical timing remains PHYSICAL-ONLY |
+| 25 | Repeated failover and failback | Four signed authority epochs alternate A/B with monotonic durable Witness state and one effect per epoch | MODEL; LIFECYCLE PROCESS SOURCE — command-driven bounded cycles, not soak evidence |
 
 ## Physical extensions
 

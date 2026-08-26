@@ -94,9 +94,22 @@ jobs:
           for iteration in $(seq 1 16); do
             {
               echo "iteration=${iteration} suite=lab-genesis-one-shot"
-              cargo test --locked -p quorumarc-cluster --tests -- \
+              cargo test --locked -p quorumarc-cluster --test three_process -- \
                 --nocapture --test-threads=1
             } 2>&1 | tee -a safety-artifacts/cluster-genesis-repetitions.log
+          done
+
+      - name: Repeat command-driven A/B/Witness lifecycle lab
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > safety-artifacts/lifecycle-process-repetitions.log
+          for iteration in $(seq 1 8); do
+            {
+              echo "iteration=${iteration} suite=command-driven-lifecycle"
+              cargo test --locked -p quorumarc-cluster --test lifecycle_process -- \
+                --nocapture --test-threads=1
+            } 2>&1 | tee -a safety-artifacts/lifecycle-process-repetitions.log
           done
 
       - name: Repeat durable-store crash recovery
@@ -147,6 +160,15 @@ jobs:
             --output-path safety-artifacts/coverage/coverage.json
           cargo llvm-cov report --summary-only 2>&1 \
             | tee safety-artifacts/coverage/summary.txt
+          workspace_line_coverage="$(
+            jq -er '.data[0].totals.lines.percent' \
+              safety-artifacts/coverage/coverage.json
+          )"
+          printf 'workspace_line_coverage=%s\nminimum_workspace_line_coverage=80.0\n' \
+            "${workspace_line_coverage}" \
+            | tee safety-artifacts/coverage/quality-gate.txt
+          awk -v actual="${workspace_line_coverage}" \
+            'BEGIN { if ((actual + 0) < 80.0) exit 1 }'
 
       - name: Build auditable x86_64 Ubuntu release binaries
         shell: bash

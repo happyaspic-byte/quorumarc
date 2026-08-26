@@ -72,3 +72,8 @@ signed production release or an installer.
 Offline source and toolchain preparation remains documented in
 [offline installation](OFFLINE_INSTALL.md). Physical Node A/Node B/Witness
 preparation remains in [lab setup](LAB_SETUP.md).
+
+The long-running Node A/B/Witness test is intentionally separate from this
+non-destructive quick check. Its service modes, fixed logical timing, scenario
+coverage, and safety limitations are documented in the
+[command-driven lifecycle laboratory](LIFECYCLE_LAB.md).
