@@ -6,10 +6,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use quorumarc_cluster::{
-    BootstrapConfig, ClusterError, LifecycleNodeConfig, LifecycleNodeId, LifecycleStoreFault,
-    LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig, lifecycle_policy_hash,
-    run_bootstrap, run_self_test, serve_lifecycle_node, serve_lifecycle_witness, serve_peer,
-    serve_witness,
+    BootstrapConfig, ClusterError, FaultProxyConfig, LifecycleNodeConfig, LifecycleNodeId,
+    LifecycleStoreFault, LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig,
+    lifecycle_policy_hash, run_bootstrap, run_self_test, serve_fault_proxy, serve_lifecycle_node,
+    serve_lifecycle_witness, serve_peer, serve_witness,
 };
 
 fn main() -> ExitCode {
@@ -104,6 +104,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--store",
                     "--signing-key",
                     "--witness-public-key",
+                    "--controller-public-key",
                     "--witness",
                     "--max-connections",
                     "--timeout-ms",
@@ -122,6 +123,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 store_directory: options.path("--store")?,
                 signing_key_file: options.path("--signing-key")?,
                 witness_public_key_file: options.path("--witness-public-key")?,
+                controller_public_key_file: options.path("--controller-public-key")?,
                 witness_address: options.socket("--witness")?,
                 max_connections: options.u64("--max-connections")?,
                 io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
@@ -157,6 +159,29 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 max_connections: options.u64("--max-connections")?,
                 io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
                 policy_hash,
+            })
+        }
+        "fault-proxy" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--listen",
+                    "--ready-file",
+                    "--upstream",
+                    "--mode-file",
+                    "--max-connections",
+                    "--timeout-ms",
+                ],
+                &["--allow-lifecycle-lab"],
+            )?;
+            require_lifecycle_opt_in(&options)?;
+            serve_fault_proxy(FaultProxyConfig {
+                listen: options.socket("--listen")?,
+                ready_file: options.path("--ready-file")?,
+                upstream: options.socket("--upstream")?,
+                mode_file: options.path("--mode-file")?,
+                max_connections: options.u64("--max-connections")?,
+                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
             })
         }
         "bootstrap" => {
@@ -244,7 +269,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
 
 fn print_help() {
     println!(
-        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe lifecycle modes are command-driven safety tests, not automatic failure detection,\nproduction failover, trusted time, or physical fencing.",
+        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n  quorumarc-cluster fault-proxy <required options> --allow-lifecycle-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe lifecycle and fault-proxy modes are bounded safety tests, not an autonomous\nproduction failover controller, trusted time source, or physical fence.",
         env!("CARGO_PKG_VERSION")
     );
 }

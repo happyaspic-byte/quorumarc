@@ -56,11 +56,14 @@ const LEASE_STRIDE_MS: u64 = LEASE_DURATION_MS + LEASE_GUARD_MS;
 const MAX_LIFECYCLE_FRAME: usize = 4_096;
 const COMMAND_MAGIC: &[u8; 8] = b"QALCMD\0\0";
 const RESPONSE_MAGIC: &[u8; 8] = b"QALRSP\0\0";
+const COMMAND_DOMAIN: &[u8] = b"quorumarc/lifecycle/command/ed25519/v1\0";
 const RESPONSE_DOMAIN: &[u8] = b"quorumarc/lifecycle/response/ed25519/v1\0";
 const MESSAGE_ID_DOMAIN: &[u8] = b"quorumarc/lifecycle/message-id/sha256/v1\0";
 const FENCE_EVIDENCE_DOMAIN: &[u8] = b"quorumarc/lifecycle/fence-evidence/sha256/v1\0";
 const RESPONSE_UNSIGNED_LEN: usize = 110;
 const RESPONSE_LEN: usize = RESPONSE_UNSIGNED_LEN + 64;
+const COMMAND_UNSIGNED_LEN: usize = 60;
+const COMMAND_LEN: usize = COMMAND_UNSIGNED_LEN + 64;
 
 /// Workload-capable identity used by the bounded lifecycle laboratory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,6 +311,7 @@ pub struct LifecycleNodeConfig {
     pub store_directory: PathBuf,
     pub signing_key_file: PathBuf,
     pub witness_public_key_file: PathBuf,
+    pub controller_public_key_file: PathBuf,
     pub witness_address: SocketAddr,
     pub max_connections: u64,
     pub io_timeout: Duration,
@@ -342,6 +346,315 @@ pub struct LifecycleReport {
     pub commit_index: u64,
     pub state_root: [u8; 32],
     pub lease_expires_at_ms: u64,
+}
+
+/// Stable reason emitted by the deterministic automatic-failover state
+/// machine. These reasons are decisions only; they never grant authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleAutoReason {
+    WaitingForFailureThreshold,
+    WaitingForLeaseGuard,
+    WitnessUnavailable,
+    CandidateUnavailable,
+    CandidateLagging,
+    PromotionPending,
+    PromotionWindowMissed,
+    AmbiguousActive,
+}
+
+/// One bounded automatic-failover state-machine decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleAutoDecision {
+    Stable {
+        active: LifecycleNodeId,
+        epoch: u64,
+    },
+    Hold {
+        reason: LifecycleAutoReason,
+    },
+    Promote {
+        candidate: LifecycleNodeId,
+        epoch: u64,
+    },
+    Halt {
+        reason: LifecycleAutoReason,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct ObservedActive {
+    node: LifecycleNodeId,
+    epoch: u64,
+    lease_expires_at_ms: u64,
+}
+
+/// Deterministic lab-only automatic failover state machine.
+///
+/// Signed status reports are supplied by authenticated `LifecycleClient`
+/// calls. Loss of a report only advances failure suspicion. It never acts as a
+/// fence: promotion is emitted only in the next fixed lease window, and the
+/// candidate must still obtain a durable Witness vote and pass EffectGate.
+pub struct LifecycleAutoController {
+    failure_threshold: u32,
+    active_misses: u32,
+    last_active: Option<ObservedActive>,
+    pending: Option<(LifecycleNodeId, u64)>,
+    halted: Option<LifecycleAutoReason>,
+}
+
+impl LifecycleAutoController {
+    /// Creates a bounded controller. Requiring more than one failed probe
+    /// prevents a single transient status failure from becoming a failover
+    /// attempt.
+    pub fn new(failure_threshold: u32) -> Result<Self, ClusterError> {
+        if !(2..=16).contains(&failure_threshold) {
+            return Err(err(
+                "LIFECYCLE_AUTO_POLICY_REFUSED",
+                "failure threshold must be between 2 and 16",
+            ));
+        }
+        Ok(Self {
+            failure_threshold,
+            active_misses: 0,
+            last_active: None,
+            pending: None,
+            halted: None,
+        })
+    }
+
+    /// Evaluates one pair of fresh signed node observations.
+    pub fn evaluate(
+        &mut self,
+        now_ms: u64,
+        node_a: Option<&LifecycleReport>,
+        node_b: Option<&LifecycleReport>,
+        witness_available: bool,
+    ) -> Result<LifecycleAutoDecision, ClusterError> {
+        validate_auto_report(node_a, LifecycleNodeId::NodeA)?;
+        validate_auto_report(node_b, LifecycleNodeId::NodeB)?;
+        if let Some(reason) = self.halted {
+            return Ok(LifecycleAutoDecision::Halt { reason });
+        }
+
+        let active_a = node_a.filter(|report| report.state == LifecycleState::Active);
+        let active_b = node_b.filter(|report| report.state == LifecycleState::Active);
+        if active_a.is_some() && active_b.is_some() {
+            self.halted = Some(LifecycleAutoReason::AmbiguousActive);
+            return Ok(LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::AmbiguousActive,
+            });
+        }
+        if let Some(report) = active_a.or(active_b) {
+            let active = active_from_report(report)?;
+            if let Some(previous) = self.last_active {
+                if active.epoch < previous.epoch
+                    || (active.epoch == previous.epoch && active.node != previous.node)
+                {
+                    self.halted = Some(LifecycleAutoReason::AmbiguousActive);
+                    return Ok(LifecycleAutoDecision::Halt {
+                        reason: LifecycleAutoReason::AmbiguousActive,
+                    });
+                }
+            }
+            self.last_active = Some(active);
+            self.active_misses = 0;
+            self.pending = None;
+            if now_ms < active.lease_expires_at_ms {
+                return Ok(LifecycleAutoDecision::Stable {
+                    active: active.node,
+                    epoch: active.epoch,
+                });
+            }
+        }
+
+        if self.pending.is_some() {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::PromotionPending,
+            });
+        }
+        let Some(previous) = self.last_active else {
+            return self.bootstrap_decision(now_ms, node_a, node_b, witness_available);
+        };
+
+        let prior_observation = match previous.node {
+            LifecycleNodeId::NodeA => node_a,
+            LifecycleNodeId::NodeB => node_b,
+        };
+        if prior_observation.is_none() {
+            self.active_misses = self.active_misses.saturating_add(1);
+        } else if prior_observation.is_some_and(|report| {
+            matches!(
+                report.state,
+                LifecycleState::SelfFenced | LifecycleState::Draining
+            )
+        }) {
+            self.active_misses = self.failure_threshold;
+        }
+        if self.active_misses < self.failure_threshold {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WaitingForFailureThreshold,
+            });
+        }
+
+        let epoch = previous
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| err("LIFECYCLE_AUTO_EPOCH_EXHAUSTED", "epoch overflow"))?;
+        let (window_start, window_end) = lease_for_epoch(epoch)?;
+        if now_ms < window_start {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WaitingForLeaseGuard,
+            });
+        }
+        if now_ms >= window_end {
+            self.halted = Some(LifecycleAutoReason::PromotionWindowMissed);
+            return Ok(LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::PromotionWindowMissed,
+            });
+        }
+        if !witness_available {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WitnessUnavailable,
+            });
+        }
+        let candidate = previous.node.other();
+        let candidate_report = match candidate {
+            LifecycleNodeId::NodeA => node_a,
+            LifecycleNodeId::NodeB => node_b,
+        }
+        .ok_or(LifecycleAutoDecision::Hold {
+            reason: LifecycleAutoReason::CandidateUnavailable,
+        });
+        let candidate_report = match candidate_report {
+            Ok(report) => report,
+            Err(decision) => return Ok(decision),
+        };
+        if !eligible_standby(candidate_report)? {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::CandidateLagging,
+            });
+        }
+        self.pending = Some((candidate, epoch));
+        Ok(LifecycleAutoDecision::Promote { candidate, epoch })
+    }
+
+    /// Records the signed result of the exact promotion attempt returned by
+    /// `evaluate`. A refusal clears the pending attempt but grants nothing.
+    pub fn record_promotion_result(
+        &mut self,
+        report: &LifecycleReport,
+    ) -> Result<(), ClusterError> {
+        let Some((candidate, epoch)) = self.pending else {
+            return Err(err(
+                "LIFECYCLE_AUTO_RESULT_REFUSED",
+                "no promotion attempt is pending",
+            ));
+        };
+        if report.node_id != candidate || report.highest_epoch > epoch {
+            self.halted = Some(LifecycleAutoReason::AmbiguousActive);
+            return Err(err(
+                "LIFECYCLE_AUTO_RESULT_REFUSED",
+                "promotion result does not match the pending candidate and epoch",
+            ));
+        }
+        self.pending = None;
+        if report.reason_code == LifecycleReasonCode::Promoted
+            && report.state == LifecycleState::Active
+        {
+            let active = active_from_report(report)?;
+            if active.epoch != epoch {
+                self.halted = Some(LifecycleAutoReason::AmbiguousActive);
+                return Err(err(
+                    "LIFECYCLE_AUTO_RESULT_REFUSED",
+                    "promotion result epoch differs from pending epoch",
+                ));
+            }
+            self.last_active = Some(active);
+            self.active_misses = 0;
+        }
+        Ok(())
+    }
+
+    fn bootstrap_decision(
+        &mut self,
+        now_ms: u64,
+        node_a: Option<&LifecycleReport>,
+        node_b: Option<&LifecycleReport>,
+        witness_available: bool,
+    ) -> Result<LifecycleAutoDecision, ClusterError> {
+        let (window_start, window_end) = lease_for_epoch(1)?;
+        if now_ms < window_start {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WaitingForLeaseGuard,
+            });
+        }
+        if now_ms >= window_end {
+            self.halted = Some(LifecycleAutoReason::PromotionWindowMissed);
+            return Ok(LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::PromotionWindowMissed,
+            });
+        }
+        if !witness_available {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::WitnessUnavailable,
+            });
+        }
+        let (Some(node_a), Some(node_b)) = (node_a, node_b) else {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::CandidateUnavailable,
+            });
+        };
+        if !eligible_standby(node_a)? || !eligible_standby(node_b)? {
+            return Ok(LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::CandidateLagging,
+            });
+        }
+        self.pending = Some((LifecycleNodeId::NodeA, 1));
+        Ok(LifecycleAutoDecision::Promote {
+            candidate: LifecycleNodeId::NodeA,
+            epoch: 1,
+        })
+    }
+}
+
+fn validate_auto_report(
+    report: Option<&LifecycleReport>,
+    expected_node: LifecycleNodeId,
+) -> Result<(), ClusterError> {
+    if report.is_some_and(|report| report.node_id != expected_node) {
+        return Err(err(
+            "LIFECYCLE_AUTO_REPORT_REFUSED",
+            "signed status was supplied under the wrong node slot",
+        ));
+    }
+    Ok(())
+}
+
+fn active_from_report(report: &LifecycleReport) -> Result<ObservedActive, ClusterError> {
+    if report.highest_epoch == 0 || report.lease_expires_at_ms == 0 {
+        return Err(err(
+            "LIFECYCLE_AUTO_REPORT_REFUSED",
+            "Active report has no epoch or lease expiry",
+        ));
+    }
+    let (_, expected_expiry) = lease_for_epoch(report.highest_epoch)?;
+    if report.lease_expires_at_ms != expected_expiry {
+        return Err(err(
+            "LIFECYCLE_AUTO_REPORT_REFUSED",
+            "Active report lease differs from the pinned epoch schedule",
+        ));
+    }
+    Ok(ObservedActive {
+        node: report.node_id,
+        epoch: report.highest_epoch,
+        lease_expires_at_ms: report.lease_expires_at_ms,
+    })
+}
+
+fn eligible_standby(report: &LifecycleReport) -> Result<bool, ClusterError> {
+    Ok(report.state == LifecycleState::Standby
+        && report.commit_index >= REQUIRED_COMMIT
+        && report.state_root == expected_state_root()?)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,6 +773,99 @@ impl LifecycleCommand {
                 "unused command fields are not canonical",
             )),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SignedLifecycleCommand {
+    command: LifecycleCommand,
+    target_node: LifecycleNodeId,
+    signature: [u8; 64],
+}
+
+impl SignedLifecycleCommand {
+    fn sign(
+        command: LifecycleCommand,
+        target_node: LifecycleNodeId,
+        key: &SigningKey,
+    ) -> Result<Self, ClusterError> {
+        let mut signed = Self {
+            command,
+            target_node,
+            signature: [0; 64],
+        };
+        signed.signature = key
+            .sign(&domain_preimage(COMMAND_DOMAIN, &signed.unsigned_bytes()?))
+            .to_bytes();
+        Ok(signed)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, ClusterError> {
+        if bytes.len() != COMMAND_LEN {
+            return Err(err(
+                "LIFECYCLE_COMMAND_MALFORMED",
+                "signed command has an invalid size",
+            ));
+        }
+        let target_node = match read_u8(bytes, 59, "command target node")? {
+            1 => LifecycleNodeId::NodeA,
+            2 => LifecycleNodeId::NodeB,
+            _ => {
+                return Err(err(
+                    "LIFECYCLE_COMMAND_MALFORMED",
+                    "unknown command target node",
+                ));
+            }
+        };
+        Ok(Self {
+            command: LifecycleCommand::from_bytes(bytes.get(..59).ok_or_else(|| {
+                err("LIFECYCLE_COMMAND_MALFORMED", "command payload is missing")
+            })?)?,
+            target_node,
+            signature: read_array::<64>(bytes, COMMAND_UNSIGNED_LEN, "command signature")?,
+        })
+    }
+
+    fn to_bytes(&self) -> Result<Vec<u8>, ClusterError> {
+        let mut bytes = self.unsigned_bytes()?;
+        bytes.extend_from_slice(&self.signature);
+        Ok(bytes)
+    }
+
+    fn verify(
+        &self,
+        expected_node: LifecycleNodeId,
+        key: &VerifyingKey,
+    ) -> Result<(), ClusterError> {
+        if self.target_node != expected_node {
+            return Err(err(
+                "LIFECYCLE_COMMAND_BINDING_REFUSED",
+                "command target does not match this node",
+            ));
+        }
+        key.verify_strict(
+            &domain_preimage(COMMAND_DOMAIN, &self.unsigned_bytes()?),
+            &Signature::from_bytes(&self.signature),
+        )
+        .map_err(|_| {
+            err(
+                "LIFECYCLE_COMMAND_AUTH_REFUSED",
+                "invalid lifecycle controller signature",
+            )
+        })
+    }
+
+    fn unsigned_bytes(&self) -> Result<Vec<u8>, ClusterError> {
+        self.command.validate_canonical()?;
+        let mut bytes = self.command.to_bytes();
+        bytes.push(self.target_node.tag());
+        if bytes.len() != COMMAND_UNSIGNED_LEN {
+            return Err(err(
+                "LIFECYCLE_COMMAND_MALFORMED",
+                "internal signed command length mismatch",
+            ));
+        }
+        Ok(bytes)
     }
 }
 
@@ -589,8 +995,10 @@ pub struct LifecycleClient {
     address: SocketAddr,
     node_id: LifecycleNodeId,
     public_key: VerifyingKey,
+    controller_signing_key: SigningKey,
     timeout: Duration,
     next_request: u64,
+    last_command: Option<SignedLifecycleCommand>,
 }
 
 impl LifecycleClient {
@@ -599,14 +1007,17 @@ impl LifecycleClient {
         address: SocketAddr,
         node_id: LifecycleNodeId,
         public_key: VerifyingKey,
+        controller_signing_key: SigningKey,
         timeout: Duration,
     ) -> Self {
         Self {
             address,
             node_id,
             public_key,
+            controller_signing_key,
             timeout,
             next_request: 1,
+            last_command: None,
         }
     }
 
@@ -643,6 +1054,19 @@ impl LifecycleClient {
         self.send(CommandKind::Replay, now_ms, 0, [0; 16])
     }
 
+    /// Retries the exact previous signed controller request without changing
+    /// its request ID. The node returns its cached decision without reapplying
+    /// the operation.
+    pub fn retry_last_command(&mut self) -> Result<LifecycleReport, ClusterError> {
+        let signed = self.last_command.clone().ok_or_else(|| {
+            err(
+                "LIFECYCLE_COMMAND_RETRY_REFUSED",
+                "no prior signed controller command is available",
+            )
+        })?;
+        self.exchange(&signed)
+    }
+
     fn send(
         &mut self,
         kind: CommandKind,
@@ -650,10 +1074,6 @@ impl LifecycleClient {
         epoch: u64,
         operation_id: [u8; 16],
     ) -> Result<LifecycleReport, ClusterError> {
-        ensure_loopback(self.address)?;
-        if self.timeout.is_zero() {
-            return Err(err("TIMEOUT_REFUSED", "lifecycle client timeout is zero"));
-        }
         let request_id = request_id(self.next_request);
         self.next_request = self
             .next_request
@@ -667,6 +1087,17 @@ impl LifecycleClient {
             operation_id,
         };
         command.validate_canonical()?;
+        let signed =
+            SignedLifecycleCommand::sign(command, self.node_id, &self.controller_signing_key)?;
+        self.last_command = Some(signed.clone());
+        self.exchange(&signed)
+    }
+
+    fn exchange(&self, signed: &SignedLifecycleCommand) -> Result<LifecycleReport, ClusterError> {
+        ensure_loopback(self.address)?;
+        if self.timeout.is_zero() {
+            return Err(err("TIMEOUT_REFUSED", "lifecycle client timeout is zero"));
+        }
         let mut stream =
             TcpStream::connect_timeout(&self.address, self.timeout).map_err(|error| {
                 err(
@@ -678,7 +1109,7 @@ impl LifecycleClient {
         let codec = FrameCodec::new(MAX_LIFECYCLE_FRAME)
             .map_err(|error| err("FRAME_CONFIG_FAILED", error.to_string()))?;
         codec
-            .write_frame(&mut stream, &command.to_bytes())
+            .write_frame(&mut stream, &signed.to_bytes()?)
             .map_err(|error| err("LIFECYCLE_COMMAND_WRITE_FAILED", error.to_string()))?;
         let bytes = codec
             .read_frame(&mut stream)
@@ -690,7 +1121,7 @@ impl LifecycleClient {
                 )
             })?;
         let response = SignedLifecycleResponse::from_bytes(&bytes)?;
-        response.verify(&request_id, self.node_id, &self.public_key)?;
+        response.verify(&signed.command.request_id, self.node_id, &self.public_key)?;
         Ok(response.report)
     }
 }
@@ -720,6 +1151,7 @@ struct LifecycleNodeRuntime {
     node_id: LifecycleNodeId,
     signing_key: SigningKey,
     witness_key: VerifyingKey,
+    controller_key: VerifyingKey,
     witness_address: SocketAddr,
     io_timeout: Duration,
     policy_hash: [u8; 32],
@@ -734,15 +1166,20 @@ struct LifecycleNodeRuntime {
     last_now_ms: u64,
     terminal_fault: bool,
     last_envelope: Option<SignedPromotionEnvelope>,
+    last_controller_counter: u64,
+    last_controller_command: Option<LifecycleCommand>,
+    last_controller_report: Option<LifecycleReport>,
 }
 
 impl LifecycleNodeRuntime {
     fn open(config: &LifecycleNodeConfig) -> Result<Self, ClusterError> {
         let signing_key = load_private_seed(&config.signing_key_file)?;
         let witness_key = load_public_key(&config.witness_public_key_file)?;
+        let controller_key = load_public_key(&config.controller_public_key_file)?;
         require_distinct_role_keys(&[
             (config.node_id.as_str(), &signing_key.verifying_key()),
             (LIFECYCLE_WITNESS, &witness_key),
+            ("lifecycle-controller", &controller_key),
         ])?;
         let wal_bytes = fs::read(&config.wal_path)
             .map_err(|error| err("LIFECYCLE_WAL_READ_REFUSED", error.to_string()))?;
@@ -784,6 +1221,7 @@ impl LifecycleNodeRuntime {
             node_id: config.node_id,
             signing_key,
             witness_key,
+            controller_key,
             witness_address: config.witness_address,
             io_timeout: config.io_timeout,
             policy_hash: config.policy_hash,
@@ -798,7 +1236,45 @@ impl LifecycleNodeRuntime {
             last_now_ms: 0,
             terminal_fault: false,
             last_envelope: None,
+            last_controller_counter: 0,
+            last_controller_command: None,
+            last_controller_report: None,
         })
+    }
+
+    fn apply_controller_command(
+        &mut self,
+        command: LifecycleCommand,
+    ) -> Result<(LifecycleReport, bool, bool), ClusterError> {
+        let counter = controller_request_counter(&command.request_id)?;
+        if counter < self.last_controller_counter {
+            return Err(err(
+                "LIFECYCLE_COMMAND_REPLAY_REFUSED",
+                "controller request ID is older than the latest accepted request",
+            ));
+        }
+        if counter == self.last_controller_counter {
+            if self.last_controller_command != Some(command) {
+                return Err(err(
+                    "LIFECYCLE_COMMAND_REPLAY_REFUSED",
+                    "controller request ID was reused with different content",
+                ));
+            }
+            let report = self.last_controller_report.clone().ok_or_else(|| {
+                err(
+                    "LIFECYCLE_COMMAND_REPLAY_REFUSED",
+                    "cached controller decision is unavailable",
+                )
+            })?;
+            return Ok((report, false, true));
+        }
+
+        let (reason, stop) = self.handle(command);
+        let report = self.report(reason);
+        self.last_controller_counter = counter;
+        self.last_controller_command = Some(command);
+        self.last_controller_report = Some(report.clone());
+        Ok((report, stop, false))
     }
 
     fn handle(&mut self, command: LifecycleCommand) -> (LifecycleReasonCode, bool) {
@@ -1164,6 +1640,7 @@ pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterEr
         &[
             config.signing_key_file.as_path(),
             config.witness_public_key_file.as_path(),
+            config.controller_public_key_file.as_path(),
         ],
         Some(&config.store_directory),
         Some(&config.wal_path),
@@ -1173,6 +1650,7 @@ pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterEr
         &[
             config.signing_key_file.as_path(),
             config.witness_public_key_file.as_path(),
+            config.controller_public_key_file.as_path(),
         ],
         Some(&config.store_directory),
         Some(&config.wal_path),
@@ -1234,16 +1712,17 @@ fn handle_lifecycle_node_connection(
                 "connection closed without command",
             )
         })?;
-    let command = LifecycleCommand::from_bytes(&payload)?;
-    let (reason, stop) = runtime.handle(command);
-    let report = runtime.report(reason);
+    let signed = SignedLifecycleCommand::from_bytes(&payload)?;
+    signed.verify(runtime.node_id, &runtime.controller_key)?;
+    let command = signed.command;
+    let (report, stop, duplicate) = runtime.apply_controller_command(command)?;
     let response =
         SignedLifecycleResponse::sign(command.request_id, report.clone(), &runtime.signing_key)?;
     codec
         .write_frame(stream, &response.to_bytes()?)
         .map_err(|error| err("LIFECYCLE_RESPONSE_WRITE_FAILED", error.to_string()))?;
     eprintln!(
-        "event=lifecycle_decision node={} code={} state={} epoch={} generation={} effects={}",
+        "event=lifecycle_decision node={} code={} state={} epoch={} generation={} effects={} duplicate={duplicate}",
         report.node_id.as_str(),
         report.reason_code.as_str(),
         report.state.as_str(),
@@ -2029,6 +2508,25 @@ fn request_id(counter: u64) -> [u8; 16] {
     value
 }
 
+fn controller_request_counter(request_id: &[u8; 16]) -> Result<u64, ClusterError> {
+    if request_id[..8] != [0x51; 8] {
+        return Err(err(
+            "LIFECYCLE_COMMAND_MALFORMED",
+            "controller request ID has an invalid domain prefix",
+        ));
+    }
+    let mut counter_bytes = [0; 8];
+    counter_bytes.copy_from_slice(&request_id[8..]);
+    let counter = u64::from_be_bytes(counter_bytes);
+    if counter == 0 {
+        return Err(err(
+            "LIFECYCLE_COMMAND_MALFORMED",
+            "controller request counter is zero",
+        ));
+    }
+    Ok(counter)
+}
+
 fn canonical_id(value: &str) -> Result<CanonicalId, ClusterError> {
     id(value)
 }
@@ -2138,6 +2636,31 @@ mod tests {
 
     use super::*;
 
+    fn auto_report(
+        node_id: LifecycleNodeId,
+        state: LifecycleState,
+        epoch: u64,
+        commit_index: u64,
+    ) -> LifecycleReport {
+        let lease_expires_at_ms = if state == LifecycleState::Active {
+            lease_for_epoch(epoch).expect("active lease").1
+        } else {
+            0
+        };
+        LifecycleReport {
+            node_id,
+            reason_code: LifecycleReasonCode::Status,
+            state,
+            highest_epoch: epoch,
+            incarnation: 1,
+            store_generation: 1,
+            effect_count: 0,
+            commit_index,
+            state_root: expected_state_root().expect("expected root"),
+            lease_expires_at_ms,
+        }
+    }
+
     #[test]
     fn command_decoder_rejects_noncanonical_unused_fields() {
         let mut bytes = LifecycleCommand {
@@ -2151,6 +2674,119 @@ mod tests {
         bytes[58] = 1;
         let error = LifecycleCommand::from_bytes(&bytes).expect_err("unused field must fail");
         assert_eq!(error.reason_code(), "LIFECYCLE_COMMAND_MALFORMED");
+    }
+
+    #[test]
+    fn command_signature_binds_payload_target_and_controller_key() {
+        let controller = SigningKey::from_bytes(&[37; 32]);
+        let command = LifecycleCommand {
+            request_id: request_id(1),
+            kind: CommandKind::Promote,
+            now_ms: LEASE_BASE_MS,
+            epoch: 1,
+            operation_id: [0; 16],
+        };
+        let signed = SignedLifecycleCommand::sign(command, LifecycleNodeId::NodeA, &controller)
+            .expect("sign command");
+        let bytes = signed.to_bytes().expect("encode signed command");
+        let decoded = SignedLifecycleCommand::from_bytes(&bytes).expect("decode signed command");
+        decoded
+            .verify(LifecycleNodeId::NodeA, &controller.verifying_key())
+            .expect("verify command");
+
+        let target_error = decoded
+            .verify(LifecycleNodeId::NodeB, &controller.verifying_key())
+            .expect_err("cross-node command must fail");
+        assert_eq!(
+            target_error.reason_code(),
+            "LIFECYCLE_COMMAND_BINDING_REFUSED"
+        );
+        let wrong_controller = SigningKey::from_bytes(&[41; 32]);
+        let key_error = decoded
+            .verify(LifecycleNodeId::NodeA, &wrong_controller.verifying_key())
+            .expect_err("unknown controller must fail");
+        assert_eq!(key_error.reason_code(), "LIFECYCLE_COMMAND_AUTH_REFUSED");
+
+        let mut tampered = bytes;
+        tampered[34] ^= 1;
+        let decoded_tamper =
+            SignedLifecycleCommand::from_bytes(&tampered).expect("decode bounded tamper");
+        let tamper_error = decoded_tamper
+            .verify(LifecycleNodeId::NodeA, &controller.verifying_key())
+            .expect_err("tampered command must fail");
+        assert_eq!(tamper_error.reason_code(), "LIFECYCLE_COMMAND_AUTH_REFUSED");
+
+        let unsigned_error = SignedLifecycleCommand::from_bytes(&command.to_bytes())
+            .expect_err("unsigned legacy command must fail");
+        assert_eq!(unsigned_error.reason_code(), "LIFECYCLE_COMMAND_MALFORMED");
+    }
+
+    #[test]
+    fn automatic_controller_halts_on_ambiguity_and_preserves_halt_reason() {
+        assert!(LifecycleAutoController::new(1).is_err());
+        assert!(LifecycleAutoController::new(17).is_err());
+        let mut controller = LifecycleAutoController::new(2).expect("valid policy");
+        let a = auto_report(LifecycleNodeId::NodeA, LifecycleState::Active, 1, 1);
+        let b = auto_report(LifecycleNodeId::NodeB, LifecycleState::Active, 1, 1);
+        assert_eq!(
+            controller
+                .evaluate(1_001, Some(&a), Some(&b), true)
+                .expect("dual-active decision"),
+            LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::AmbiguousActive,
+            }
+        );
+        assert_eq!(
+            controller
+                .evaluate(1_002, None, None, false)
+                .expect("sticky halt"),
+            LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::AmbiguousActive,
+            }
+        );
+
+        let mut missed = LifecycleAutoController::new(2).expect("valid policy");
+        assert_eq!(
+            missed
+                .evaluate(1_200, None, None, true)
+                .expect("missed bootstrap window"),
+            LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::PromotionWindowMissed,
+            }
+        );
+        assert_eq!(
+            missed
+                .evaluate(1_100, None, None, true)
+                .expect("sticky missed-window halt"),
+            LifecycleAutoDecision::Halt {
+                reason: LifecycleAutoReason::PromotionWindowMissed,
+            }
+        );
+    }
+
+    #[test]
+    fn automatic_controller_refuses_wrong_slot_and_lagging_bootstrap() {
+        let mut controller = LifecycleAutoController::new(2).expect("valid policy");
+        let wrong = auto_report(LifecycleNodeId::NodeB, LifecycleState::Standby, 0, 1);
+        let error = controller
+            .evaluate(1_000, Some(&wrong), None, true)
+            .expect_err("wrong report slot must fail");
+        assert_eq!(error.reason_code(), "LIFECYCLE_AUTO_REPORT_REFUSED");
+
+        let a = auto_report(LifecycleNodeId::NodeA, LifecycleState::Standby, 0, 0);
+        let b = auto_report(LifecycleNodeId::NodeB, LifecycleState::Standby, 0, 1);
+        assert_eq!(
+            controller
+                .evaluate(1_000, Some(&a), Some(&b), true)
+                .expect("lagging decision"),
+            LifecycleAutoDecision::Hold {
+                reason: LifecycleAutoReason::CandidateLagging,
+            }
+        );
+        let result_error = controller
+            .record_promotion_result(&b)
+            .expect_err("result without pending attempt must fail");
+        assert_eq!(result_error.reason_code(), "LIFECYCLE_AUTO_RESULT_REFUSED");
     }
 
     #[test]

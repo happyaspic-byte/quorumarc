@@ -9,8 +9,9 @@ quorum, fencing or safe lease expiry, durable state, health, time, and policy.
 
 > Status: **Gate 1A foundation under development.** The repository contains
 > tested protocol, storage, runtime, RPO-0 demonstration, and process-lab
-> components, but it does not yet implement automatic Node A/Node B failover or
-> a production EffectGate. Production readiness, zero downtime, and completed
+> components and a deterministic automatic-decision state machine, but it does
+> not yet implement an autonomous trusted failure detector/executor or a
+> production EffectGate. Production readiness, zero downtime, and completed
 > physical validation are not claimed.
 
 ## Core ideas
@@ -63,7 +64,7 @@ enforced end-to-end failover remains unproven. See the
 | `quorumarc-runtime` | Bounded frames, durable Witness actor, and test EffectGate sink | Component runtime only |
 | `quorumarc-rpo0` | Two-replica WAL-backed monotonic-counter demonstration | Demonstration workload, not a general database |
 | `quorumarc-lab` | Real localhost TCP Witness process and deterministic fault cases | No complete Node A/Node B active-writer lifecycle |
-| `quorumarc-cluster` | Same-binary genesis plus long-running Node A/B/Witness lifecycle modes | Command-driven shared-host lab; no automatic or production authority claim |
+| `quorumarc-cluster` | Same-binary genesis, long-running Node A/B/Witness lifecycle, and bounded fault-proxy modes | Authenticated shared-host lab with deterministic decisions; no autonomous or production authority claim |
 | `quorumarc-agent` | Safe-default inspection/refusal CLI | Automatic promotion deliberately disabled |
 | `quorumarc-witness` | Safe-default Witness inspection/refusal CLI | No production network voting service |
 
@@ -71,10 +72,10 @@ enforced end-to-end failover remains unproven. See the
 
 | Classification | Current status |
 |---|---|
-| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, bounded genesis, and command-driven long-running A/B/Witness lifecycle |
+| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, bounded genesis, authenticated long-running A/B/Witness lifecycle, and deterministic repeated-probe/lease-guard automatic decisions |
 | Latest exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its exact head; the counts apply only to that model revision and assumptions |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
-| Not yet end-to-end verified | Automatic election/failure detection, enforced external effects, continuous replication/client recovery, nine remaining scenarios, and physical validation |
+| Not yet end-to-end verified | Autonomous election/failure detection, enforced external effects, continuous replication/client recovery, four remaining scenarios, and physical validation |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
 Exact test inventory, repetitions, coverage, model counts, commit, workflow,

@@ -37,7 +37,7 @@ The following facts must not be conflated:
 | Exact-head coverage | The Draft PR links the generated workspace and per-file coverage report | A workspace percentage does not establish aggregate critical-path compliance |
 | Exact-head workspace tests | The Draft PR links the exact commit, run, test inventory, and artifact digest | Component/process success is not an integrated failover PASS |
 | GitHub-hosted process scope | The PR exact-head evidence covers the process suites associated with that commit | Shared host, logical clock, test sink, and explicit control commands remain |
-| Required scenario campaign | Lifecycle source covers 16 scenario IDs and emits bounded trace fields | Exact-head workflow evidence is required; nine rows and physical classes remain |
+| Required scenario campaign | Lifecycle source covers 21 scenario IDs and emits bounded trace fields, including bounded Node/Witness fault proxies | Exact-head workflow evidence is required; rows 6, 19, 20, 23 and physical classes remain |
 | Physical validation | No physical campaign has run | Desktop/server, NIC, switch, fence, VIP, and hardware-clock claims are absent |
 
 Run numbers without an exact commit and artifact are historical diagnostics,
@@ -168,8 +168,8 @@ behavior.
 
 ### Gate 1A.1 — three-process control plane
 
-**Status: bounded one-shot lab plus command-driven long-running lifecycle;
-automatic controller incomplete.**
+**Status: bounded one-shot lab plus long-running lifecycle and deterministic
+automatic-decision state machine; autonomous controller incomplete.**
 
 - Run identical agent binaries for Node A and Node B, plus a Witness that can
   vote but cannot host or activate a workload.
@@ -182,9 +182,15 @@ automatic controller incomplete.**
 The [lifecycle laboratory](LIFECYCLE_LAB.md) now runs identical long-lived data
 node services and a distinct durable Witness. It performs signed, durable,
 lease-guarded authority transfers and real process kill/pause tests. Promotion
-is still initiated by a deterministic test command, so automatic failure
-detection, an authenticated management plane, network fault proxy, production
-time/fence adapters, and all-scenario completion remain open. The one-shot
+is still initiated by a deterministic test command. The command is signed by
+one pinned lab controller key and bound to its target node. A deterministic
+state machine requires repeated failed probes plus lease/guard expiry before a
+promotion attempt, but the harness supplies observations and execution. RBAC,
+durable cross-restart command replay protection, an autonomous trusted failure
+detector, explicit message reordering and A/B data-path faults, production
+time/fence adapters, and all-scenario completion remain open. Bounded
+Node/Witness fault proxies now cover drop, delay, duplicate, reply-loss,
+corruption, and stale-request injection. The one-shot
 self-test remains the packaged installation diagnostic and is not election or
 failover evidence.
 

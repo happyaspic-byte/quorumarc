@@ -5,8 +5,9 @@
 The lifecycle laboratory runs Node A, Node B, and an independent Witness as
 three long-lived `quorumarc-cluster` processes on one Ubuntu host. Node A and
 Node B use the same binary and differ only by identity, keys, paths, and
-configuration. It is a safety integration test, not an automatic failover
-controller or a production deployment profile.
+configuration. It includes a deterministic automatic-failover decision state
+machine, but no autonomous scheduling service or production deployment
+profile.
 
 The following claims are implemented in this laboratory:
 
@@ -22,14 +23,30 @@ The following claims are implemented in this laboratory:
 - the candidate persists promotion and activation before confirming and
   opening its generation-scoped `EffectGate`;
 - every node response is signed and bound to the request ID and node identity;
+- every controller request is signed, bound to its target node, and verified
+  before logical time or authority state can change;
+- an exact retry of the latest signed request returns the cached decision,
+  while stale, cross-node, unsigned, tampered, or conflicting-ID requests are
+  rejected before command execution;
 - expired leases, clock rollback, store poison, proof failure, and effect
   conflict close or keep closed the test effect sink;
 - an early promotion attempt is rejected before it can consume a Witness
   epoch; and
 - exact proof replay cannot create a second activation.
+- separate bounded Node/Witness proxies can inject drop, delay, duplicate,
+  reply loss, corruption, and stale signed-request replay without gaining the
+  ability to manufacture a valid vote or authority proof.
+
+The lab-only `LifecycleAutoController` consumes fresh signed Node A/B reports.
+It requires multiple failed Active probes, waits for the old exclusive lease
+and guard, verifies the candidate's pinned durable progress, and requires the
+Witness path before emitting a promotion attempt. A missed probe is only
+failure suspicion and is never treated as fencing. The candidate still has to
+obtain the durable Witness vote and pass the complete proof/EffectGate path.
 
 The integration suite launches real child processes and covers required
-scenario IDs 1, 2, 3, 4, 5, 11, 12, 14, 15, 16, 17, 18, 21, 22, 24, and 25.
+scenario IDs 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21,
+22, 24, and 25.
 Each passing test emits a deterministic evidence line containing its scenario,
 seed, validation class, single-writer violation count, and acknowledged-write
 loss count. A successful exact-head workflow is still required before a source
@@ -56,7 +73,7 @@ replication progress expected by the capsule.
 
 ## Service modes
 
-Both modes require explicit `--allow-lifecycle-lab`; they bind only to a
+All three modes require explicit `--allow-lifecycle-lab`; they bind only to a
 loopback address and use bounded frames, connections, and I/O deadlines.
 
 ```text
@@ -81,6 +98,7 @@ quorumarc-cluster lifecycle-node \
   --store /lab/node-a-store \
   --signing-key /lab/node-a.seed \
   --witness-public-key /lab/witness.public \
+  --controller-public-key /lab/controller.public \
   --witness 127.0.0.1:WITNESS_PORT \
   --max-connections 64 \
   --timeout-ms 3000 \
@@ -94,10 +112,27 @@ store, private key, and readiness file. Private key files must be exact mode
 `0600`. All role keys must have distinct values, and stores, WALs, keys, owner
 locks, and readiness paths must not alias.
 
-The public `LifecycleClient` test API sends bounded localhost control commands
-and verifies the signed node response. It supports status, promotion, tick,
-effect, close, stop, and replay checks. This API is for deterministic
-integration tests; it is not a management API.
+The optional test proxy is configured independently for each node. Its mode
+file must be a small regular non-symlink file containing `pass`, `drop`,
+`delay-ms=N` (bounded to 1000), `duplicate`, `reply-drop`, `corrupt`, or
+`replay-last`.
+
+```text
+quorumarc-cluster fault-proxy \
+  --listen 127.0.0.1:0 \
+  --ready-file /lab/node-a-proxy.ready \
+  --upstream 127.0.0.1:WITNESS_PORT \
+  --mode-file /lab/node-a-proxy.mode \
+  --max-connections 64 \
+  --timeout-ms 3000 \
+  --allow-lifecycle-lab
+```
+
+The public `LifecycleClient` test API signs bounded localhost control commands
+with the configured controller key and verifies the signed node response. It
+supports status, promotion, tick, effect, close, stop, exact command retry, and
+proof replay checks. This API is for deterministic integration tests; it is
+not a multi-user management API.
 
 ## Crash and fault cases
 
@@ -106,19 +141,29 @@ It also injects a failure and a partial write at the authority promotion write
 boundary. In either storage case, the store becomes poisoned in that process,
 activation is not persisted, and the EffectGate never opens.
 
+The Node/Witness proxy campaign additionally verifies one-sided Witness
+reachability, dual Witness isolation, bounded delay, duplicate delivery,
+response loss followed by an exact durable retry, corrupted requests, and an
+obsolete signed request/response binding. The proxy never sees private keys and
+cannot turn a malformed or replayed exchange into authority.
+
 A paused old Active is resumed only after another node has safely obtained a
 later epoch. Its first effect request advances the logical clock beyond its old
 exclusive lease, so it self-fences before the test sink can record output.
 
 ## Important limitations
 
-- Promotion is initiated by a test control command. There is no automatic
-  failure detector, election scheduler, retry loop, planned-switch workflow,
-  or production failback controller.
-- Control requests are loopback-only but are not authenticated. They can ask a
-  node to attempt or close authority; they cannot bypass candidate/Witness
-  signatures, durable state, proof validation, or EffectGate checks. A future
-  management plane must authenticate and authorize every command.
+- A deterministic state machine selects bootstrap and Active-loss promotion
+  attempts, but the test harness supplies signed observations, logical time,
+  Witness reachability, scheduling, and command execution. There is no
+  autonomous daemon, trusted failure detector, planned-switch workflow, or
+  production failback controller.
+- Control requests are loopback-only and authenticate one pinned controller
+  key. There is no RBAC, operator identity, approval workflow, key rotation,
+  audit journal, or network-facing TLS service. The bounded replay cache is
+  process-local and protects only the latest accepted request; a node restart
+  begins a new lab control session. Production management must durably bind a
+  session/sequence or use an equivalent anti-replay mechanism.
 - The test clock is supplied by the controller. It is not a trusted,
   pause-aware cross-host clock.
 - EffectGate expiry is enforced for calls through the in-process test sink.
@@ -130,6 +175,9 @@ exclusive lease, so it self-fences before the test sink can record output.
   repair, snapshot, and resynchronization are not yet integrated.
 - All processes share one kernel, storage host, clock source, hypervisor, and
   power domain on a GitHub runner.
+- The proxy currently covers each node's Witness path. There is no continuous
+  A/B replication channel to partition or reorder, and no kernel namespace,
+  switch, NIC, or client-path isolation claim.
 - The fixed capsule accepts only one workload and one expected WAL state. It is
   not a generic application profile.
 

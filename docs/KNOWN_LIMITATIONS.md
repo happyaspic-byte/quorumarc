@@ -9,8 +9,10 @@ runtime, RPO-0 demonstration, process harness, and refusal CLIs—but does not y
 connect those pieces into a complete automatic three-role failover system. A
 bounded lab composes a peer, Witness, and explicitly enabled bootstrap process
 for one lab-genesis activation. A second command-driven lifecycle lab keeps
-Node A, Node B, and the Witness alive across multiple authority epochs, but it
-is not an automatic failover service.
+Node A, Node B, and the Witness alive across multiple authority epochs. A
+deterministic state machine now selects safe-window bootstrap and Active-loss
+promotion attempts, but the harness still supplies probes, scheduling, logical
+time, and command execution; it is not an autonomous failover service.
 The release binary can now orchestrate that same bounded transaction through a
 one-command self-test. This removes manual fixture assembly only; the separate
 lifecycle modes add test authority transfer but no topology independence or
@@ -20,8 +22,10 @@ The command-driven lifecycle lab starts identical long-running data-node
 services plus a durable Witness. It exercises Active kill, lease-guarded
 promotion, failback, pause/resume, replay, policy/root mismatch, and injected
 promotion-store failures against a generation-scoped test sink. The control
-command supplies logical time and initiates each transition. Consequently,
-automatic promotion, trusted failure detection, externally enforced global
+command is signed by one pinned lab controller key, supplies logical time, and
+initiates each transition. Its anti-replay cache is process-local and covers
+the latest request only; it is not a durable multi-operator management plane.
+Consequently, autonomous promotion, trusted failure detection, externally enforced global
 single-writer safety, and end-to-end client-observed RPO-0 remain unimplemented
 claims.
 
@@ -41,9 +45,9 @@ not a missing-success test to bypass.
 
 The public repository and workflow artifacts are useful reproducibility
 evidence, but neither is a certification, formal proof, independent audit, or
-production-readiness claim. Lifecycle source tests now cover 16 required
+production-readiness claim. Lifecycle source tests now cover 21 required
 scenario IDs in a shared-host, command-driven validation class; exact-head
-GitHub success is tracked in the Draft PR. The remaining scenarios, physical
+GitHub success is tracked in the Draft PR. The remaining four scenarios, physical
 enforcement, and production end-to-end PASS class remain incomplete.
 p50/p95/p99 automatic failover and write-latency measurements do not exist.
 
@@ -54,7 +58,7 @@ p50/p95/p99 automatic failover and write-latency measurements do not exist.
 | Exact-head workspace tests | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the exact commit, run, inventory, and artifact | These are component/process results, not global scenario PASS results |
 | Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
 | Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
-| GitHub-hosted process | Long-running Node A/B plus Witness, alongside the earlier focused Witness and one-shot labs | Shared host, controller-supplied logical time, test sink, and no automatic failure detector |
+| GitHub-hosted process | Long-running Node A/B plus Witness, separate Node/Witness fault proxies, and deterministic automatic-failover decisions, alongside the earlier focused Witness and one-shot labs | Shared host, controller-supplied probes/logical time/scheduling, test sink, no continuous A/B channel, and no autonomous trusted failure detector |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for

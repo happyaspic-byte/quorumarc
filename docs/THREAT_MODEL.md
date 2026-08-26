@@ -82,6 +82,9 @@ work:
 | Clock rollback/pause | Monotonic source abstraction, last-observed persistence where applicable, conservative expiry guard | Self-fence |
 | Message flood/oversize | Authentication, strict maximum sizes, timeouts, bounded queues | Drop/refuse without changing authority |
 | Unknown protocol field/version | Strict canonical decoder and explicit compatible versions | Reject; never guess semantics |
+| Forged/cross-node control command | Controller signature, command domain, target node, request ID, and complete canonical payload binding | Reject before advancing logical time or authority state |
+| Signed control replay | Exact latest-request cache plus monotonic controller sequence in the lab; durable session/sequence required for production | Return the cached decision only for an exact latest retry; reject stale or conflicting content |
+| Fault-proxy manipulation | The lab proxy carries opaque end-to-end signed frames, binds only to loopback, and has no signing key | A mode change may deny or distort delivery but cannot create valid authority; malformed or replayed bindings close the requesting node's promotion path |
 | Stolen/retired key | Key IDs, authorization set, rotation and revocation interface | Reject unauthorized or retired key |
 | Cloned authority instance | Protected Witness ownership, identity-bound stores, external uniqueness, and effect fencing | Outside the GitHub one-shot lab claim; never treat local path locks as global proof |
 | Valid journal transplant | V3 binds cluster, workload, node, role, and store ID; future authenticated anti-rollback format | Refuse expected/durable identity mismatch; a perfect clone or malicious replacement still requires external fencing and closed-gate repair |

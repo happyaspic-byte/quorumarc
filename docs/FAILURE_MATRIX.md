@@ -24,6 +24,10 @@ not declare the row passed as an integrated failover scenario.
   lifecycle against the test EffectGate. The class uses one shared host and a
   controller-supplied logical clock. Source presence is not a successful run;
   exact-head results belong in the Draft PR and workflow artifact.
+- **LIFECYCLE FAULT-PROXY SOURCE:** the lifecycle processes communicate with
+  the Witness through separate bounded, frame-aware localhost proxies. The
+  proxies inject declared drop, delay, duplicate, reply-loss, corruption, and
+  stale-request modes without terminating or reconfiguring the Witness.
 - **NOT INTEGRATED:** no complete three-role Active/Standby scenario exists.
 - **PHYSICAL-ONLY:** the literal hardware assertion requires independent hosts
   or a real fence/effect adapter.
@@ -35,7 +39,7 @@ measurement.
 
 This static file does not turn source presence into a global PASS result. The
 lifecycle suite emits scenario, seed, validation class, single-writer, and
-acknowledged-loss fields for 16 rows; the Draft PR must link an exact successful
+acknowledged-loss fields for 21 rows; the Draft PR must link an exact successful
 workflow before those executions are reported as GitHub-process PASS. Physical
 and production enforcement remain separate validation classes.
 
@@ -44,18 +48,18 @@ and production enforcement remain separate validation classes.
 | # | Scenario | Present limited evidence | Evidence status / missing exit condition |
 |---:|---|---|---|
 | 1 | Normal boot and first Active selection | The model and one-shot lab cover bootstrap; the lifecycle starts both Standbys and command-selects one signed Active | MODEL; THREE-PROCESS LAB; LIFECYCLE PROCESS SOURCE — command-driven selection is not automatic election |
-| 2 | Active process `SIGKILL` | The lifecycle kills an effective Active, refuses early promotion, then promotes the Standby after lease plus guard | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — test sink and logical clock only |
+| 2 | Active process `SIGKILL` | The lifecycle kills an effective Active; a deterministic controller requires two failed probes, lease plus guard, candidate progress, and Witness availability before selecting and executing Standby promotion | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE; AUTOMATIC-DECISION SOURCE — harness scheduling, test sink, and logical clock only |
 | 3 | Graceful Active shutdown | The lifecycle closes and exits the Active, still withholding transfer until safe expiry | WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — no production planned-switch controller |
 | 4 | Standby process shutdown | The lifecycle stops a real Standby and verifies the Active test effect remains singular | MODEL; LIFECYCLE PROCESS SOURCE — continuous RPO-0 writes are not integrated |
 | 5 | Witness shutdown | The lifecycle kills the Witness and obtains a signed node refusal with zero effects | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE |
 | 6 | A/B network partition | Compact control-path partitions are explored | MODEL; NOT INTEGRATED — isolate actual A/B replication and control channels without treating disconnect as fencing |
-| 7 | Only A can reach Witness | A compact partition analogue exists | MODEL; NOT INTEGRATED — preserve old authority or promote A only after every proof condition succeeds |
-| 8 | Only B can reach Witness | Same compact analogue with identities reversed | MODEL; NOT INTEGRATED — same assertion as #7 for B |
-| 9 | Complete network partition | Compact partition combinations check the model's writer invariant | MODEL; NOT INTEGRATED — real three-process paths must never emit two effective writers |
-| 10 | Message delay, duplication, and reordering | Process tests cover simultaneous duplicate request IDs and a delayed old epoch | WITNESS PROCESS SOURCE; NOT INTEGRATED — add bounded delay/reorder queues across every role and data path |
+| 7 | Only A can reach Witness | Separate Node/Witness proxies drop B's path; B is refused and A alone can obtain signed authority and emit one test effect | MODEL; LIFECYCLE FAULT-PROXY SOURCE — shared-host Witness-path analogue, not a physical partition |
+| 8 | Only B can reach Witness | Separate Node/Witness proxies drop A's path; A is refused and B alone can obtain signed authority and emit one test effect | MODEL; LIFECYCLE FAULT-PROXY SOURCE — shared-host Witness-path analogue, not a physical partition |
+| 9 | Complete network partition | Both Node/Witness proxy paths drop requests and both candidates remain ineffective | MODEL; LIFECYCLE FAULT-PROXY SOURCE — A/B data path is not yet continuous, so this covers Witness isolation only |
+| 10 | Message delay, duplication, and reordering | A bounded proxy injects delay, duplicate delivery, reply loss with exact retry, and corruption; all paths either complete idempotently or refuse closed | WITNESS PROCESS SOURCE; LIFECYCLE FAULT-PROXY SOURCE — explicit reordering and continuous data-path queues remain open |
 | 11 | Candidate data lag | A long-running candidate with an empty WAL is denied before Witness authority | COMPONENT SOURCE; MODEL; LIFECYCLE PROCESS SOURCE |
 | 12 | Old PromotionProof replay | The active lifecycle node re-evaluates its retained signed envelope against durable accepted authority and refuses replay | COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE — restart replay remains to be integrated |
-| 13 | Old vote replay | A Witness process test sends an older epoch after a newer durable vote | WITNESS PROCESS SOURCE; NOT INTEGRATED — replay a correctly signed obsolete vote through final certification |
+| 13 | Old vote replay | After A epoch 1 and B epoch 2, A's proxy substitutes its correctly signed obsolete epoch-1 Witness request during an epoch-3 attempt; response binding fails and A self-fences | WITNESS PROCESS SOURCE; LIFECYCLE FAULT-PROXY SOURCE — direct transplantation of a previously issued vote into final certification remains open |
 | 14 | Simultaneous candidates in one epoch | Concurrent long-running candidates use distinct stores; one Witness vote and one effective test writer result | WITNESS PROCESS SOURCE; THREE-PROCESS LAB; LIFECYCLE PROCESS SOURCE — cloned Witness credentials remain outside scope |
 | 15 | Promotion before lease expiry | The lifecycle refuses at 1249 ms and accepts the same next epoch only at its 1250 ms safe bound | MODEL; COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |
 | 16 | Clock rollback | A genuinely active lifecycle node emits once, observes rollback, self-fences, and refuses later effects | MODEL; COMPONENT SOURCE; LIFECYCLE PROCESS SOURCE |

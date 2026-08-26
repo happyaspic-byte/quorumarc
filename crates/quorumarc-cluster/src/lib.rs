@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 mod bootstrap;
+mod fault_proxy;
 mod keys;
 mod lifecycle;
 mod path_guard;
@@ -26,11 +27,13 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use bootstrap::{BootstrapConfig, BootstrapReport, run_bootstrap};
+pub use fault_proxy::{FaultProxyConfig, serve_fault_proxy};
 pub use keys::{load_private_seed, load_public_key};
 pub use lifecycle::{
-    LifecycleClient, LifecycleNodeConfig, LifecycleNodeId, LifecycleReasonCode, LifecycleReport,
-    LifecycleState, LifecycleStoreFault, LifecycleWitnessConfig, lifecycle_lease,
-    lifecycle_policy_hash, serve_lifecycle_node, serve_lifecycle_witness,
+    LifecycleAutoController, LifecycleAutoDecision, LifecycleAutoReason, LifecycleClient,
+    LifecycleNodeConfig, LifecycleNodeId, LifecycleReasonCode, LifecycleReport, LifecycleState,
+    LifecycleStoreFault, LifecycleWitnessConfig, lifecycle_lease, lifecycle_policy_hash,
+    serve_lifecycle_node, serve_lifecycle_witness,
 };
 pub use peer::{PeerConfig, serve_peer};
 pub use self_test::{SelfTestConfig, SelfTestReport, run_self_test};

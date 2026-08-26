@@ -13,8 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use quorumarc_cluster::{
-    LifecycleClient, LifecycleNodeId, LifecycleReasonCode, LifecycleState, lifecycle_lease,
-    lifecycle_policy_hash,
+    LifecycleAutoController, LifecycleAutoDecision, LifecycleAutoReason, LifecycleClient,
+    LifecycleNodeId, LifecycleReasonCode, LifecycleState, lifecycle_lease, lifecycle_policy_hash,
 };
 use quorumarc_rpo0::{
     CounterOperation, FileReplica, OperationId, ReplicatedCounter, WalEntry, recover_wal,
@@ -24,6 +24,7 @@ use quorumarc_wire::SigningKey;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const TIMEOUT: Duration = Duration::from_secs(3);
 const WITNESS_MAX_CONNECTIONS: usize = 16;
+const PROXY_MAX_CONNECTIONS: usize = 16;
 
 #[derive(Clone, Copy)]
 enum WalMode {
@@ -54,9 +55,11 @@ struct Fixture {
     node_a_seed: PathBuf,
     node_b_seed: PathBuf,
     witness_seed: PathBuf,
+    controller_seed: PathBuf,
     node_a_public: PathBuf,
     node_b_public: PathBuf,
     witness_public: PathBuf,
+    controller_public: PathBuf,
     node_a_wal: PathBuf,
     node_b_wal: PathBuf,
 }
@@ -73,9 +76,11 @@ impl Fixture {
             node_a_seed: root.join("node-a.seed"),
             node_b_seed: root.join("node-b.seed"),
             witness_seed: root.join("witness.seed"),
+            controller_seed: root.join("controller.seed"),
             node_a_public: root.join("node-a.public"),
             node_b_public: root.join("node-b.public"),
             witness_public: root.join("witness.public"),
+            controller_public: root.join("controller.public"),
             node_a_wal: root.join("node-a.wal"),
             node_b_wal: root.join("node-b.wal"),
             root,
@@ -83,9 +88,11 @@ impl Fixture {
         write_private(&fixture.node_a_seed, [11; 32]);
         write_private(&fixture.node_b_seed, [17; 32]);
         write_private(&fixture.witness_seed, [29; 32]);
+        write_private(&fixture.controller_seed, [37; 32]);
         write_public(&fixture.node_a_public, [11; 32]);
         write_public(&fixture.node_b_public, [17; 32]);
         write_public(&fixture.witness_public, [29; 32]);
+        write_public(&fixture.controller_public, [37; 32]);
         seed_acknowledged_write(&fixture.node_a_wal, &fixture.node_b_wal);
         apply_wal_mode(&fixture.node_a_wal, node_a.wal);
         apply_wal_mode(&fixture.node_b_wal, node_b.wal);
@@ -97,6 +104,11 @@ struct Lab {
     fixture: Fixture,
     witness: Option<Child>,
     witness_address: SocketAddr,
+    node_a_proxy: Option<Child>,
+    node_b_proxy: Option<Child>,
+    node_a_proxy_address: Option<SocketAddr>,
+    node_b_proxy_address: Option<SocketAddr>,
+    node_a_address: SocketAddr,
     node_a: Option<Child>,
     node_b: Option<Child>,
     node_a_client: LifecycleClient,
@@ -105,23 +117,40 @@ struct Lab {
 
 impl Lab {
     fn start(label: &str, node_a_spec: NodeSpec, node_b_spec: NodeSpec) -> Self {
+        Self::start_inner(label, node_a_spec, node_b_spec, false)
+    }
+
+    fn start_with_proxies(label: &str, node_a_spec: NodeSpec, node_b_spec: NodeSpec) -> Self {
+        Self::start_inner(label, node_a_spec, node_b_spec, true)
+    }
+
+    fn start_inner(
+        label: &str,
+        node_a_spec: NodeSpec,
+        node_b_spec: NodeSpec,
+        with_proxies: bool,
+    ) -> Self {
         let fixture = Fixture::new(label, node_a_spec, node_b_spec);
         let witness_ready = fixture.root.join("witness.ready");
         let mut witness = spawn_witness(&fixture, &witness_ready);
         let witness_address = wait_ready(&witness_ready, &mut witness);
+        let (node_a_proxy, node_a_proxy_address) =
+            start_proxy_if_requested(&fixture, "node-a", witness_address, with_proxies);
+        let (node_b_proxy, node_b_proxy_address) =
+            start_proxy_if_requested(&fixture, "node-b", witness_address, with_proxies);
         let node_a_ready = fixture.root.join("node-a.ready");
         let node_b_ready = fixture.root.join("node-b.ready");
         let mut node_a = spawn_node(
             &fixture,
             LifecycleNodeId::NodeA,
-            witness_address,
+            node_a_proxy_address.unwrap_or(witness_address),
             &node_a_ready,
             node_a_spec,
         );
         let mut node_b = spawn_node(
             &fixture,
             LifecycleNodeId::NodeB,
-            witness_address,
+            node_b_proxy_address.unwrap_or(witness_address),
             &node_b_ready,
             node_b_spec,
         );
@@ -129,25 +158,37 @@ impl Lab {
         let node_b_address = wait_ready(&node_b_ready, &mut node_b);
         let node_a_key = SigningKey::from_bytes(&[11; 32]).verifying_key();
         let node_b_key = SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let controller_key = SigningKey::from_bytes(&[37; 32]);
         Self {
             fixture,
             witness: Some(witness),
             witness_address,
+            node_a_proxy,
+            node_b_proxy,
+            node_a_proxy_address,
+            node_b_proxy_address,
+            node_a_address,
             node_a: Some(node_a),
             node_b: Some(node_b),
             node_a_client: LifecycleClient::new(
                 node_a_address,
                 LifecycleNodeId::NodeA,
                 node_a_key,
+                controller_key.clone(),
                 TIMEOUT,
             ),
             node_b_client: LifecycleClient::new(
                 node_b_address,
                 LifecycleNodeId::NodeB,
                 node_b_key,
+                controller_key,
                 TIMEOUT,
             ),
         }
+    }
+
+    fn set_proxy_mode(&self, node: LifecycleNodeId, mode: &str) {
+        fs::write(proxy_mode_path(&self.fixture, node), mode).expect("set fault proxy mode");
     }
 
     fn kill_witness(&mut self) {
@@ -181,10 +222,79 @@ impl Lab {
     }
 }
 
+#[test]
+fn unauthenticated_and_cross_node_control_commands_are_refused_without_state_change() {
+    let mut lab = Lab::start("control-auth", NodeSpec::normal(), NodeSpec::normal());
+    let node_a_key = SigningKey::from_bytes(&[11; 32]).verifying_key();
+    let mut rogue = LifecycleClient::new(
+        lab.node_a_address,
+        LifecycleNodeId::NodeA,
+        node_a_key,
+        SigningKey::from_bytes(&[41; 32]),
+        TIMEOUT,
+    );
+    let authentication_error = rogue
+        .promote(1, 1_000)
+        .expect_err("unknown controller must not receive an authority response");
+    assert!(matches!(
+        authentication_error.reason_code(),
+        "LIFECYCLE_RESPONSE_READ_FAILED" | "LIFECYCLE_RESPONSE_MISSING"
+    ));
+
+    let mut wrong_target = LifecycleClient::new(
+        lab.node_a_address,
+        LifecycleNodeId::NodeB,
+        node_a_key,
+        SigningKey::from_bytes(&[37; 32]),
+        TIMEOUT,
+    );
+    let binding_error = wrong_target
+        .promote(1, 1_000)
+        .expect_err("command signed for node B must not execute at node A");
+    assert!(matches!(
+        binding_error.reason_code(),
+        "LIFECYCLE_RESPONSE_READ_FAILED" | "LIFECYCLE_RESPONSE_MISSING"
+    ));
+
+    let report = lab
+        .node_a_client
+        .status(1_000)
+        .expect("valid authenticated status");
+    assert_eq!(report.state, LifecycleState::Standby);
+    assert_eq!(report.highest_epoch, 0);
+    assert_eq!(report.effect_count, 0);
+
+    let mut stale_signed = LifecycleClient::new(
+        lab.node_a_address,
+        LifecycleNodeId::NodeA,
+        node_a_key,
+        SigningKey::from_bytes(&[37; 32]),
+        TIMEOUT,
+    );
+    let replay_error = stale_signed
+        .status(999)
+        .expect_err("reused controller sequence with stale time must fail");
+    assert!(matches!(
+        replay_error.reason_code(),
+        "LIFECYCLE_RESPONSE_READ_FAILED" | "LIFECYCLE_RESPONSE_MISSING"
+    ));
+    let after_replay = lab
+        .node_a_client
+        .status(1_001)
+        .expect("stale signed request must not roll back the node clock");
+    assert_eq!(after_replay.state, LifecycleState::Standby);
+    assert_eq!(after_replay.highest_epoch, 0);
+    eprintln!(
+        "security=authenticated-control status=PASS unauthorized_state_changes=0 unauthorized_effects=0 stale_signed_replays=REFUSED"
+    );
+}
+
 impl Drop for Lab {
     fn drop(&mut self) {
         stop_live_node(&mut self.node_a_client, &mut self.node_a);
         stop_live_node(&mut self.node_b_client, &mut self.node_b);
+        drain_proxy(&mut self.node_a_proxy, self.node_a_proxy_address);
+        drain_proxy(&mut self.node_b_proxy, self.node_b_proxy_address);
         drain_witness(&mut self.witness, self.witness_address);
         let _cleanup = fs::remove_dir_all(&self.fixture.root);
     }
@@ -202,6 +312,20 @@ fn normal_boot_and_first_active_selection_have_one_writer() {
     assert_eq!(promoted.state, LifecycleState::Active);
     let effect = lab.node_a_client.emit(1, 1_001, [1; 16]).expect("emit A");
     assert_eq!(effect.reason_code, LifecycleReasonCode::EffectRecorded);
+    let exact_retry = lab
+        .node_a_client
+        .retry_last_command()
+        .expect("retry exact signed effect command");
+    assert_eq!(exact_retry, effect);
+    let new_request_retry = lab
+        .node_a_client
+        .emit(1, 1_001, [1; 16])
+        .expect("retry operation under a new controller request");
+    assert_eq!(
+        new_request_retry.reason_code,
+        LifecycleReasonCode::EffectAlreadyRecorded
+    );
+    assert_eq!(new_request_retry.effect_count, 1);
     let refused = lab
         .node_b_client
         .emit(1, 1_001, [2; 16])
@@ -254,6 +378,97 @@ fn active_sigkill_requires_expiry_and_then_promotes_standby() {
     assert_eq!(recovered.commit_index, 1);
     assert_eq!(recovered.value, 1);
     record_pass(2, "active_sigkill");
+}
+
+#[test]
+fn automatic_controller_requires_detection_lease_guard_and_witness() {
+    let mut lab = Lab::start("automatic-sigkill", NodeSpec::normal(), NodeSpec::normal());
+    let mut controller = LifecycleAutoController::new(2).expect("automatic policy");
+    let a_boot = lab.node_a_client.status(1_000).expect("A boot status");
+    let b_boot = lab.node_b_client.status(1_000).expect("B boot status");
+    assert_eq!(
+        controller
+            .evaluate(1_000, Some(&a_boot), Some(&b_boot), true)
+            .expect("bootstrap decision"),
+        LifecycleAutoDecision::Promote {
+            candidate: LifecycleNodeId::NodeA,
+            epoch: 1,
+        }
+    );
+    let promoted_a = lab.node_a_client.promote(1, 1_000).expect("promote A");
+    controller
+        .record_promotion_result(&promoted_a)
+        .expect("record A promotion");
+    let a_live = lab.node_a_client.status(1_001).expect("A live status");
+    let b_live = lab.node_b_client.status(1_001).expect("B live status");
+    assert_eq!(
+        controller
+            .evaluate(1_001, Some(&a_live), Some(&b_live), true)
+            .expect("stable decision"),
+        LifecycleAutoDecision::Stable {
+            active: LifecycleNodeId::NodeA,
+            epoch: 1,
+        }
+    );
+
+    lab.kill_node_a();
+    let b_first = lab.node_b_client.status(1_100).expect("first B probe");
+    assert_eq!(
+        controller
+            .evaluate(1_100, None, Some(&b_first), true)
+            .expect("first failure observation"),
+        LifecycleAutoDecision::Hold {
+            reason: LifecycleAutoReason::WaitingForFailureThreshold,
+        }
+    );
+    let b_second = lab.node_b_client.status(1_200).expect("second B probe");
+    assert_eq!(
+        controller
+            .evaluate(1_200, None, Some(&b_second), true)
+            .expect("lease wait decision"),
+        LifecycleAutoDecision::Hold {
+            reason: LifecycleAutoReason::WaitingForLeaseGuard,
+        }
+    );
+    let b_guard = lab.node_b_client.status(1_249).expect("guard B probe");
+    assert_eq!(
+        controller
+            .evaluate(1_249, None, Some(&b_guard), true)
+            .expect("guard boundary decision"),
+        LifecycleAutoDecision::Hold {
+            reason: LifecycleAutoReason::WaitingForLeaseGuard,
+        }
+    );
+    let b_ready = lab.node_b_client.status(1_250).expect("ready B probe");
+    assert_eq!(
+        controller
+            .evaluate(1_250, None, Some(&b_ready), false)
+            .expect("Witness loss decision"),
+        LifecycleAutoDecision::Hold {
+            reason: LifecycleAutoReason::WitnessUnavailable,
+        }
+    );
+    assert_eq!(
+        controller
+            .evaluate(1_250, None, Some(&b_ready), true)
+            .expect("automatic failover decision"),
+        LifecycleAutoDecision::Promote {
+            candidate: LifecycleNodeId::NodeB,
+            epoch: 2,
+        }
+    );
+    let promoted_b = lab.node_b_client.promote(2, 1_250).expect("promote B");
+    controller
+        .record_promotion_result(&promoted_b)
+        .expect("record B promotion");
+    let effect = lab
+        .node_b_client
+        .emit(2, 1_251, [44; 16])
+        .expect("automatic successor effect");
+    assert!(effect.reason_code.effect_succeeded());
+    eprintln!(
+        "scenario=2 name=automatic_active_sigkill seed=1 class=github-process-autofailover status=PASS single_writer_violations=0 acknowledged_write_loss=0"
+    );
 }
 
 #[test]
@@ -320,6 +535,179 @@ fn witness_loss_blocks_new_promotion() {
     assert_eq!(report.state, LifecycleState::Standby);
     assert_eq!(report.effect_count, 0);
     record_pass(5, "witness_shutdown");
+}
+
+#[test]
+fn only_node_a_to_witness_connectivity_selects_at_most_node_a() {
+    let mut lab = Lab::start_with_proxies(
+        "partition-a-witness",
+        NodeSpec::normal(),
+        NodeSpec::normal(),
+    );
+    lab.set_proxy_mode(LifecycleNodeId::NodeB, "drop");
+    let b = lab.node_b_client.promote(1, 1_000).expect("B refusal");
+    assert_eq!(
+        b.reason_code,
+        LifecycleReasonCode::RefusedWitnessUnavailable
+    );
+    assert_eq!(b.effect_count, 0);
+    let a = lab.node_a_client.promote(1, 1_000).expect("A promotion");
+    assert_eq!(a.reason_code, LifecycleReasonCode::Promoted);
+    assert!(
+        lab.node_a_client
+            .emit(1, 1_001, [51; 16])
+            .expect("A effect")
+            .reason_code
+            .effect_succeeded()
+    );
+    assert!(
+        !lab.node_b_client
+            .emit(1, 1_001, [52; 16])
+            .expect("B remains closed")
+            .reason_code
+            .effect_succeeded()
+    );
+    record_pass(7, "node_a_witness_only");
+}
+
+#[test]
+fn only_node_b_to_witness_connectivity_selects_at_most_node_b() {
+    let mut lab = Lab::start_with_proxies(
+        "partition-b-witness",
+        NodeSpec::normal(),
+        NodeSpec::normal(),
+    );
+    lab.set_proxy_mode(LifecycleNodeId::NodeA, "drop");
+    let a = lab.node_a_client.promote(1, 1_000).expect("A refusal");
+    assert_eq!(
+        a.reason_code,
+        LifecycleReasonCode::RefusedWitnessUnavailable
+    );
+    assert_eq!(a.effect_count, 0);
+    let b = lab.node_b_client.promote(1, 1_000).expect("B promotion");
+    assert_eq!(b.reason_code, LifecycleReasonCode::Promoted);
+    assert!(
+        lab.node_b_client
+            .emit(1, 1_001, [53; 16])
+            .expect("B effect")
+            .reason_code
+            .effect_succeeded()
+    );
+    record_pass(8, "node_b_witness_only");
+}
+
+#[test]
+fn complete_witness_partition_refuses_both_candidates() {
+    let mut lab =
+        Lab::start_with_proxies("partition-complete", NodeSpec::normal(), NodeSpec::normal());
+    lab.set_proxy_mode(LifecycleNodeId::NodeA, "drop");
+    lab.set_proxy_mode(LifecycleNodeId::NodeB, "drop");
+    let a = lab.node_a_client.promote(1, 1_000).expect("A refusal");
+    let b = lab.node_b_client.promote(1, 1_000).expect("B refusal");
+    assert_eq!(
+        a.reason_code,
+        LifecycleReasonCode::RefusedWitnessUnavailable
+    );
+    assert_eq!(
+        b.reason_code,
+        LifecycleReasonCode::RefusedWitnessUnavailable
+    );
+    assert_eq!(a.effect_count + b.effect_count, 0);
+    record_pass(9, "complete_witness_partition");
+}
+
+#[test]
+fn delayed_duplicate_lost_reply_and_corrupt_frames_fail_safely() {
+    {
+        let mut lab =
+            Lab::start_with_proxies("proxy-delay", NodeSpec::normal(), NodeSpec::normal());
+        lab.set_proxy_mode(LifecycleNodeId::NodeA, "delay-ms=25");
+        assert_eq!(
+            lab.node_a_client
+                .promote(1, 1_000)
+                .expect("delayed promotion")
+                .reason_code,
+            LifecycleReasonCode::Promoted
+        );
+    }
+    {
+        let mut lab =
+            Lab::start_with_proxies("proxy-duplicate", NodeSpec::normal(), NodeSpec::normal());
+        lab.set_proxy_mode(LifecycleNodeId::NodeA, "duplicate");
+        assert_eq!(
+            lab.node_a_client
+                .promote(1, 1_000)
+                .expect("duplicate delivery")
+                .reason_code,
+            LifecycleReasonCode::Promoted
+        );
+    }
+    {
+        let mut lab =
+            Lab::start_with_proxies("proxy-reply-drop", NodeSpec::normal(), NodeSpec::normal());
+        lab.set_proxy_mode(LifecycleNodeId::NodeA, "reply-drop");
+        assert_eq!(
+            lab.node_a_client
+                .promote(1, 1_000)
+                .expect("lost reply refusal")
+                .reason_code,
+            LifecycleReasonCode::RefusedWitnessUnavailable
+        );
+        lab.set_proxy_mode(LifecycleNodeId::NodeA, "pass");
+        assert_eq!(
+            lab.node_a_client
+                .promote(1, 1_000)
+                .expect("exact durable retry")
+                .reason_code,
+            LifecycleReasonCode::Promoted
+        );
+    }
+    {
+        let mut lab =
+            Lab::start_with_proxies("proxy-corrupt", NodeSpec::normal(), NodeSpec::normal());
+        lab.set_proxy_mode(LifecycleNodeId::NodeA, "corrupt");
+        let refusal = lab
+            .node_a_client
+            .promote(1, 1_000)
+            .expect("corrupt frame refusal");
+        assert_eq!(
+            refusal.reason_code,
+            LifecycleReasonCode::RefusedWitnessUnavailable
+        );
+        assert_eq!(refusal.effect_count, 0);
+    }
+    record_pass(10, "delay_duplicate_reply_drop_corrupt");
+}
+
+#[test]
+fn stale_witness_exchange_replay_self_fences_requesting_node() {
+    let mut lab = Lab::start_with_proxies("proxy-replay", NodeSpec::normal(), NodeSpec::normal());
+    assert_eq!(
+        lab.node_a_client
+            .promote(1, 1_000)
+            .expect("A epoch 1")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    assert_eq!(
+        lab.node_b_client
+            .promote(2, 1_250)
+            .expect("B epoch 2")
+            .reason_code,
+        LifecycleReasonCode::Promoted
+    );
+    lab.set_proxy_mode(LifecycleNodeId::NodeA, "replay-last");
+    let replay = lab
+        .node_a_client
+        .promote(3, 1_500)
+        .expect("signed stale Witness response refusal");
+    assert_eq!(
+        replay.reason_code,
+        LifecycleReasonCode::RefusedWitnessUnavailable
+    );
+    assert_eq!(replay.state, LifecycleState::SelfFenced);
+    assert_eq!(replay.effect_count, 0);
+    record_pass(13, "stale_witness_exchange_replay");
 }
 
 #[test]
@@ -648,6 +1036,49 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_quorumarc-cluster"))
 }
 
+fn start_proxy_if_requested(
+    fixture: &Fixture,
+    label: &str,
+    witness: SocketAddr,
+    requested: bool,
+) -> (Option<Child>, Option<SocketAddr>) {
+    if !requested {
+        return (None, None);
+    }
+    let ready = fixture.root.join(format!("{label}-proxy.ready"));
+    let mode = fixture.root.join(format!("{label}-proxy.mode"));
+    fs::write(&mode, "pass").expect("create fault proxy mode");
+    let mut child = Command::new(binary())
+        .arg("fault-proxy")
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--ready-file")
+        .arg(&ready)
+        .arg("--upstream")
+        .arg(witness.to_string())
+        .arg("--mode-file")
+        .arg(&mode)
+        .arg("--max-connections")
+        .arg(PROXY_MAX_CONNECTIONS.to_string())
+        .arg("--timeout-ms")
+        .arg("3000")
+        .arg("--allow-lifecycle-lab")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fault proxy");
+    let address = wait_ready(&ready, &mut child);
+    (Some(child), Some(address))
+}
+
+fn proxy_mode_path(fixture: &Fixture, node: LifecycleNodeId) -> PathBuf {
+    let label = match node {
+        LifecycleNodeId::NodeA => "node-a",
+        LifecycleNodeId::NodeB => "node-b",
+    };
+    fixture.root.join(format!("{label}-proxy.mode"))
+}
+
 fn spawn_witness(fixture: &Fixture, ready: &Path) -> Child {
     Command::new(binary())
         .arg("lifecycle-witness")
@@ -709,6 +1140,8 @@ fn spawn_node(
         .arg(seed)
         .arg("--witness-public-key")
         .arg(&fixture.witness_public)
+        .arg("--controller-public-key")
+        .arg(&fixture.controller_public)
         .arg("--witness")
         .arg(witness.to_string())
         .arg("--max-connections")
@@ -890,6 +1323,50 @@ fn drain_witness(child: &mut Option<Child>, address: SocketAddr) {
             .expect("inspect drained witness")
             .is_some()
         {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _kill = process.kill();
+            let _wait = process.wait();
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn drain_proxy(child: &mut Option<Child>, address: Option<SocketAddr>) {
+    let (Some(process), Some(address)) = (child.as_mut(), address) else {
+        return;
+    };
+    if process
+        .try_wait()
+        .expect("inspect proxy during cleanup")
+        .is_some()
+    {
+        let _finished = child.take();
+        return;
+    }
+
+    for _ in 0..=PROXY_MAX_CONNECTIONS {
+        if process
+            .try_wait()
+            .expect("inspect draining proxy")
+            .is_some()
+        {
+            break;
+        }
+        if let Ok(mut stream) = TcpStream::connect_timeout(&address, TIMEOUT) {
+            let _timeout = stream.set_write_timeout(Some(TIMEOUT));
+            let _write = stream.write_all(&0_u32.to_be_bytes());
+        }
+    }
+
+    let Some(mut process) = child.take() else {
+        return;
+    };
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if process.try_wait().expect("inspect drained proxy").is_some() {
             return;
         }
         if Instant::now() >= deadline {
