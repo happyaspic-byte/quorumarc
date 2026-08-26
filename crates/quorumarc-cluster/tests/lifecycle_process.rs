@@ -507,7 +507,10 @@ fn automatic_controller_requires_detection_lease_guard_and_witness() {
             epoch: 2,
         }
     );
-    let promoted_b = lab.node_b_client.promote(2, second_start).expect("promote B");
+    let promoted_b = lab
+        .node_b_client
+        .promote(2, second_start)
+        .expect("promote B");
     controller
         .record_promotion_result(&promoted_b)
         .expect("record B promotion");
@@ -535,7 +538,9 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
         "event=controller_effect node=node-a epoch=1",
         &mut controller,
     ) {
-        let output = controller.wait_with_output().expect("collect early controller exit");
+        let output = controller
+            .wait_with_output()
+            .expect("collect early controller exit");
         let node_a_log = kill_and_collect(&mut lab.node_a);
         let node_b_log = kill_and_collect(&mut lab.node_b);
         let witness_log = kill_and_collect(&mut lab.witness);
@@ -1029,7 +1034,10 @@ fn lagging_candidate_is_refused_before_witness_authority() {
             .reason_code,
         LifecycleReasonCode::Promoted
     );
-    let report = lab.node_b_client.promote(2, second_start).expect("lag refusal");
+    let report = lab
+        .node_b_client
+        .promote(2, second_start)
+        .expect("lag refusal");
     assert_eq!(
         report.reason_code,
         LifecycleReasonCode::RefusedCandidateLagging
@@ -1579,9 +1587,7 @@ fn wait_for_trace(path: &Path, expected: &str, child: &mut Child) -> bool {
         if fs::read_to_string(path).is_ok_and(|trace| trace.contains(expected)) {
             return true;
         }
-        if child.try_wait().expect("inspect controller").is_some()
-            || Instant::now() >= deadline
-        {
+        if child.try_wait().expect("inspect controller").is_some() || Instant::now() >= deadline {
             return false;
         }
         thread::sleep(Duration::from_millis(5));
