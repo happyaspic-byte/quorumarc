@@ -50,9 +50,10 @@ production-readiness claim. Lifecycle source tests now cover 24 required
 scenario IDs and the one-shot A/B proxy covers the remaining ID in shared-host
 validation classes; exact-head GitHub success is tracked in the Draft PR.
 Physical enforcement and production end-to-end PASS classes remain incomplete.
-Extended Safety computes p50/p95/p99 only for the bounded logical-time
-controller path; client-observed failover and write-latency distributions do
-not exist.
+Extended Safety computes p50/p95/p99/max and failure rate only for the bounded
+logical-time controller path. It separates transport-miss confirmation,
+lease-wait, durable promotion, and test-sink effect timing; client-observed
+failover and write-latency distributions do not exist.
 
 ## Evidence classification and current measurements
 

@@ -1041,6 +1041,14 @@ impl LifecycleClient {
         self.send(CommandKind::Status, now_ms, 0, [0; 16])
     }
 
+    pub(crate) fn status_with_timeout(
+        &mut self,
+        now_ms: u64,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
+        self.send_with_timeout(CommandKind::Status, now_ms, 0, [0; 16], timeout)
+    }
+
     pub fn promote(&mut self, epoch: u64, now_ms: u64) -> Result<LifecycleReport, ClusterError> {
         self.send(CommandKind::Promote, now_ms, epoch, [0; 16])
     }
@@ -1102,6 +1110,17 @@ impl LifecycleClient {
         epoch: u64,
         operation_id: [u8; 16],
     ) -> Result<LifecycleReport, ClusterError> {
+        self.send_with_timeout(kind, now_ms, epoch, operation_id, self.timeout)
+    }
+
+    fn send_with_timeout(
+        &mut self,
+        kind: CommandKind,
+        now_ms: u64,
+        epoch: u64,
+        operation_id: [u8; 16],
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
         let request_id = request_id(self.next_request);
         self.next_request = self
             .next_request
@@ -1118,22 +1137,29 @@ impl LifecycleClient {
         let signed =
             SignedLifecycleCommand::sign(command, self.node_id, &self.controller_signing_key)?;
         self.last_command = Some(signed.clone());
-        self.exchange(&signed)
+        self.exchange_with_timeout(&signed, timeout)
     }
 
     fn exchange(&self, signed: &SignedLifecycleCommand) -> Result<LifecycleReport, ClusterError> {
+        self.exchange_with_timeout(signed, self.timeout)
+    }
+
+    fn exchange_with_timeout(
+        &self,
+        signed: &SignedLifecycleCommand,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
         ensure_loopback(self.address)?;
-        if self.timeout.is_zero() {
+        if timeout.is_zero() {
             return Err(err("TIMEOUT_REFUSED", "lifecycle client timeout is zero"));
         }
-        let mut stream =
-            TcpStream::connect_timeout(&self.address, self.timeout).map_err(|error| {
-                err(
-                    "LIFECYCLE_NODE_UNAVAILABLE",
-                    format!("{}: {error}", self.address),
-                )
-            })?;
-        configure_stream(&stream, self.timeout)?;
+        let mut stream = TcpStream::connect_timeout(&self.address, timeout).map_err(|error| {
+            err(
+                "LIFECYCLE_NODE_UNAVAILABLE",
+                format!("{}: {error}", self.address),
+            )
+        })?;
+        configure_stream(&stream, timeout)?;
         let codec = FrameCodec::new(MAX_LIFECYCLE_FRAME)
             .map_err(|error| err("FRAME_CONFIG_FAILED", error.to_string()))?;
         codec
@@ -2882,6 +2908,67 @@ mod tests {
             .record_promotion_result(&b)
             .expect_err("result without pending attempt must fail");
         assert_eq!(result_error.reason_code(), "LIFECYCLE_AUTO_RESULT_REFUSED");
+    }
+
+    #[test]
+    fn observation_timeout_is_scoped_to_one_status_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test node");
+        let address = listener.local_addr().expect("test node address");
+        let node_key = SigningKey::from_bytes(&[71; 32]);
+        let node_public_key = node_key.verifying_key();
+        let controller_key = SigningKey::from_bytes(&[73; 32]);
+        let controller_public_key = controller_key.verifying_key();
+        let server = std::thread::spawn(move || {
+            let codec = FrameCodec::new(MAX_LIFECYCLE_FRAME).expect("test frame codec");
+            for delay in [Duration::from_millis(80), Duration::ZERO] {
+                let (mut stream, _) = listener.accept().expect("accept status request");
+                let bytes = codec
+                    .read_frame(&mut stream)
+                    .expect("read status frame")
+                    .expect("status frame present");
+                let signed = SignedLifecycleCommand::from_bytes(&bytes).expect("decode command");
+                signed
+                    .verify(LifecycleNodeId::NodeA, &controller_public_key)
+                    .expect("verify command");
+                std::thread::sleep(delay);
+                let response = SignedLifecycleResponse::sign(
+                    signed.command.request_id,
+                    LifecycleReport {
+                        node_id: LifecycleNodeId::NodeA,
+                        reason_code: LifecycleReasonCode::Status,
+                        state: LifecycleState::Standby,
+                        highest_epoch: 0,
+                        incarnation: 1,
+                        store_generation: 1,
+                        effect_count: 0,
+                        commit_index: 1,
+                        state_root: expected_state_root().expect("expected root"),
+                        lease_expires_at_ms: 0,
+                    },
+                    &node_key,
+                )
+                .expect("sign response");
+                let _write_result =
+                    codec.write_frame(&mut stream, &response.to_bytes().expect("encode response"));
+            }
+        });
+        let mut client = LifecycleClient::new(
+            address,
+            LifecycleNodeId::NodeA,
+            node_public_key,
+            controller_key,
+            Duration::from_millis(250),
+        );
+
+        let first = client
+            .status_with_timeout(1_000, Duration::from_millis(20))
+            .expect_err("short observation timeout must expire");
+        assert_eq!(first.reason_code(), "LIFECYCLE_RESPONSE_READ_FAILED");
+        let second = client
+            .status(1_001)
+            .expect("command timeout must remain available");
+        assert_eq!(second.reason_code, LifecycleReasonCode::Status);
+        server.join().expect("join test node");
     }
 
     #[test]

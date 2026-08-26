@@ -82,11 +82,14 @@ Lease renewal is deliberately absent. Heartbeats cannot extend authority. A
 new authority epoch requires another durable Witness vote and the exact
 replication progress expected by the capsule.
 
-Extended Safety repeats the controller `SIGKILL` path eight times, measures
-host elapsed time from fault injection to successor test effect, computes
-p50/p95/p99 with a declared sample count, and rejects p95 above 5 seconds. The
-artifact class is `bounded_logical_failover`; it is not client downtime or a
-physical RTO measurement.
+Extended Safety repeats the focused controller `SIGKILL` path twenty times,
+measures host elapsed time from fault injection to successor test effect, and
+records failure-detection, lease-wait, promotion, and EffectGate stages
+separately. It computes p50/p95/p99/max plus failure rate and rejects p95 above
+5 seconds. The artifact class is `bounded_logical_failover`; it is not client
+downtime or a physical RTO measurement. Observation I/O uses a shorter timeout
+than durable promotion I/O so a slow status probe cannot consume the authority
+deadline. Those timeouts do not change lease, proof, fence, or signature rules.
 
 ## Service modes
 
@@ -150,7 +153,8 @@ quorumarc-cluster lifecycle-controller \
   --max-promotions 2 \
   --logical-step-ms 10 \
   --poll-ms 20 \
-  --timeout-ms 3000 \
+  --observation-timeout-ms 250 \
+  --authority-timeout-ms 3000 \
   --max-runtime-ms 10000 \
   --emit-test-effect \
   --allow-lifecycle-lab

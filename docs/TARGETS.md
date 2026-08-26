@@ -8,7 +8,7 @@ These are validation gates, not achieved production claims.
 | Proof enforcement | 0 | 0 EffectGate activations without a valid PromotionProof |
 | Replayability | 0 | Every simulator failure reproducible by source revision + seed/history |
 | Proof validation | 0 | p99 below 1 ms on reference host, after benchmark harness exists |
-| Bounded logical lab failover | 1A | p95 ≤5 s across eight exact-head `SIGKILL` controller samples, with lease/proof rules unchanged |
+| Bounded logical lab failover | 1A | p95 ≤5 s across twenty exact-head `SIGKILL` controller samples, with lease/proof/fence/signature rules unchanged |
 | Planned service switch | 1 | p95 ≤250 ms, p99 ≤500 ms on declared reference topology |
 | Unplanned service switch | 1 | p95 ≤1 s, p99 ≤2 s only with validated EffectGate fencing |
 | Stateful RPO-0 switch | 2 | p95 ≤2 s, p99 ≤5 s and zero acknowledged-write loss |
@@ -28,10 +28,10 @@ hardware, storage, network, fence mechanism, percentile, and sample count.
 
 The Gate 1A workflow's bounded logical-lab metric runs on a noisy GitHub shared
 host with controller-supplied deterministic time and a test sink. The retained
-artifact separates failure-to-effect, promotion, and effect-operation
-percentiles so a slower durability path cannot be hidden inside one aggregate.
-It is a CI regression gate, not a service RTO, VIP outage, or physical failover
-claim.
+artifact separates failure-to-effect, failure-detection, lease-wait, promotion,
+and effect-operation percentiles so a slower durability path cannot be hidden
+inside one aggregate. It is a CI regression gate, not a service RTO, VIP
+outage, or physical failover claim.
 
 ## Continuity levels
 

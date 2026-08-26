@@ -577,6 +577,20 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
     assert!(stdout.contains(
         "code=LIFECYCLE_CONTROLLER_COMPLETE promotions=2 final_active=node-b final_epoch=2 effects=1"
     ));
+    assert!(stdout.contains("final_failure_detection_ms="));
+    assert!(stdout.contains("final_lease_wait_ms="));
+    let failure_detection_ms = trace_metric(
+        &trace,
+        "event=controller_promotion node=node-b epoch=2",
+        "failure_detection_ms",
+    );
+    let lease_wait_ms = trace_metric(
+        &trace,
+        "event=controller_promotion node=node-b epoch=2",
+        "lease_wait_ms",
+    );
+    assert!(failure_detection_ms > 0);
+    assert!(lease_wait_ms > 0);
     let promotion_ms = trace_metric(
         &trace,
         "event=controller_promotion node=node-b epoch=2",
@@ -599,7 +613,7 @@ fn autonomous_controller_process_executes_bounded_sigkill_failover() {
     );
     kill_child(&mut lab.node_b);
     eprintln!(
-        "scenario=2 name=autonomous_controller_process_sigkill seed=1 class=github-process-auto-executor status=PASS single_writer_violations=0 acknowledged_write_loss=0 metric=bounded_logical_failover failure_to_effect_ms={failure_to_effect_ms} promotion_ms={promotion_ms} effect_ms={effect_ms} logical_successor_epoch=2"
+        "scenario=2 name=autonomous_controller_process_sigkill seed=1 class=github-process-auto-executor status=PASS single_writer_violations=0 acknowledged_write_loss=0 metric=bounded_logical_failover failure_to_effect_ms={failure_to_effect_ms} failure_detection_ms={failure_detection_ms} lease_wait_ms={lease_wait_ms} promotion_ms={promotion_ms} effect_ms={effect_ms} logical_successor_epoch=2"
     );
 }
 
@@ -1539,7 +1553,9 @@ fn spawn_auto_controller_at(
         .arg("10")
         .arg("--poll-ms")
         .arg("20")
-        .arg("--timeout-ms")
+        .arg("--observation-timeout-ms")
+        .arg("250")
+        .arg("--authority-timeout-ms")
         .arg("3000")
         .arg("--max-runtime-ms")
         .arg("10000")

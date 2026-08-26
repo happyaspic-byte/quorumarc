@@ -176,7 +176,8 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--max-promotions",
                     "--logical-step-ms",
                     "--poll-ms",
-                    "--timeout-ms",
+                    "--observation-timeout-ms",
+                    "--authority-timeout-ms",
                     "--max-runtime-ms",
                 ],
                 &["--allow-lifecycle-lab", "--emit-test-effect"],
@@ -193,17 +194,22 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 max_promotions: options.u64("--max-promotions")?,
                 logical_step_ms: options.u64("--logical-step-ms")?,
                 poll_interval: Duration::from_millis(options.u64("--poll-ms")?),
-                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+                observation_timeout: Duration::from_millis(
+                    options.u64("--observation-timeout-ms")?,
+                ),
+                authority_timeout: Duration::from_millis(options.u64("--authority-timeout-ms")?),
                 max_runtime: Duration::from_millis(options.u64("--max-runtime-ms")?),
                 emit_test_effect: options.flag("--emit-test-effect"),
             })?;
             println!(
-                "code=LIFECYCLE_CONTROLLER_COMPLETE promotions={} final_active={} final_epoch={} effects={} elapsed_ms={} final_promotion_ms={} final_effect_ms={}",
+                "code=LIFECYCLE_CONTROLLER_COMPLETE promotions={} final_active={} final_epoch={} effects={} elapsed_ms={} final_failure_detection_ms={} final_lease_wait_ms={} final_promotion_ms={} final_effect_ms={}",
                 report.promotions,
                 report.final_active.as_str(),
                 report.final_epoch,
                 report.final_effect_count,
                 report.elapsed_ms,
+                report.final_failure_detection_ms,
+                report.final_lease_wait_ms,
                 report.final_promotion_ms,
                 report.final_effect_ms
             );
