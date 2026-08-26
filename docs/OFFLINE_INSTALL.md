@@ -154,6 +154,18 @@ and candidate modes use deterministic public test identities and keys solely
 for hosted process tests. Likewise, `quorumarc-rpo0` is a library test workload,
 not an installed network service.
 
+The release `quorumarc-cluster` binary can perform a bounded pre-installation
+diagnostic after its checksum is verified:
+
+```bash
+/usr/local/bin/quorumarc-cluster self-test --allow-lab-genesis
+```
+
+It launches three localhost roles with publicly known deterministic test keys,
+verifies one exact one-shot transaction, and deletes successful temporary state.
+It is not configuration validation for a production cluster. See the
+[quick start](QUICKSTART.md) for the exact result and retained-state behavior.
+
 ## Update and rollback
 
 Treat each offline update as a new reviewed, signed bundle. Keep the old binary

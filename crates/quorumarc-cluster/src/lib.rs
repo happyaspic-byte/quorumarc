@@ -20,6 +20,7 @@ mod keys;
 mod path_guard;
 mod peer;
 mod protocol;
+mod self_test;
 mod witness;
 
 use std::error::Error;
@@ -28,6 +29,7 @@ use std::fmt::{self, Display, Formatter};
 pub use bootstrap::{BootstrapConfig, BootstrapReport, run_bootstrap};
 pub use keys::{load_private_seed, load_public_key};
 pub use peer::{PeerConfig, serve_peer};
+pub use self_test::{SelfTestConfig, SelfTestReport, run_self_test};
 pub use witness::{WitnessConfig, serve_witness};
 
 /// Stable bounded-lab failure with a machine-readable refusal code.

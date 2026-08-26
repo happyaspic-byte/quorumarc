@@ -289,8 +289,112 @@ fn corrupt_peer_wal_never_publishes_readiness() {
     fixture.cleanup();
 }
 
+#[test]
+fn one_command_self_test_runs_three_roles_and_cleans_state() {
+    let root = fresh_path("one-command-clean");
+    let output = Command::new(binary())
+        .arg("self-test")
+        .arg("--root")
+        .arg(&root)
+        .arg("--allow-lab-genesis")
+        .output()
+        .expect("run one-command self-test");
+    assert_success("one-command self-test", &output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("code=SELF_TEST_PASS"));
+    assert!(stdout.contains("topology=three-process"));
+    assert!(stdout.contains("commit_index=1"));
+    assert!(stdout.contains("effects=1"));
+    assert!(stdout.contains("state_retained=false"));
+    assert!(
+        !root.exists(),
+        "successful default self-test must clean state"
+    );
+}
+
+#[test]
+fn one_command_self_test_can_retain_inspectable_state() {
+    let root = fresh_path("one-command-keep");
+    let output = Command::new(binary())
+        .arg("self-test")
+        .arg("--root")
+        .arg(&root)
+        .arg("--keep-state")
+        .arg("--allow-lab-genesis")
+        .output()
+        .expect("run retained one-command self-test");
+    assert_success("retained one-command self-test", &output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("code=SELF_TEST_PASS"));
+    assert!(stdout.contains("state_retained=true"));
+    assert!(root.join("node-a.wal").is_file());
+    assert!(root.join("node-b.wal").is_file());
+    assert!(root.join("candidate-store/authority.journal").is_file());
+    assert!(root.join("witness-store/authority.journal").is_file());
+    fs::remove_dir_all(root).expect("remove retained self-test state");
+}
+
+#[test]
+fn self_test_requires_opt_in_and_a_new_root() {
+    let missing_opt_in_root = fresh_path("self-test-missing-opt-in");
+    let missing_opt_in = Command::new(binary())
+        .arg("self-test")
+        .arg("--root")
+        .arg(&missing_opt_in_root)
+        .output()
+        .expect("run self-test without opt-in");
+    assert!(!missing_opt_in.status.success());
+    assert!(String::from_utf8_lossy(&missing_opt_in.stderr).contains("LAB_GENESIS_DISABLED"));
+    assert!(!missing_opt_in_root.exists());
+
+    let existing_root = fresh_path("self-test-existing-root");
+    fs::create_dir_all(&existing_root).expect("create existing self-test root");
+    let existing = Command::new(binary())
+        .arg("self-test")
+        .arg("--root")
+        .arg(&existing_root)
+        .arg("--allow-lab-genesis")
+        .output()
+        .expect("run self-test with existing root");
+    assert!(!existing.status.success());
+    assert!(String::from_utf8_lossy(&existing.stderr).contains("SELF_TEST_ROOT_REFUSED"));
+    fs::remove_dir_all(existing_root).expect("remove existing self-test root");
+}
+
+#[cfg(unix)]
+#[test]
+fn self_test_refuses_a_symlinked_root_parent_before_writing_keys() {
+    use std::os::unix::fs::symlink;
+
+    let base = fresh_path("self-test-symlink-base");
+    let target = base.join("target");
+    let alias = base.join("alias");
+    fs::create_dir_all(&target).expect("create self-test symlink target");
+    symlink(&target, &alias).expect("create self-test parent symlink");
+    let requested = alias.join("new-root");
+    let output = Command::new(binary())
+        .arg("self-test")
+        .arg("--root")
+        .arg(&requested)
+        .arg("--allow-lab-genesis")
+        .output()
+        .expect("run self-test with symlinked parent");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("PATH_SYMLINK_REFUSED"));
+    assert!(!target.join("new-root").exists());
+    fs::remove_dir_all(base).expect("remove self-test symlink fixture");
+}
+
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_quorumarc-cluster"))
+}
+
+fn fresh_path(label: &str) -> PathBuf {
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "quorumarc-cluster-{label}-{}-{unique}",
+        std::process::id()
+    ))
 }
 
 fn spawn_peer(fixture: &Fixture, wal: &Path, ready: &Path, max_connections: u64) -> Child {

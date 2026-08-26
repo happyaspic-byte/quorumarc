@@ -61,6 +61,9 @@ scenario artifacts.
 - A same-binary three-mode bounded lab for one peer fsync, one durable
   Witness vote/fixture fence, candidate proof/store ordering, and one logical
   test-sink effect after explicit lab-genesis opt-in.
+- A one-command release self-test that creates isolated deterministic fixtures,
+  launches the three roles, recovers both WALs and authority stores, verifies
+  exact generations and lock release, and removes successful state by default.
 - Safe-default `quorumarc-agent` and `quorumarc-witness` command shells for
   status, health, inspection, and bounded failure simulation.
 
@@ -171,7 +174,9 @@ behavior.
 
 The one-shot lab advances protocol composition, but does not satisfy this
 substage's long-running lifecycle, fault proxy, safe authority transfer, or
-all-scenario trace requirements.
+all-scenario trace requirements. Wrapping that exact transaction in the
+one-command self-test improves setup and release diagnostics but does not turn
+it into election or failover evidence.
 
 ### Gate 1A.2 — RPO-0 demonstration workload
 

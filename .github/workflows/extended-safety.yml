@@ -14,6 +14,7 @@ on:
       - "apps/**"
       - "crates/**"
       - "docs/**"
+      - "scripts/**"
       - README.md
       - .github/workflows/extended-safety.yml
 
@@ -163,6 +164,25 @@ jobs:
             | tee safety-artifacts/release/file-types.log
           ldd safety-artifacts/release/quorumarc-agent \
             | tee safety-artifacts/release/dynamic-dependencies.log
+
+      - name: Verify and package one-command Gate 1A lab
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          safety-artifacts/release/quorumarc-cluster self-test \
+            --allow-lab-genesis 2>&1 \
+            | tee safety-artifacts/release/self-test.log
+          bash scripts/package-gate1a-lab.sh \
+            safety-artifacts/release safety-artifacts/bundle
+          sha256sum --check \
+            safety-artifacts/bundle/quorumarc-gate1a-lab-x86_64-ubuntu.tar.gz.sha256
+          repeat_dir="$(mktemp -d)"
+          trap 'rm -rf -- "${repeat_dir}"' EXIT
+          bash scripts/package-gate1a-lab.sh \
+            safety-artifacts/release "${repeat_dir}"
+          cmp \
+            safety-artifacts/bundle/quorumarc-gate1a-lab-x86_64-ubuntu.tar.gz \
+            "${repeat_dir}/quorumarc-gate1a-lab-x86_64-ubuntu.tar.gz"
 
       - name: Upload extended safety evidence
         if: always()

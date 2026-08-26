@@ -16,8 +16,9 @@ not declare the row passed as an integrated failover scenario.
   localhost TCP analogue. Node A, Node B, activation, and failover are absent.
 - **THREE-PROCESS LAB:** one peer, one Witness, and one explicitly enabled
   bootstrap candidate run as separate processes for a fixed one-shot genesis.
-  The Draft PR carries exact-head CI evidence; a green result is still not
-  failover evidence.
+  The same exact path is also exposed as a one-command release self-test. The
+  Draft PR carries exact-head CI evidence; a green result is still not failover
+  evidence.
 - **NOT INTEGRATED:** no complete three-role Active/Standby scenario exists.
 - **PHYSICAL-ONLY:** the literal hardware assertion requires independent hosts
   or a real fence/effect adapter.

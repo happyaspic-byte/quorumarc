@@ -9,6 +9,9 @@ runtime, RPO-0 demonstration, process harness, and refusal CLIs—but does not y
 connect those pieces into a complete three-role failover system. A bounded lab
 composes a peer, Witness, and explicitly enabled bootstrap
 process for one lab-genesis activation, but it is not a failover service.
+The release binary can now orchestrate that same bounded transaction through a
+one-command self-test. This removes manual fixture assembly only; it adds no new
+authority lifecycle, topology independence, or production enforcement.
 
 The bounded lab starts Node B as a durable peer, a Witness, and Node A as
 a one-shot bootstrap candidate. It can emit one logical test effect after its
@@ -101,6 +104,11 @@ are not distributed locks. Copying the trusted directories and
 Witness credential to another instance can authorize another logical effect.
 This slice must never be reported as global single-writer proof or scenario 1
 PASS.
+
+The `self-test` command uses the same scope and publicly known deterministic
+test keys. Its `SELF_TEST_PASS` result means the candidate, peer, Witness, WAL,
+store, proof, test sink, lock-release, and cleanup checks completed on one host.
+It is not an HA health result and must not be used as a service readiness probe.
 
 The execution path separates the Witness private-key file from candidate
 public-key inputs and rejects equal role public-key values, but a same-binary,

@@ -4,6 +4,21 @@
 
 This is a fail-closed lab guide, not a production runbook.
 
+## Pre-installation lab self-test
+
+The release `quorumarc-cluster` binary provides one bounded diagnostic:
+
+```bash
+quorumarc-cluster self-test --allow-lab-genesis
+```
+
+It launches localhost candidate, peer, and Witness roles with deterministic
+test-only identities, validates one exact durable genesis transaction, and
+cleans successful state. `SELF_TEST_PASS` validates packaging and the bounded
+lab path only. It does not report cluster readiness, install a daemon, enable
+automatic promotion, or test a physical fault domain. Detailed behavior is in
+the [quick start](QUICKSTART.md).
+
 | Class | Current repository state |
 |---|---|
 | **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; single-process durable witness actor library; core logical EffectGate; in-memory test sink; status/refusal command shells; bounded strict agent configuration subset |

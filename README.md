@@ -97,6 +97,20 @@ cargo test --locked --workspace --all-targets
 cargo run --locked -p quorumarc-sim -- --depth 12 --require-safe
 ```
 
+The bounded release binary also provides a one-command Ubuntu self-test. It
+starts candidate, peer, and Witness roles, verifies the exact durable one-shot
+result, and cleans its deterministic test fixture:
+
+```bash
+cargo build --locked --release -p quorumarc-cluster
+./target/release/quorumarc-cluster self-test --allow-lab-genesis
+```
+
+See the [Gate 1A quick start](docs/QUICKSTART.md). This convenience does not add
+automatic failover or change the lab-only claim boundary. The competitive
+product acceptance program is tracked separately in
+[product completeness](docs/PRODUCT_COMPLETENESS.md).
+
 Do not infer a completed Gate 1A result from a local run or from the CI badge.
 An exit claim requires the exact commit, successful workflow URL, artifact, test
 inventory, model report, coverage report, and scenario-by-scenario evidence.

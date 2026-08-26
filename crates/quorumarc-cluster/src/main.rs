@@ -6,8 +6,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use quorumarc_cluster::{
-    BootstrapConfig, ClusterError, PeerConfig, WitnessConfig, run_bootstrap, serve_peer,
-    serve_witness,
+    BootstrapConfig, ClusterError, PeerConfig, SelfTestConfig, WitnessConfig, run_bootstrap,
+    run_self_test, serve_peer, serve_witness,
 };
 
 fn main() -> ExitCode {
@@ -22,12 +22,27 @@ fn main() -> ExitCode {
 
 fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
     let Some(mode) = arguments.first().map(String::as_str) else {
-        return Err(cli_error("missing mode: peer, witness, or bootstrap"));
+        print_help();
+        return Ok(());
     };
     let rest = arguments
         .get(1..)
         .ok_or_else(|| cli_error("invalid arguments"))?;
     match mode {
+        "help" | "--help" | "-h" => {
+            if !rest.is_empty() {
+                return Err(cli_error("help takes no options"));
+            }
+            print_help();
+            Ok(())
+        }
+        "version" | "--version" | "-V" => {
+            if !rest.is_empty() {
+                return Err(cli_error("version takes no options"));
+            }
+            println!("quorumarc-cluster {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "peer" => {
             let options = Options::parse(rest)?;
             options.ensure_allowed(
@@ -119,8 +134,51 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
             );
             Ok(())
         }
+        "self-test" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &["--root", "--timeout-ms", "--startup-timeout-ms"],
+                &["--allow-lab-genesis", "--keep-state"],
+            )?;
+            if !options.flag("--allow-lab-genesis") {
+                return Err(ClusterError::new(
+                    "LAB_GENESIS_DISABLED",
+                    "self-test requires explicit --allow-lab-genesis",
+                ));
+            }
+            let mut config = SelfTestConfig::current_executable()?;
+            config.root_directory = options.optional_path("--root");
+            config.io_timeout = Duration::from_millis(options.u64_or("--timeout-ms", 3_000)?);
+            config.startup_timeout =
+                Duration::from_millis(options.u64_or("--startup-timeout-ms", 5_000)?);
+            config.keep_state = options.flag("--keep-state");
+            config.allow_lab_genesis = true;
+            let report = run_self_test(config)?;
+            println!(
+                "code={} topology=three-process commit_index={} value={} effects={} candidate_store_generation={} witness_store_generation={} elapsed_ms={} state_retained={}",
+                report.reason_code,
+                report.commit_index,
+                report.value,
+                report.effect_count,
+                report.candidate_store_generation,
+                report.witness_store_generation,
+                report.elapsed_ms,
+                report.state_retained,
+            );
+            if let Some(path) = report.state_directory {
+                println!("event=self_test_state path={}", path.display());
+            }
+            Ok(())
+        }
         _ => Err(cli_error("unknown mode")),
     }
+}
+
+fn print_help() {
+    println!(
+        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThey are not production automatic failover or fencing.",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 struct Options {
@@ -137,7 +195,7 @@ impl Options {
             let argument = arguments
                 .get(index)
                 .ok_or_else(|| cli_error("argument index invalid"))?;
-            if argument == "--allow-lab-genesis" {
+            if argument == "--allow-lab-genesis" || argument == "--keep-state" {
                 if flags.iter().any(|value| value == argument) {
                     return Err(cli_error("duplicate flag"));
                 }
@@ -178,6 +236,13 @@ impl Options {
         Ok(PathBuf::from(self.value(name)?))
     }
 
+    fn optional_path(&self, name: &str) -> Option<PathBuf> {
+        self.values
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| PathBuf::from(value))
+    }
+
     fn socket(&self, name: &str) -> Result<SocketAddr, ClusterError> {
         SocketAddr::from_str(self.value(name)?)
             .map_err(|error| cli_error(format!("invalid {name}: {error}")))
@@ -194,6 +259,14 @@ impl Options {
                     Ok(value)
                 }
             })
+    }
+
+    fn u64_or(&self, name: &str, default: u64) -> Result<u64, ClusterError> {
+        if self.values.iter().any(|(key, _)| key == name) {
+            self.u64(name)
+        } else {
+            Ok(default)
+        }
     }
 
     fn flag(&self, name: &str) -> bool {
@@ -252,5 +325,22 @@ mod tests {
             .ensure_allowed(&["--listen"], &[])
             .expect_err("unknown option must fail");
         assert_eq!(error.reason_code(), "CLI_INVALID");
+    }
+
+    #[test]
+    fn no_arguments_and_help_are_safe_successes() {
+        run(Vec::new()).expect("no-argument help must succeed");
+        run(vec!["--help".to_owned()]).expect("explicit help must succeed");
+        run(vec!["--version".to_owned()]).expect("version must succeed");
+    }
+
+    #[test]
+    fn help_and_version_reject_options() {
+        let help =
+            run(vec!["help".to_owned(), "--evil".to_owned()]).expect_err("help option must fail");
+        let version = run(vec!["version".to_owned(), "extra".to_owned()])
+            .expect_err("version option must fail");
+        assert_eq!(help.reason_code(), "CLI_INVALID");
+        assert_eq!(version.reason_code(), "CLI_INVALID");
     }
 }
