@@ -22,21 +22,30 @@ monotonic-counter workload. It provides:
   recovery, corruption, truncation, stale/out-of-order requests, invalid
   receipts, missing replicas, identity collision, and duplicate operations.
 
-This is not yet an end-to-end replicated service. A client protocol, data-node
-network transport, concurrent-writer exclusion, checkpointing, a recovery CLI,
-and a multi-host workload daemon are **NOT-IMPLEMENTED**. The two replica sinks
-are ordinary library arguments and may be two files or in-memory fixtures in
-one process. A distinct replica ID does not prove a distinct disk, machine, or
-failure domain. `FileReplica` deliberately provides no cross-process fencing or
-file lock.
+A bounded **fixed-primary continuous process slice** is now implemented for the
+named counter workload. Separate loopback client, primary, and replica processes
+use strict domain-separated signed protocols. Primary readiness requires equal
+validated and re-synced WAL progress from both process-owned files. Fresh writes
+are serialized and return `CONTINUOUS_ACKNOWLEDGED` only after the primary and
+replica each return an identity-distinct durable receipt for the same canonical
+record. Exact operation retries return the stable signed result without another
+append. Peer loss after readiness produces `CONTINUOUS_UNKNOWN`, may leave one
+primary-only prefix, and never returns an acknowledgement.
 
-The counter can report the commit index and state root that a promotion proof
-would need to bind, but no current service durably couples that progress to the
-authority store, canonical promotion envelope, witness decision, or
-EffectGate. Consequently the repository does not claim end-to-end RPO 0,
-automatic recovery, or workload failover. No exact CI run is linked from this
-document, so the implementation and its tests are not labelled
-**CI-VERIFIED** here.
+This remains a shared-host lab slice, not an end-to-end HA service. It has no
+Witness, promotion, fencing, EffectGate, alternate writer, checkpointing, repair,
+recovery CLI, or multi-host workload daemon. The fixed primary can continue
+writing independently of lifecycle authority, so running it concurrently with
+promotion is unsupported. Distinct process roles and paths do not prove distinct
+disks, machines, or failure domains.
+
+The continuous slice reports commit index and state root, but does not durably
+couple that progress to the authority store, canonical promotion envelope,
+Witness decision, or EffectGate. Consequently it does not establish failover,
+automatic recovery, client-observed durable acknowledgement history, or
+production RPO 0. Exact-head CI evidence, when available, belongs in the Draft
+PR and retained workflow artifact; this static document does not preserve an
+older run as current evidence.
 
 Physical power, storage-cache, controller, independent-host, and network
 behavior is **PHYSICAL-REQUIRED**. Hosted-runner process tests remain

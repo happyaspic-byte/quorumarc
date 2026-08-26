@@ -139,6 +139,26 @@ impl FileReplica {
     pub fn read_all(&self) -> Result<Vec<u8>, ReplicaError> {
         read_file_or_empty(&self.path).map_err(ReplicaError::Io)
     }
+
+    pub fn recover_and_sync(&self) -> Result<(crate::RecoveredCounter, Vec<u8>), ReplicaError> {
+        let bytes = read_file_or_empty(&self.path).map_err(ReplicaError::Io)?;
+        let maximum = usize::try_from(crate::MAX_WAL_RECORDS)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(crate::codec::RECORD_LENGTH);
+        if bytes.len() > maximum {
+            return Err(ReplicaError::CorruptWal(
+                crate::WalCorruption::InvalidLength,
+            ));
+        }
+        let recovered = recover_wal(&bytes).map_err(ReplicaError::CorruptWal)?;
+        match File::open(&self.path) {
+            Ok(file) => file.sync_all().map_err(ReplicaError::Io)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && bytes.is_empty() => {}
+            Err(error) => return Err(ReplicaError::Io(error)),
+        }
+        sync_parent_directory(&self.path).map_err(ReplicaError::Io)?;
+        Ok((recovered, bytes))
+    }
 }
 
 impl ReplicaSink for FileReplica {
@@ -158,6 +178,12 @@ impl ReplicaSink for FileReplica {
             .open(&self.path)?;
         let mut existing = Vec::new();
         file.read_to_end(&mut existing)?;
+        let maximum = usize::try_from(crate::MAX_WAL_RECORDS)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(crate::codec::RECORD_LENGTH);
+        if existing.len() >= maximum && !existing.ends_with(canonical_record) {
+            return Err(ReplicaError::CapacityExceeded);
+        }
         // The first durability response can be lost. Only an exact canonical
         // record already at the validated WAL tail is an idempotent success;
         // changed or older retries remain fail-closed.

@@ -31,6 +31,7 @@ pub enum ReplicaError {
     InvalidReceipt,
     CorruptWal(WalCorruption),
     SequenceMismatch,
+    CapacityExceeded,
 }
 
 impl fmt::Display for ReplicaError {
@@ -43,6 +44,9 @@ impl fmt::Display for ReplicaError {
             Self::SequenceMismatch => {
                 formatter.write_str("replica WAL does not precede the proposed record")
             }
+            Self::CapacityExceeded => {
+                formatter.write_str("replica WAL record capacity is exhausted")
+            }
         }
     }
 }
@@ -52,7 +56,10 @@ impl std::error::Error for ReplicaError {
         match self {
             Self::Io(error) => Some(error),
             Self::CorruptWal(corruption) => Some(corruption),
-            Self::InjectedFailure | Self::InvalidReceipt | Self::SequenceMismatch => None,
+            Self::InjectedFailure
+            | Self::InvalidReceipt
+            | Self::SequenceMismatch
+            | Self::CapacityExceeded => None,
         }
     }
 }
@@ -67,6 +74,7 @@ impl From<io::Error> for ReplicaError {
 pub enum Rpo0Error {
     ZeroIncrement,
     CounterOverflow,
+    CapacityExceeded,
     StaleOperation {
         expected: u64,
         actual: u64,
@@ -93,6 +101,7 @@ impl fmt::Display for Rpo0Error {
         match self {
             Self::ZeroIncrement => formatter.write_str("counter increment must be positive"),
             Self::CounterOverflow => formatter.write_str("counter would overflow"),
+            Self::CapacityExceeded => formatter.write_str("WAL record capacity is exhausted"),
             Self::StaleOperation { expected, actual } => {
                 write!(
                     formatter,

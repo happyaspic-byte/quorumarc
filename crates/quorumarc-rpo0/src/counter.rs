@@ -35,6 +35,12 @@ pub struct CounterOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationPreflight {
+    Exact(AcknowledgedWrite),
+    Fresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgedWrite {
     pub operation_id: OperationId,
     pub commit_index: u64,
@@ -82,8 +88,22 @@ impl ReplicatedCounter {
         left: RecoveredCounter,
         right: RecoveredCounter,
     ) -> Result<Self, Rpo0Error> {
+        Self::from_recovered_with_replica_ids(left, right, "recovered-left", "recovered-right")
+    }
+
+    pub fn from_recovered_with_replica_ids(
+        left: RecoveredCounter,
+        right: RecoveredCounter,
+        left_replica_id: impl Into<String>,
+        right_replica_id: impl Into<String>,
+    ) -> Result<Self, Rpo0Error> {
         if left != right {
             return Err(Rpo0Error::RecoveryMismatch);
+        }
+        let left_replica_id = left_replica_id.into();
+        let right_replica_id = right_replica_id.into();
+        if left_replica_id == right_replica_id {
+            return Err(Rpo0Error::ReplicaIdentityCollision);
         }
         let operations = left
             .operations
@@ -96,12 +116,12 @@ impl ReplicatedCounter {
                     state_root: recovered.state_root,
                     replica_receipts: [
                         recovery_receipt(
-                            "recovered-left",
+                            &left_replica_id,
                             recovered.commit_index,
                             recovered.record_checksum,
                         ),
                         recovery_receipt(
-                            "recovered-right",
+                            &right_replica_id,
                             recovered.commit_index,
                             recovered.record_checksum,
                         ),
@@ -149,23 +169,7 @@ impl ReplicatedCounter {
         self.uncertain
     }
 
-    pub fn apply_available(
-        &mut self,
-        operation: CounterOperation,
-        left: Option<&mut dyn ReplicaSink>,
-        right: Option<&mut dyn ReplicaSink>,
-    ) -> Result<AcknowledgedWrite, Rpo0Error> {
-        let left = left.ok_or(Rpo0Error::ReplicaMissing("left"))?;
-        let right = right.ok_or(Rpo0Error::ReplicaMissing("right"))?;
-        self.apply(operation, left, right)
-    }
-
-    pub fn apply<L: ReplicaSink + ?Sized, R: ReplicaSink + ?Sized>(
-        &mut self,
-        operation: CounterOperation,
-        left: &mut L,
-        right: &mut R,
-    ) -> Result<AcknowledgedWrite, Rpo0Error> {
+    pub fn preflight(&self, operation: CounterOperation) -> Result<OperationPreflight, Rpo0Error> {
         if self.uncertain {
             return Err(Rpo0Error::UncertainDurability);
         }
@@ -173,7 +177,7 @@ impl ReplicatedCounter {
             if applied.increment == operation.increment
                 && applied.expected_commit_index == operation.expected_commit_index
             {
-                return Ok(applied.acknowledgement.clone());
+                return Ok(OperationPreflight::Exact(applied.acknowledgement.clone()));
             }
             return Err(Rpo0Error::ConflictingDuplicate(operation.id));
         }
@@ -191,6 +195,38 @@ impl ReplicatedCounter {
                 expected: operation.expected_commit_index,
                 actual: self.commit_index,
             });
+        }
+        if self.commit_index >= crate::MAX_WAL_RECORDS {
+            return Err(Rpo0Error::CapacityExceeded);
+        }
+        if self.commit_index.checked_add(1).is_none()
+            || self.value.checked_add(operation.increment).is_none()
+        {
+            return Err(Rpo0Error::CounterOverflow);
+        }
+        Ok(OperationPreflight::Fresh)
+    }
+
+    pub fn apply_available(
+        &mut self,
+        operation: CounterOperation,
+        left: Option<&mut dyn ReplicaSink>,
+        right: Option<&mut dyn ReplicaSink>,
+    ) -> Result<AcknowledgedWrite, Rpo0Error> {
+        let left = left.ok_or(Rpo0Error::ReplicaMissing("left"))?;
+        let right = right.ok_or(Rpo0Error::ReplicaMissing("right"))?;
+        self.apply(operation, left, right)
+    }
+
+    pub fn apply<L: ReplicaSink + ?Sized, R: ReplicaSink + ?Sized>(
+        &mut self,
+        operation: CounterOperation,
+        left: &mut L,
+        right: &mut R,
+    ) -> Result<AcknowledgedWrite, Rpo0Error> {
+        match self.preflight(operation)? {
+            OperationPreflight::Exact(acknowledgement) => return Ok(acknowledgement),
+            OperationPreflight::Fresh => {}
         }
         let left_replica_id = left.replica_id().to_owned();
         let right_replica_id = right.replica_id().to_owned();

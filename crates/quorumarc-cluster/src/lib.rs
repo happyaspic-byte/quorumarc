@@ -16,6 +16,7 @@
 
 mod auto_controller;
 mod bootstrap;
+mod continuous;
 mod fault_proxy;
 mod keys;
 mod lifecycle;
@@ -32,6 +33,10 @@ pub use auto_controller::{
     LifecycleControllerConfig, LifecycleControllerReport, run_lifecycle_controller,
 };
 pub use bootstrap::{BootstrapConfig, BootstrapReport, run_bootstrap};
+pub use continuous::{
+    ContinuousClient, ContinuousPrimaryConfig, ContinuousReplicaConfig, ContinuousSubmitOutcome,
+    serve_continuous_primary, serve_continuous_replica,
+};
 pub use fault_proxy::{FaultProxyConfig, serve_fault_proxy};
 pub use keys::{load_private_seed, load_public_key};
 pub use lifecycle::{

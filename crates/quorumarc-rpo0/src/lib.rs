@@ -16,9 +16,12 @@ mod counter;
 mod error;
 mod replica;
 
+pub const MAX_WAL_RECORDS: u64 = 1_024;
+
 pub use codec::{RecoveredCounter, RecoveredWrite, StateRoot, WalEntry, recover_wal};
 pub use counter::{
-    AcknowledgedWrite, CounterOperation, OperationId, ReplicatedCounter, WorkloadProgress,
+    AcknowledgedWrite, CounterOperation, OperationId, OperationPreflight, ReplicatedCounter,
+    WorkloadProgress,
 };
 pub use error::{ReplicaError, Rpo0Error, WalCorruption};
 pub use replica::{DurableReceipt, Fault, FileReplica, MemoryReplica, ReplicaSink};

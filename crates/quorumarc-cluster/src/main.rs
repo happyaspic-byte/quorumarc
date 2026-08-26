@@ -6,12 +6,15 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use quorumarc_cluster::{
-    BootstrapConfig, ClusterError, FaultProxyConfig, LifecycleControllerConfig,
+    BootstrapConfig, ClusterError, ContinuousClient, ContinuousPrimaryConfig,
+    ContinuousReplicaConfig, ContinuousSubmitOutcome, FaultProxyConfig, LifecycleControllerConfig,
     LifecycleNodeConfig, LifecycleNodeId, LifecycleStoreFault, LifecycleWitnessConfig, PeerConfig,
-    SelfTestConfig, WitnessConfig, lifecycle_policy_hash, run_bootstrap, run_lifecycle_controller,
-    run_self_test, serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness, serve_peer,
-    serve_witness,
+    SelfTestConfig, WitnessConfig, lifecycle_policy_hash, load_private_seed, load_public_key,
+    run_bootstrap, run_lifecycle_controller, run_self_test, serve_continuous_primary,
+    serve_continuous_replica, serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness,
+    serve_peer, serve_witness,
 };
+use quorumarc_rpo0::{CounterOperation, OperationId};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -317,13 +320,138 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
             }
             Ok(())
         }
+        "continuous-replica" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--listen",
+                    "--ready-file",
+                    "--wal",
+                    "--signing-key",
+                    "--primary-public-key",
+                    "--max-connections",
+                    "--timeout-ms",
+                    "--policy-byte",
+                ],
+                &["--allow-continuous-rpo0-lab"],
+            )?;
+            if !options.flag("--allow-continuous-rpo0-lab") {
+                return Err(cli_error(
+                    "continuous replica requires --allow-continuous-rpo0-lab",
+                ));
+            }
+            serve_continuous_replica(ContinuousReplicaConfig {
+                listen: options.socket("--listen")?,
+                ready_file: options.path("--ready-file")?,
+                wal_path: options.path("--wal")?,
+                signing_key_file: options.path("--signing-key")?,
+                primary_public_key_file: options.path("--primary-public-key")?,
+                max_connections: options.u64("--max-connections")?,
+                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+                policy_hash: [options.u8("--policy-byte")?; 32],
+            })
+        }
+        "continuous-primary" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--listen",
+                    "--ready-file",
+                    "--wal",
+                    "--signing-key",
+                    "--client-public-key",
+                    "--replica-public-key",
+                    "--replica",
+                    "--max-connections",
+                    "--timeout-ms",
+                    "--policy-byte",
+                ],
+                &["--allow-continuous-rpo0-lab"],
+            )?;
+            if !options.flag("--allow-continuous-rpo0-lab") {
+                return Err(cli_error(
+                    "continuous primary requires --allow-continuous-rpo0-lab",
+                ));
+            }
+            serve_continuous_primary(ContinuousPrimaryConfig {
+                listen: options.socket("--listen")?,
+                ready_file: options.path("--ready-file")?,
+                wal_path: options.path("--wal")?,
+                signing_key_file: options.path("--signing-key")?,
+                client_public_key_file: options.path("--client-public-key")?,
+                replica_public_key_file: options.path("--replica-public-key")?,
+                replica_address: options.socket("--replica")?,
+                max_connections: options.u64("--max-connections")?,
+                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+                policy_hash: [options.u8("--policy-byte")?; 32],
+            })
+        }
+        "continuous-submit" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--primary",
+                    "--primary-public-key",
+                    "--client-signing-key",
+                    "--operation-byte",
+                    "--expected-commit",
+                    "--increment",
+                    "--timeout-ms",
+                    "--policy-byte",
+                ],
+                &["--allow-continuous-rpo0-lab"],
+            )?;
+            if !options.flag("--allow-continuous-rpo0-lab") {
+                println!("code=CONTINUOUS_LAB_DISABLED");
+                return Err(cli_error(
+                    "continuous submit requires --allow-continuous-rpo0-lab",
+                ));
+            }
+            let mut client = ContinuousClient::new(
+                options.socket("--primary")?,
+                load_public_key(&options.path("--primary-public-key")?)?,
+                load_private_seed(&options.path("--client-signing-key")?)?,
+                Duration::from_millis(options.u64("--timeout-ms")?),
+                [options.u8("--policy-byte")?; 32],
+            );
+            let operation = CounterOperation {
+                id: OperationId::new([options.u8("--operation-byte")?; 16]),
+                expected_commit_index: options.u64_any("--expected-commit")?,
+                increment: options.u64_any("--increment")?,
+            };
+            match client.apply(operation) {
+                ContinuousSubmitOutcome::Acknowledged {
+                    operation_id,
+                    commit_index,
+                    value,
+                    state_root: _,
+                } => {
+                    println!(
+                        "code=CONTINUOUS_ACKNOWLEDGED operation_id={operation_id} commit_index={commit_index} value={value}"
+                    );
+                    Ok(())
+                }
+                ContinuousSubmitOutcome::Refused(error) => {
+                    println!("code=CONTINUOUS_REFUSED");
+                    Err(error)
+                }
+                ContinuousSubmitOutcome::Unknown(error) => {
+                    println!("code=CONTINUOUS_UNKNOWN");
+                    Err(error)
+                }
+                ContinuousSubmitOutcome::NotSubmitted(error) => {
+                    println!("code=CONTINUOUS_NOT_SUBMITTED");
+                    Err(error)
+                }
+            }
+        }
         _ => Err(cli_error("unknown mode")),
     }
 }
 
 fn print_help() {
     println!(
-        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-controller <required options> --allow-lifecycle-lab\n  quorumarc-cluster fault-proxy <required options> --allow-lifecycle-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe lifecycle controller and fault-proxy modes are bounded safety tests, not a\nproduction failure detector, trusted time source, or physical fence.",
+        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-controller <required options> --allow-lifecycle-lab\n  quorumarc-cluster fault-proxy <required options> --allow-lifecycle-lab\n  quorumarc-cluster continuous-replica <required options> --allow-continuous-rpo0-lab\n  quorumarc-cluster continuous-primary <required options> --allow-continuous-rpo0-lab\n  quorumarc-cluster continuous-submit <required options> --allow-continuous-rpo0-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe continuous modes are a fixed-primary two-copy counter slice without\nlifecycle authority, failover, fencing, or physical independence. They are not\na production RPO-0 or HA claim. The lifecycle controller and fault-proxy modes\nare bounded safety tests, not a production failure detector, trusted time\nsource, or physical fence.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -344,6 +472,7 @@ impl Options {
                 .ok_or_else(|| cli_error("argument index invalid"))?;
             if argument == "--allow-lab-genesis"
                 || argument == "--keep-state"
+                || argument == "--allow-continuous-rpo0-lab"
                 || argument == "--allow-lifecycle-lab"
                 || argument == "--emit-test-effect"
             {
@@ -406,9 +535,14 @@ impl Options {
             .map_err(|error| cli_error(format!("invalid {name}: {error}")))
     }
 
-    fn u64(&self, name: &str) -> Result<u64, ClusterError> {
+    fn u64_any(&self, name: &str) -> Result<u64, ClusterError> {
         self.value(name)?
             .parse::<u64>()
+            .map_err(|error| cli_error(format!("invalid {name}: {error}")))
+    }
+
+    fn u64(&self, name: &str) -> Result<u64, ClusterError> {
+        self.u64_any(name)
             .map_err(|error| cli_error(format!("invalid {name}: {error}")))
             .and_then(|value| {
                 if value == 0 {
@@ -430,6 +564,10 @@ impl Options {
     fn u32(&self, name: &str) -> Result<u32, ClusterError> {
         u32::try_from(self.u64(name)?)
             .map_err(|_| cli_error(format!("{name} must be at most 4294967295")))
+    }
+
+    fn u8(&self, name: &str) -> Result<u8, ClusterError> {
+        u8::try_from(self.u64(name)?).map_err(|_| cli_error(format!("{name} must be at most 255")))
     }
 
     fn u8_or(&self, name: &str, default: u8) -> Result<u8, ClusterError> {

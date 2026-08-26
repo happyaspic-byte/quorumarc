@@ -1,11 +1,11 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorumarc_rpo0::{
-    CounterOperation, Fault, FileReplica, MemoryReplica, OperationId, ReplicaSink,
-    ReplicatedCounter, Rpo0Error, WalCorruption, WalEntry, recover_wal,
+    CounterOperation, Fault, FileReplica, MemoryReplica, OperationId, OperationPreflight,
+    ReplicaSink, ReplicatedCounter, Rpo0Error, WalCorruption, WalEntry, recover_wal,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -16,6 +16,108 @@ fn operation(id: u8, expected_commit_index: u64, increment: u64) -> CounterOpera
         expected_commit_index,
         increment,
     }
+}
+
+#[test]
+fn preflight_classifies_exact_fresh_and_logical_refusals_without_io() {
+    let mut counter = ReplicatedCounter::new();
+    let mut left = MemoryReplica::new("left");
+    let mut right = MemoryReplica::new("right");
+    assert!(matches!(
+        counter.preflight(operation(1, 0, 5)),
+        Ok(OperationPreflight::Fresh)
+    ));
+    let acknowledged = counter
+        .apply(operation(1, 0, 5), &mut left, &mut right)
+        .expect("first write should be acknowledged");
+    match counter.preflight(operation(1, 0, 5)) {
+        Ok(OperationPreflight::Exact(exact)) => assert_eq!(exact, acknowledged),
+        other => panic!("expected exact acknowledgement, got {other:?}"),
+    }
+    assert!(matches!(
+        counter.preflight(operation(1, 0, 7)),
+        Err(Rpo0Error::ConflictingDuplicate(_))
+    ));
+    assert!(matches!(
+        counter.preflight(operation(2, 0, 1)),
+        Err(Rpo0Error::StaleOperation {
+            expected: 0,
+            actual: 1
+        })
+    ));
+    assert!(matches!(
+        counter.preflight(operation(2, 2, 1)),
+        Err(Rpo0Error::OutOfOrderOperation {
+            expected: 2,
+            actual: 1
+        })
+    ));
+    assert_eq!(left.append_count(), 1);
+    assert_eq!(right.append_count(), 1);
+}
+
+#[test]
+fn recovered_counter_uses_configured_replica_ids_for_exact_retry() {
+    let mut original = ReplicatedCounter::new();
+    let mut left = MemoryReplica::new("left");
+    let mut right = MemoryReplica::new("right");
+    original
+        .apply(operation(21, 0, 2), &mut left, &mut right)
+        .expect("write should be acknowledged");
+    let recovered = recover_wal(left.bytes()).expect("WAL should recover");
+    let restarted = ReplicatedCounter::from_recovered_with_replica_ids(
+        recovered.clone(),
+        recovered,
+        "node-a",
+        "node-b",
+    )
+    .expect("matching replicas should recover");
+    match restarted.preflight(operation(21, 0, 2)) {
+        Ok(OperationPreflight::Exact(acknowledgement)) => {
+            assert_eq!(acknowledgement.replica_receipts[0].replica_id, "node-a");
+            assert_eq!(acknowledgement.replica_receipts[1].replica_id, "node-b");
+        }
+        other => panic!("expected reconstructed exact acknowledgement, got {other:?}"),
+    }
+}
+
+#[test]
+fn record_capacity_refuses_fresh_1025th_write_before_replica_io() {
+    let mut counter = ReplicatedCounter::new();
+    let mut left = MemoryReplica::new("left");
+    let mut right = MemoryReplica::new("right");
+    for index in 0..quorumarc_rpo0::MAX_WAL_RECORDS {
+        let id = u8::try_from(index % 251 + 1).expect("bounded operation byte");
+        let mut bytes = [id; 16];
+        bytes[8..].copy_from_slice(&index.to_be_bytes());
+        counter
+            .apply(
+                CounterOperation {
+                    id: OperationId::new(bytes),
+                    expected_commit_index: index,
+                    increment: 1,
+                },
+                &mut left,
+                &mut right,
+            )
+            .expect("bounded write should be acknowledged");
+    }
+    let left_count = left.append_count();
+    let right_count = right.append_count();
+    assert!(matches!(
+        counter.preflight(operation(250, quorumarc_rpo0::MAX_WAL_RECORDS, 1)),
+        Err(Rpo0Error::CapacityExceeded)
+    ));
+    assert!(matches!(
+        counter.apply(
+            operation(250, quorumarc_rpo0::MAX_WAL_RECORDS, 1),
+            &mut left,
+            &mut right
+        ),
+        Err(Rpo0Error::CapacityExceeded)
+    ));
+    assert_eq!(left.append_count(), left_count);
+    assert_eq!(right.append_count(), right_count);
 }
 
 #[test]

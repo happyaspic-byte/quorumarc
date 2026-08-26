@@ -24,7 +24,7 @@ pub struct WalEntry {
 }
 
 impl WalEntry {
-    pub(crate) fn from_operation(
+    pub fn from_operation(
         commit_index: u64,
         previous_value: u64,
         operation: CounterOperation,
@@ -54,6 +54,13 @@ impl WalEntry {
         let checksum = crc32(&bytes);
         bytes.extend_from_slice(&checksum.to_be_bytes());
         bytes
+    }
+
+    pub fn record_checksum(&self) -> u32 {
+        let encoded = self.encode();
+        let mut checksum = [0_u8; CHECKSUM_LENGTH];
+        checksum.copy_from_slice(&encoded[RECORD_LENGTH - CHECKSUM_LENGTH..]);
+        u32::from_be_bytes(checksum)
     }
 }
 

@@ -63,7 +63,7 @@ failover and write-latency distributions do not exist.
 | Exact-head workspace tests | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the exact commit, run, inventory, and artifact | These are component/process results, not global scenario PASS results |
 | Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
 | Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
-| GitHub-hosted process | Long-running Node A/B plus Witness, separate automatic controller and Node/Witness fault proxies, alongside the earlier focused Witness and one-shot labs | Shared host, controller-supplied logical time, one pinned management key, test sink, no continuous A/B channel, and no trusted production failure detector |
+| GitHub-hosted process | Long-running Node A/B plus Witness, separate automatic controller and fault proxies, alongside the earlier one-shot labs and a separate fixed-primary continuous two-copy counter slice | Shared host; the continuous slice is not bound to lifecycle authority, fencing, Witness, EffectGate, failover, or independent failure domains |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for

@@ -112,6 +112,19 @@ jobs:
             } 2>&1 | tee -a safety-artifacts/lifecycle-process-repetitions.log
           done
 
+      - name: Repeat fixed-primary continuous RPO-0 process lab
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > safety-artifacts/continuous-rpo0-repetitions.log
+          for iteration in $(seq 1 8); do
+            {
+              echo "iteration=${iteration} suite=continuous-rpo0-fixed-primary"
+              cargo test --locked -p quorumarc-cluster --test continuous_process -- \
+                --nocapture --test-threads=1
+            } 2>&1 | tee -a safety-artifacts/continuous-rpo0-repetitions.log
+          done
+
       - name: Collect bounded automatic failover performance samples
         shell: bash
         run: |
