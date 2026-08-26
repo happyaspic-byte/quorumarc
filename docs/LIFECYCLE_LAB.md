@@ -1,13 +1,13 @@
-# Command-driven lifecycle laboratory
+# Lifecycle and automatic-controller laboratory
 
 ## Evidence boundary
 
 The lifecycle laboratory runs Node A, Node B, and an independent Witness as
 three long-lived `quorumarc-cluster` processes on one Ubuntu host. Node A and
 Node B use the same binary and differ only by identity, keys, paths, and
-configuration. It includes a deterministic automatic-failover decision state
-machine, but no autonomous scheduling service or production deployment
-profile.
+configuration. A separate fourth process executes the deterministic
+automatic-failover state machine. It is a bounded lab scheduler, not a trusted
+production deployment profile.
 
 The following claims are implemented in this laboratory:
 
@@ -28,6 +28,11 @@ The following claims are implemented in this laboratory:
 - an exact retry of the latest signed request returns the cached decision,
   while stale, cross-node, unsigned, tampered, or conflicting-ID requests are
   rejected before command execution;
+- a separate controller process authenticates both nodes' signed reports,
+  requires repeated failure observations, waits for the lease guard, and
+  executes only the selected signed promotion;
+- a lost promotion reply is retried only with the exact signed request, while
+  a signed promotion refusal or twice-ambiguous reply halts the controller;
 - expired leases, clock rollback, store poison, proof failure, and effect
   conflict close or keep closed the test effect sink;
 - an early promotion attempt is rejected before it can consume a Witness
@@ -40,10 +45,11 @@ The following claims are implemented in this laboratory:
   present in the two pre-seeded durable WALs is confirmed by the successor's
   signed response without another append; an unknown retry remains refused.
 
-The lab-only `LifecycleAutoController` consumes fresh signed Node A/B reports.
-It requires multiple failed Active probes, waits for the old exclusive lease
-and guard, verifies the candidate's pinned durable progress, and requires the
-Witness path before emitting a promotion attempt. A missed probe is only
+The lab-only `LifecycleAutoController` consumes fresh signed Node A/B reports,
+and `quorumarc-cluster lifecycle-controller` supplies those observations and
+executes its decision in a separate bounded process. It requires multiple
+failed Active probes, waits for the old exclusive lease and guard, and verifies
+the candidate's pinned durable progress before emitting a promotion attempt. A missed probe is only
 failure suspicion and is never treated as fencing. The candidate still has to
 obtain the durable Witness vote and pass the complete proof/EffectGate path.
 
@@ -69,16 +75,24 @@ The test uses a deterministic logical time domain:
 
 Epoch 2 therefore cannot activate before 1250 ms. This logical schedule makes
 the test reproducible and checks proof/gate ordering. It does not establish
-clock bounds across hosts and it is not a measured 250 ms failover claim.
+clock bounds across hosts, and the 250 ms logical stride is not itself a
+failover measurement.
 
 Lease renewal is deliberately absent. Heartbeats cannot extend authority. A
 new authority epoch requires another durable Witness vote and the exact
 replication progress expected by the capsule.
 
+Extended Safety repeats the controller `SIGKILL` path eight times, measures
+host elapsed time from fault injection to successor test effect, computes
+p50/p95/p99 with a declared sample count, and rejects p95 above 5 seconds. The
+artifact class is `bounded_logical_failover`; it is not client downtime or a
+physical RTO measurement.
+
 ## Service modes
 
-All three modes require explicit `--allow-lifecycle-lab`; they bind only to a
-loopback address and use bounded frames, connections, and I/O deadlines.
+All lifecycle, controller, and fault-proxy modes require explicit
+`--allow-lifecycle-lab`; they bind or connect only to loopback addresses and
+use bounded frames, connections, and I/O deadlines.
 
 ```text
 quorumarc-cluster lifecycle-witness \
@@ -120,6 +134,33 @@ Store and WAL ownership uses a persistent local lock inode with an OS advisory
 exclusive lock. A competing live process is refused, while `SIGKILL` releases
 the kernel lock so the same configured node can restart and allocate a newer
 durable incarnation. The lock is local coordination, not distributed fencing.
+
+The bounded automatic executor uses the controller private key whose public
+key is pinned by both nodes:
+
+```text
+quorumarc-cluster lifecycle-controller \
+  --node-a 127.0.0.1:NODE_A_PORT \
+  --node-b 127.0.0.1:NODE_B_PORT \
+  --node-a-public-key /lab/node-a.public \
+  --node-b-public-key /lab/node-b.public \
+  --controller-signing-key /lab/controller.seed \
+  --trace-file /lab/controller.trace \
+  --failure-threshold 2 \
+  --max-promotions 2 \
+  --logical-step-ms 10 \
+  --poll-ms 20 \
+  --timeout-ms 1000 \
+  --max-runtime-ms 5000 \
+  --emit-test-effect \
+  --allow-lifecycle-lab
+```
+
+The process starts at the canonical epoch-1 logical time and advances only by
+the declared deterministic step. Actual elapsed milliseconds are recorded
+separately and never substituted for trusted cross-host time. Each trace event
+is synced before the next decision. `--emit-test-effect` is explicit test-only
+validation; omitting it does not create an external workload effect.
 
 The optional test proxy is configured independently for each node. Its mode
 file must be a small regular non-symlink file containing `pass`, `drop`,
@@ -166,11 +207,10 @@ exclusive lease, so it self-fences before the test sink can record output.
 
 ## Important limitations
 
-- A deterministic state machine selects bootstrap and Active-loss promotion
-  attempts, but the test harness supplies signed observations, logical time,
-  Witness reachability, scheduling, and command execution. There is no
-  autonomous daemon, trusted failure detector, planned-switch workflow, or
-  production failback controller.
+- The bounded controller process selects and executes bootstrap and Active-loss
+  promotion attempts, but it supplies deterministic logical time and runs on
+  the same host. There is no trusted failure detector/time source,
+  planned-switch workflow, lease renewal, or production failback controller.
 - Control requests are loopback-only and authenticate one pinned controller
   key. There is no RBAC, operator identity, approval workflow, key rotation,
   audit journal, or network-facing TLS service. The bounded replay cache is

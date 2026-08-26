@@ -99,18 +99,72 @@ jobs:
             } 2>&1 | tee -a safety-artifacts/cluster-genesis-repetitions.log
           done
 
-      - name: Repeat command-driven A/B/Witness lifecycle lab
+      - name: Repeat A/B/Witness lifecycle and automatic controller lab
         shell: bash
         run: |
           set -Eeuo pipefail
           : > safety-artifacts/lifecycle-process-repetitions.log
           for iteration in $(seq 1 8); do
             {
-              echo "iteration=${iteration} suite=command-driven-lifecycle"
+              echo "iteration=${iteration} suite=lifecycle-and-auto-controller"
               cargo test --locked -p quorumarc-cluster --test lifecycle_process -- \
                 --nocapture --test-threads=1
             } 2>&1 | tee -a safety-artifacts/lifecycle-process-repetitions.log
           done
+
+      - name: Gate bounded logical failover percentiles
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          metrics_directory="$(mktemp -d)"
+          extract_metric() {
+            local metric_name="$1"
+            local metric_path="$2"
+            awk -v prefix="${metric_name}=" '{
+              for (field = 1; field <= NF; field++) {
+                if (index($field, prefix) == 1) {
+                  value = substr($field, length(prefix) + 1)
+                  sub(/[^0-9].*$/, "", value)
+                  if (value != "") print value
+                }
+              }
+            }' safety-artifacts/lifecycle-process-repetitions.log \
+              | sort -n > "${metric_path}"
+            test "$(wc -l < "${metric_path}")" -eq 8
+          }
+          percentile() {
+            local metric_path="$1"
+            local percent="$2"
+            local sample_count
+            sample_count="$(wc -l < "${metric_path}")"
+            local rank=$(( (sample_count * percent + 99) / 100 ))
+            sed -n "${rank}p" "${metric_path}"
+          }
+          failover_metric="${metrics_directory}/failover"
+          promotion_metric="${metrics_directory}/promotion"
+          effect_metric="${metrics_directory}/effect"
+          extract_metric failure_to_effect_ms "${failover_metric}"
+          extract_metric promotion_ms "${promotion_metric}"
+          extract_metric effect_ms "${effect_metric}"
+          failover_p50_ms="$(percentile "${failover_metric}" 50)"
+          failover_p95_ms="$(percentile "${failover_metric}" 95)"
+          failover_p99_ms="$(percentile "${failover_metric}" 99)"
+          {
+            echo "metric=bounded_logical_failover"
+            echo "scope=github_shared_host_controller_supplied_logical_time_test_sink"
+            echo "samples=8"
+            echo "failure_to_effect_p50_ms=${failover_p50_ms}"
+            echo "failure_to_effect_p95_ms=${failover_p95_ms}"
+            echo "failure_to_effect_p99_ms=${failover_p99_ms}"
+            echo "promotion_p50_ms=$(percentile "${promotion_metric}" 50)"
+            echo "promotion_p95_ms=$(percentile "${promotion_metric}" 95)"
+            echo "promotion_p99_ms=$(percentile "${promotion_metric}" 99)"
+            echo "effect_p50_ms=$(percentile "${effect_metric}" 50)"
+            echo "effect_p95_ms=$(percentile "${effect_metric}" 95)"
+            echo "effect_p99_ms=$(percentile "${effect_metric}" 99)"
+            echo "maximum_failure_to_effect_p95_ms=5000"
+          } | tee safety-artifacts/lifecycle-failover-percentiles.log
+          test "${failover_p95_ms}" -le 5000
 
       - name: Repeat durable-store crash recovery
         shell: bash

@@ -33,13 +33,53 @@ final promotion envelope, policy, commit/root, and durable state before one
 in-memory test effect. This is **IMPLEMENTED**, but remains a fixed epoch-1
 localhost integration rather than a deployment protocol.
 
-That loopback exchange is not the deployment control plane. General network
-listeners, mutual transport authentication, encryption, a peer handshake,
-general Node A/B replication traffic, retry/backoff policy, membership
-discovery, long-running authority transfer, and automatic promotion remain
+That one-shot exchange is not the deployment control plane. A separate bounded
+localhost lifecycle protocol now provides signed long-running Node A/B reports,
+commands, automatic-controller execution, and Witness authority transfer.
+General network listeners, mutual TLS, transport encryption, a peer handshake,
+continuous Node A/B replication traffic, production retry/backoff policy,
+membership discovery, and a durable multi-operator management plane remain
 **NOT-IMPLEMENTED**. Network and hardware failure claims remain
 **PHYSICAL-REQUIRED** where identified in
 [the failure matrix](FAILURE_MATRIX.md).
+
+## Bounded lifecycle control frames
+
+The lifecycle lab uses fixed-size big-endian schemas inside the bounded frame
+codec. A signed command is exactly 124 bytes:
+
+| Field | Bytes |
+|---|---:|
+| Magic `QALCMD\0\0` | 8 |
+| Version | 2 |
+| Request ID | 16 |
+| Command tag | 1 |
+| Logical time | 8 |
+| Epoch | 8 |
+| Stable operation ID | 16 |
+| Target node tag | 1 |
+| Ed25519 signature | 64 |
+
+The request ID has eight `0x51` domain bytes followed by a non-zero monotonic
+u64 counter. The command signature uses the
+`quorumarc/lifecycle/command/ed25519/v1\0` domain and binds the target node.
+Unused epoch/operation fields must be canonical zero. The live node accepts a
+strictly newer counter, returns the cached signed decision for the exact latest
+request, and rejects an older counter or same counter with changed content.
+This anti-replay state is process-local and is not a durable management
+session.
+
+A signed response is exactly 174 bytes. Its 110-byte unsigned portion contains
+magic `QALRSP\0\0`, version, exact request ID, node, reason, state, durable
+epoch/incarnation/store generation, effect count, commit index, state root, and
+lease expiry. The trailing 64-byte Ed25519 signature uses the
+`quorumarc/lifecycle/response/ed25519/v1\0` domain. The controller rejects a
+response that does not bind both the request ID and expected node.
+
+The bounded automatic executor retries a lost promotion response only by
+re-sending the exact signed command. A second ambiguous transport result halts;
+a signed refusal also halts rather than inventing authority or issuing a changed
+same-epoch proposal.
 
 ## Canonical scalar encoding
 

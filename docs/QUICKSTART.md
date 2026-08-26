@@ -76,4 +76,4 @@ preparation remains in [lab setup](LAB_SETUP.md).
 The long-running Node A/B/Witness test is intentionally separate from this
 non-destructive quick check. Its service modes, fixed logical timing, scenario
 coverage, and safety limitations are documented in the
-[command-driven lifecycle laboratory](LIFECYCLE_LAB.md).
+[lifecycle and automatic-controller laboratory](LIFECYCLE_LAB.md).

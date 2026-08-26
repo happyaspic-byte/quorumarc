@@ -6,10 +6,11 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use quorumarc_cluster::{
-    BootstrapConfig, ClusterError, FaultProxyConfig, LifecycleNodeConfig, LifecycleNodeId,
-    LifecycleStoreFault, LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig,
-    lifecycle_policy_hash, run_bootstrap, run_self_test, serve_fault_proxy, serve_lifecycle_node,
-    serve_lifecycle_witness, serve_peer, serve_witness,
+    BootstrapConfig, ClusterError, FaultProxyConfig, LifecycleControllerConfig,
+    LifecycleNodeConfig, LifecycleNodeId, LifecycleStoreFault, LifecycleWitnessConfig, PeerConfig,
+    SelfTestConfig, WitnessConfig, lifecycle_policy_hash, run_bootstrap, run_lifecycle_controller,
+    run_self_test, serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness, serve_peer,
+    serve_witness,
 };
 
 fn main() -> ExitCode {
@@ -161,6 +162,53 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 policy_hash,
             })
         }
+        "lifecycle-controller" => {
+            let options = Options::parse(rest)?;
+            options.ensure_allowed(
+                &[
+                    "--node-a",
+                    "--node-b",
+                    "--node-a-public-key",
+                    "--node-b-public-key",
+                    "--controller-signing-key",
+                    "--trace-file",
+                    "--failure-threshold",
+                    "--max-promotions",
+                    "--logical-step-ms",
+                    "--poll-ms",
+                    "--timeout-ms",
+                    "--max-runtime-ms",
+                ],
+                &["--allow-lifecycle-lab", "--emit-test-effect"],
+            )?;
+            require_lifecycle_opt_in(&options)?;
+            let report = run_lifecycle_controller(LifecycleControllerConfig {
+                node_a_address: options.socket("--node-a")?,
+                node_b_address: options.socket("--node-b")?,
+                node_a_public_key_file: options.path("--node-a-public-key")?,
+                node_b_public_key_file: options.path("--node-b-public-key")?,
+                controller_signing_key_file: options.path("--controller-signing-key")?,
+                trace_file: options.path("--trace-file")?,
+                failure_threshold: options.u32("--failure-threshold")?,
+                max_promotions: options.u64("--max-promotions")?,
+                logical_step_ms: options.u64("--logical-step-ms")?,
+                poll_interval: Duration::from_millis(options.u64("--poll-ms")?),
+                io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
+                max_runtime: Duration::from_millis(options.u64("--max-runtime-ms")?),
+                emit_test_effect: options.flag("--emit-test-effect"),
+            })?;
+            println!(
+                "code=LIFECYCLE_CONTROLLER_COMPLETE promotions={} final_active={} final_epoch={} effects={} elapsed_ms={} final_promotion_ms={} final_effect_ms={}",
+                report.promotions,
+                report.final_active.as_str(),
+                report.final_epoch,
+                report.final_effect_count,
+                report.elapsed_ms,
+                report.final_promotion_ms,
+                report.final_effect_ms
+            );
+            Ok(())
+        }
         "fault-proxy" => {
             let options = Options::parse(rest)?;
             options.ensure_allowed(
@@ -269,7 +317,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
 
 fn print_help() {
     println!(
-        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n  quorumarc-cluster fault-proxy <required options> --allow-lifecycle-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe lifecycle and fault-proxy modes are bounded safety tests, not an autonomous\nproduction failover controller, trusted time source, or physical fence.",
+        "quorumarc-cluster {}\n\nUSAGE:\n  quorumarc-cluster self-test --allow-lab-genesis [--root PATH] [--keep-state] [--timeout-ms N] [--startup-timeout-ms N]\n  quorumarc-cluster peer <required options>\n  quorumarc-cluster witness <required options>\n  quorumarc-cluster bootstrap <required options> --allow-lab-genesis\n  quorumarc-cluster lifecycle-node <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-witness <required options> --allow-lifecycle-lab\n  quorumarc-cluster lifecycle-controller <required options> --allow-lifecycle-lab\n  quorumarc-cluster fault-proxy <required options> --allow-lifecycle-lab\n\nSAFE QUICK CHECK:\n  quorumarc-cluster self-test --allow-lab-genesis\n\nThe cluster modes are bounded localhost Gate 1A laboratory functions.\nThe lifecycle controller and fault-proxy modes are bounded safety tests, not a\nproduction failure detector, trusted time source, or physical fence.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -291,6 +339,7 @@ impl Options {
             if argument == "--allow-lab-genesis"
                 || argument == "--keep-state"
                 || argument == "--allow-lifecycle-lab"
+                || argument == "--emit-test-effect"
             {
                 if flags.iter().any(|value| value == argument) {
                     return Err(cli_error("duplicate flag"));
@@ -370,6 +419,11 @@ impl Options {
         } else {
             Ok(default)
         }
+    }
+
+    fn u32(&self, name: &str) -> Result<u32, ClusterError> {
+        u32::try_from(self.u64(name)?)
+            .map_err(|_| cli_error(format!("{name} must be at most 4294967295")))
     }
 
     fn u8_or(&self, name: &str, default: u8) -> Result<u8, ClusterError> {

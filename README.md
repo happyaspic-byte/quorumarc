@@ -9,8 +9,8 @@ quorum, fencing or safe lease expiry, durable state, health, time, and policy.
 
 > Status: **Gate 1A foundation under development.** The repository contains
 > tested protocol, storage, runtime, RPO-0 demonstration, and process-lab
-> components and a deterministic automatic-decision state machine, but it does
-> not yet implement an autonomous trusted failure detector/executor or a
+> components plus a bounded automatic-controller process, but it does not yet
+> implement a production trusted failure detector, durable management plane, or
 > production EffectGate. Production readiness, zero downtime, and completed
 > physical validation are not claimed.
 
@@ -46,8 +46,8 @@ flowchart TD
 5. Missing or ambiguous evidence closes the gate; it never fails open.
 
 These invariants are currently checked within the scopes of individual
-components and the compact model. A command-driven three-process lifecycle now
-tests a bounded subset against the logical sink, but automatic and physically
+components and the compact model. A three-process lifecycle and separate
+bounded controller now test automatic execution against the logical sink, but physically
 enforced end-to-end failover remains unproven. See the
 [safety model](docs/SAFETY.md), [Gate 1A scope](docs/GATE1A.md), and
 [failure matrix](docs/FAILURE_MATRIX.md). The exact lifecycle boundary is in
@@ -64,7 +64,7 @@ enforced end-to-end failover remains unproven. See the
 | `quorumarc-runtime` | Bounded frames, durable Witness actor, and test EffectGate sink | Component runtime only |
 | `quorumarc-rpo0` | Two-replica WAL-backed monotonic-counter demonstration | Demonstration workload, not a general database |
 | `quorumarc-lab` | Real localhost TCP Witness process and deterministic fault cases | No complete Node A/Node B active-writer lifecycle |
-| `quorumarc-cluster` | Same-binary genesis, long-running Node A/B/Witness lifecycle, and bounded fault-proxy modes | Authenticated shared-host lab with deterministic decisions; no autonomous or production authority claim |
+| `quorumarc-cluster` | Same-binary genesis, long-running Node A/B/Witness lifecycle, automatic-controller process, and bounded fault-proxy modes | Authenticated shared-host lab with deterministic logical time; no trusted production authority claim |
 | `quorumarc-agent` | Safe-default inspection/refusal CLI | Automatic promotion deliberately disabled |
 | `quorumarc-witness` | Safe-default Witness inspection/refusal CLI | No production network voting service |
 
@@ -72,10 +72,10 @@ enforced end-to-end failover remains unproven. See the
 
 | Classification | Current status |
 |---|---|
-| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, bounded genesis, authenticated long-running A/B/Witness lifecycle, and deterministic repeated-probe/lease-guard automatic decisions |
+| Implemented in source | Canonical signed wire format, durable authority store, Witness actor/process lab, RPO-0 demo, logical/test EffectGate, safe-default CLIs, bounded genesis, authenticated long-running A/B/Witness lifecycle, and a separate bounded repeated-probe/lease-guard automatic executor |
 | Latest exact-head compact model | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the depth-12 report and artifact for its exact head; the counts apply only to that model revision and assumptions |
 | Partially verified on GitHub-hosted Ubuntu | Component tests, a Witness child process over localhost TCP, bounded/malformed input handling, idempotent voting, and declared store crash points |
-| Not yet end-to-end verified | Autonomous election/failure detection, enforced external effects, continuous live replication/client writes, production-class all-scenario traces, and physical validation |
+| Not yet end-to-end verified | Trusted production election/failure detection, enforced external effects, continuous live replication/client writes, production-class all-scenario traces, and physical validation |
 | Requires physical equipment | Independent failure domains, real NIC/switch faults, BMC/PDU or storage fencing, VIP movement, hardware clock behavior, and client-observed outage |
 
 Exact test inventory, repetitions, coverage, model counts, commit, workflow,
@@ -114,11 +114,12 @@ inventory, model report, coverage report, and scenario-by-scenario evidence.
 
 ## Primary unresolved blocker
 
-The bounded genesis and lifecycle modes join data nodes and a Witness through
+The bounded genesis, lifecycle, and controller modes join data nodes and a Witness through
 signed envelopes, durable authority transitions, fixed logical lease guards,
-and a test-sink effect. The lifecycle modes test Active process failure and
-authority transfer, but do not implement automatic failure detection, lease
-renewal, trusted time, continuous data replication, or real fencing. The normal
+and a test-sink effect. The controller executes automatic Active-process
+failure detection and authority transfer in a bounded shared-host lab, but does
+not implement lease renewal, trusted time, continuous data replication, durable
+management replay state, or real fencing. The normal
 agent still reports
 `ACTIVATION_CONTROL_PLANE_UNAVAILABLE` and remains closed.
 

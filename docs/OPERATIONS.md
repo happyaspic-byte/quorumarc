@@ -21,11 +21,11 @@ the [quick start](QUICKSTART.md).
 
 | Class | Current repository state |
 |---|---|
-| **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; single-process durable witness actor library; core logical EffectGate; in-memory test sink; status/refusal command shells; bounded strict agent configuration subset |
+| **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; durable Witness actor; long-running localhost Node A/B/Witness lab services; bounded automatic-controller process; core logical EffectGate; in-memory test sink; status/refusal command shells; bounded strict agent configuration subset |
 | **CI-VERIFIED** | Nothing is asserted here without a linked successful run for the exact commit |
 | **SIMULATED** | Deterministic model, injected storage faults, in-process clock/effect fixtures, and future hosted-runner fault analogues |
 | **PHYSICAL-REQUIRED** | Independent failure domains, power/NIC/switch faults, real clock bounds, endpoint movement, actual BMC/PDU/storage/eBPF/device fencing and negative tests |
-| **NOT-IMPLEMENTED** | Agent/witness daemons, complete live peer protocol, automatic promotion, general TOML configuration and schema migration, admin/status API, real EffectGate/fence adapters, key-management commands, membership changes, backup/restore tooling |
+| **NOT-IMPLEMENTED** | Production agent/Witness/controller daemons, continuous live replication protocol, trusted automatic promotion, general TOML configuration and schema migration, admin/status API, real EffectGate/fence adapters, key-management commands, membership changes, backup/restore tooling |
 
 `quorumarc-agent` always reports `effect_gate=closed` and refuses promotion or
 activation. `quorumarc-witness` reports voting disabled and refuses vote or
@@ -34,6 +34,11 @@ accepts `automatic_promotion = true` as configuration input, but that value only
 changes its status/refusal context: it does not authorize activation, open the
 EffectGate, or make `run` succeed. Do not replace these fail-closed shells with
 an ad-hoc orchestration script.
+
+The separate `quorumarc-cluster lifecycle-controller` mode does execute bounded
+automatic promotions for the shared-host logical-time laboratory. It requires
+explicit lab opt-in and does not change the safe-default production-agent
+refusal described above. See [the lifecycle lab](LIFECYCLE_LAB.md).
 
 ## Current agent configuration subset
 

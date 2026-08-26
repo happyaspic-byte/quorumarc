@@ -28,6 +28,10 @@ not declare the row passed as an integrated failover scenario.
   the Witness through separate bounded, frame-aware localhost proxies. The
   proxies inject declared drop, delay, duplicate, reply-loss, corruption, and
   stale-request modes without terminating or reconfiguring the Witness.
+- **AUTOMATIC EXECUTOR SOURCE:** a separate bounded controller process
+  authenticates Node A/B reports, requires repeated failure observations,
+  advances a declared deterministic logical clock, waits for lease plus guard,
+  and executes the selected signed promotion against the test EffectGate.
 - **NOT INTEGRATED:** no complete three-role Active/Standby scenario exists.
 - **PHYSICAL-ONLY:** the literal hardware assertion requires independent hosts
   or a real fence/effect adapter.
@@ -48,8 +52,8 @@ and production enforcement remain separate validation classes.
 
 | # | Scenario | Present limited evidence | Evidence status / missing exit condition |
 |---:|---|---|---|
-| 1 | Normal boot and first Active selection | The model and one-shot lab cover bootstrap; the lifecycle starts both Standbys and command-selects one signed Active | MODEL; THREE-PROCESS LAB; LIFECYCLE PROCESS SOURCE — command-driven selection is not automatic election |
-| 2 | Active process `SIGKILL` | The lifecycle kills an effective Active; a deterministic controller requires two failed probes, lease plus guard, candidate progress, and Witness availability before selecting and executing Standby promotion | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE; AUTOMATIC-DECISION SOURCE — harness scheduling, test sink, and logical clock only |
+| 1 | Normal boot and first Active selection | The model and one-shot lab cover bootstrap; the separate controller observes both Standbys and automatically executes Node A's signed epoch-1 promotion | MODEL; THREE-PROCESS LAB; LIFECYCLE PROCESS SOURCE; AUTOMATIC EXECUTOR SOURCE — deterministic shared-host bootstrap, not a production election |
+| 2 | Active process `SIGKILL` | The controller opens one Node A test effect, observes the killed process through repeated signed probes, waits to logical 1250 ms, and automatically promotes/effects Node B through the durable Witness path | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE; AUTOMATIC EXECUTOR SOURCE — deterministic controller time and test sink only |
 | 3 | Graceful Active shutdown | The lifecycle closes and exits the Active, still withholding transfer until safe expiry | WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE — no production planned-switch controller |
 | 4 | Standby process shutdown | The lifecycle stops a real Standby and verifies the Active test effect remains singular | MODEL; LIFECYCLE PROCESS SOURCE — continuous RPO-0 writes are not integrated |
 | 5 | Witness shutdown | The lifecycle kills the Witness and obtains a signed node refusal with zero effects | MODEL; WITNESS PROCESS SOURCE; LIFECYCLE PROCESS SOURCE |

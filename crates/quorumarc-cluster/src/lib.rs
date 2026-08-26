@@ -1,10 +1,11 @@
 //! Bounded, localhost-only three-process integrations.
 //!
 //! The one-shot path exercises one RPO-0 demonstration write and bootstrap
-//! activation. The command-driven lifecycle path keeps identical Node A/B
-//! services and a durable Witness alive across signed, lease-guarded authority
-//! transfers and process faults. It is deliberately not an automatic failover
-//! controller, production fence, trusted clock, or proof of global uniqueness.
+//! activation. The lifecycle path keeps identical Node A/B services and a
+//! durable Witness alive across signed, lease-guarded authority transfers and
+//! process faults. A separate bounded process executes automatic lab decisions,
+//! but it is not a production controller, fence, trusted clock, or proof of
+//! global uniqueness.
 
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
@@ -13,6 +14,7 @@
 #![deny(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
+mod auto_controller;
 mod bootstrap;
 mod fault_proxy;
 mod keys;
@@ -26,6 +28,9 @@ mod witness;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+pub use auto_controller::{
+    LifecycleControllerConfig, LifecycleControllerReport, run_lifecycle_controller,
+};
 pub use bootstrap::{BootstrapConfig, BootstrapReport, run_bootstrap};
 pub use fault_proxy::{FaultProxyConfig, serve_fault_proxy};
 pub use keys::{load_private_seed, load_public_key};

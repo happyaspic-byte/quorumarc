@@ -109,6 +109,7 @@ struct Lab {
     node_a_proxy_address: Option<SocketAddr>,
     node_b_proxy_address: Option<SocketAddr>,
     node_a_address: SocketAddr,
+    node_b_address: SocketAddr,
     node_a: Option<Child>,
     node_b: Option<Child>,
     node_a_client: LifecycleClient,
@@ -168,6 +169,7 @@ impl Lab {
             node_a_proxy_address,
             node_b_proxy_address,
             node_a_address,
+            node_b_address,
             node_a: Some(node_a),
             node_b: Some(node_b),
             node_a_client: LifecycleClient::new(
@@ -495,6 +497,66 @@ fn automatic_controller_requires_detection_lease_guard_and_witness() {
     assert!(effect.reason_code.effect_succeeded());
     eprintln!(
         "scenario=2 name=automatic_active_sigkill seed=1 class=github-process-autofailover status=PASS single_writer_violations=0 acknowledged_write_loss=0"
+    );
+}
+
+#[test]
+fn autonomous_controller_process_executes_bounded_sigkill_failover() {
+    let mut lab = Lab::start(
+        "controller-process-sigkill",
+        NodeSpec::normal(),
+        NodeSpec::normal(),
+    );
+    let trace_path = lab.fixture.root.join("controller.trace");
+    let mut controller = spawn_auto_controller(&lab, &trace_path);
+    wait_for_trace(
+        &trace_path,
+        "event=controller_effect node=node-a epoch=1",
+        &mut controller,
+    );
+    let failover_started = Instant::now();
+    lab.kill_node_a();
+    let output = controller.wait_with_output().expect("collect controller");
+    let failure_to_effect_ms = failover_started.elapsed().as_millis();
+    if !output.status.success() {
+        let node_b_log = kill_and_collect(&mut lab.node_b);
+        let witness_log = kill_and_collect(&mut lab.witness);
+        panic!(
+            "controller failed: {}\nnode-b:\n{node_b_log}\nwitness:\n{witness_log}\ntrace:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(&trace_path).unwrap_or_else(|error| error.to_string())
+        );
+    }
+    let trace = fs::read_to_string(&trace_path).expect("read controller trace");
+    assert!(trace.contains(
+        "event=controller_promotion node=node-a epoch=1 now_ms=1000 code=LIFECYCLE_PROMOTED promotions=1 "
+    ));
+    assert!(trace.contains("decision=WAITING_FOR_LEASE_GUARD"));
+    assert!(trace.contains(
+        "event=controller_promotion node=node-b epoch=2 now_ms=1250 code=LIFECYCLE_PROMOTED promotions=2 "
+    ));
+    assert!(trace.contains(
+        "event=controller_effect node=node-b epoch=2 code=LIFECYCLE_EFFECT_RECORDED effects=1 "
+    ));
+    assert!(trace.contains("event=controller_complete node=node-b epoch=2"));
+    assert_eq!(trace.matches("event=controller_promotion node=").count(), 2);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(
+        "code=LIFECYCLE_CONTROLLER_COMPLETE promotions=2 final_active=node-b final_epoch=2 effects=1"
+    ));
+    let promotion_ms = trace_metric(
+        &trace,
+        "event=controller_promotion node=node-b epoch=2",
+        "promotion_ms",
+    );
+    let effect_ms = trace_metric(
+        &trace,
+        "event=controller_effect node=node-b epoch=2",
+        "effect_ms",
+    );
+    kill_child(&mut lab.node_b);
+    eprintln!(
+        "scenario=2 name=autonomous_controller_process_sigkill seed=1 class=github-process-auto-executor status=PASS single_writer_violations=0 acknowledged_write_loss=0 metric=bounded_logical_failover failure_to_effect_ms={failure_to_effect_ms} promotion_ms={promotion_ms} effect_ms={effect_ms} logical_successor_epoch=2"
     );
 }
 
@@ -1325,6 +1387,54 @@ fn spawn_node(
         .expect("spawn lifecycle node")
 }
 
+fn spawn_auto_controller(lab: &Lab, trace: &Path) -> Child {
+    Command::new(binary())
+        .arg("lifecycle-controller")
+        .arg("--node-a")
+        .arg(lab.node_a_address.to_string())
+        .arg("--node-b")
+        .arg(lab.node_b_address.to_string())
+        .arg("--node-a-public-key")
+        .arg(&lab.fixture.node_a_public)
+        .arg("--node-b-public-key")
+        .arg(&lab.fixture.node_b_public)
+        .arg("--controller-signing-key")
+        .arg(&lab.fixture.controller_seed)
+        .arg("--trace-file")
+        .arg(trace)
+        .arg("--failure-threshold")
+        .arg("2")
+        .arg("--max-promotions")
+        .arg("2")
+        .arg("--logical-step-ms")
+        .arg("10")
+        .arg("--poll-ms")
+        .arg("20")
+        .arg("--timeout-ms")
+        .arg("1000")
+        .arg("--max-runtime-ms")
+        .arg("5000")
+        .arg("--emit-test-effect")
+        .arg("--allow-lifecycle-lab")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn automatic lifecycle controller")
+}
+
+fn trace_metric(trace: &str, event_prefix: &str, metric: &str) -> u128 {
+    let line = trace
+        .lines()
+        .find(|line| line.starts_with(event_prefix))
+        .unwrap_or_else(|| panic!("missing trace event: {event_prefix}"));
+    let prefix = format!("{metric}=");
+    line.split_ascii_whitespace()
+        .find_map(|field| field.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("missing trace metric {metric}: {line}"))
+        .parse::<u128>()
+        .unwrap_or_else(|error| panic!("invalid trace metric {metric}: {error}"))
+}
+
 fn wait_ready(path: &Path, child: &mut Child) -> SocketAddr {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1339,6 +1449,21 @@ fn wait_ready(path: &Path, child: &mut Child) -> SocketAddr {
         );
         assert!(Instant::now() < deadline, "service readiness timed out");
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_trace(path: &Path, expected: &str, child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if fs::read_to_string(path).is_ok_and(|trace| trace.contains(expected)) {
+            return;
+        }
+        assert!(
+            child.try_wait().expect("inspect controller").is_none(),
+            "controller exited before expected trace: {expected}"
+        );
+        assert!(Instant::now() < deadline, "controller trace timed out");
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -1416,6 +1541,21 @@ fn kill_child(child: &mut Option<Child>) {
     };
     let _kill = child.kill();
     let _wait = child.wait();
+}
+
+fn kill_and_collect(child: &mut Option<Child>) -> String {
+    let Some(mut child) = child.take() else {
+        return String::new();
+    };
+    let _kill = child.kill();
+    match child.wait_with_output() {
+        Ok(output) => format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => format!("collect failed: {error}"),
+    }
 }
 
 fn stop_live_node(client: &mut LifecycleClient, child: &mut Option<Child>) {

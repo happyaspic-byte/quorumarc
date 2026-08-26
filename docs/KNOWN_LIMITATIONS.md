@@ -6,13 +6,14 @@ The completed safety baseline is Gate 0: in-memory promotion validation, logical
 EffectGate transitions, and a deliberately compact single-view model. Gate 1A
 adds a substantial **component foundation**—wire, durable store, Witness
 runtime, RPO-0 demonstration, process harness, and refusal CLIs—but does not yet
-connect those pieces into a complete automatic three-role failover system. A
+connect those pieces into a production automatic three-role failover system. A
 bounded lab composes a peer, Witness, and explicitly enabled bootstrap process
 for one lab-genesis activation. A second command-driven lifecycle lab keeps
 Node A, Node B, and the Witness alive across multiple authority epochs. A
-deterministic state machine now selects safe-window bootstrap and Active-loss
-promotion attempts, but the harness still supplies probes, scheduling, logical
-time, and command execution; it is not an autonomous failover service.
+deterministic state machine and separate bounded process now select and execute
+safe-window bootstrap and Active-loss promotion attempts. The controller still
+supplies lab logical time and shares the host; it is not a trusted production
+failover service.
 The release binary can now orchestrate that same bounded transaction through a
 one-command self-test. This removes manual fixture assembly only; the separate
 lifecycle modes add test authority transfer but no topology independence or
@@ -25,9 +26,9 @@ promotion-store failures against a generation-scoped test sink. The control
 command is signed by one pinned lab controller key, supplies logical time, and
 initiates each transition. Its anti-replay cache is process-local and covers
 the latest request only; it is not a durable multi-operator management plane.
-Consequently, autonomous promotion, trusted failure detection, externally enforced global
+Consequently, trusted production failure detection, externally enforced global
 single-writer safety, and end-to-end client-observed RPO-0 remain unimplemented
-claims.
+claims even though the bounded lab now executes automatic promotion.
 
 The localhost process lab runs a real Witness child and exchanges authenticated,
 bounded frames. It includes focused kill/restart, conflict, replay, concurrency,
@@ -49,7 +50,9 @@ production-readiness claim. Lifecycle source tests now cover 24 required
 scenario IDs and the one-shot A/B proxy covers the remaining ID in shared-host
 validation classes; exact-head GitHub success is tracked in the Draft PR.
 Physical enforcement and production end-to-end PASS classes remain incomplete.
-p50/p95/p99 automatic failover and write-latency measurements do not exist.
+Extended Safety computes p50/p95/p99 only for the bounded logical-time
+controller path; client-observed failover and write-latency distributions do
+not exist.
 
 ## Evidence classification and current measurements
 
@@ -58,7 +61,7 @@ p50/p95/p99 automatic failover and write-latency measurements do not exist.
 | Exact-head workspace tests | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the exact commit, run, inventory, and artifact | These are component/process results, not global scenario PASS results |
 | Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
 | Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
-| GitHub-hosted process | Long-running Node A/B plus Witness, separate Node/Witness fault proxies, and deterministic automatic-failover decisions, alongside the earlier focused Witness and one-shot labs | Shared host, controller-supplied probes/logical time/scheduling, test sink, no continuous A/B channel, and no autonomous trusted failure detector |
+| GitHub-hosted process | Long-running Node A/B plus Witness, separate automatic controller and Node/Witness fault proxies, alongside the earlier focused Witness and one-shot labs | Shared host, controller-supplied logical time, one pinned management key, test sink, no continuous A/B channel, and no trusted production failure detector |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for
@@ -78,7 +81,7 @@ fail-closed and have no automatic migration.
 
 The lifecycle lab connects those transitions through identical Node A/B
 services and the Witness using a fixed logical lease schedule and test
-EffectGate. Trusted time, real fencing, continuous replication, automatic
+EffectGate. Trusted time, real fencing, continuous replication, production
 control, and external enforcement are still absent. The safe-default agent is
 not wired to this lab and continues to refuse `run` with
 `ACTIVATION_CONTROL_PLANE_UNAVAILABLE`.
@@ -103,9 +106,10 @@ not wired to this lab and continues to refuse `run` with
 
 Even after all GitHub-hosted Gate 1A acceptance tests pass, the following remain:
 
-The current branch has not yet reached that condition: automatic promotion,
-physical fencing, all 25 required scenarios, aggregate critical-path coverage,
-and timing distributions remain incomplete.
+The current branch has not yet reached that condition: physical fencing,
+production-class all-scenario evidence, aggregate critical-path coverage, and
+timing distributions remain incomplete. Automatic promotion exists only in the
+bounded logical-time lab.
 
 ### One-shot genesis scope
 
@@ -255,13 +259,13 @@ Do not describe the current or GitHub-only build as:
 
 ## Path to reducing these limitations
 
-1. Integrate the separated proposal/final-digest durable material with trusted
-   time, fencing, lease activation, and the EffectGate without weakening the
-   CLI refusals.
-2. Integrate identical Node A/B agents, the Witness, RPO-0 commit evidence, and
-   the EffectGate into one automatic-promotion lab path.
-3. Complete all three-process scenarios in `FAILURE_MATRIX.md` with replayable
-   traces and green CI.
+1. Replace controller-supplied logical time and the test EffectGate with trusted
+   time, real fence read-back, and an I/O-bound adapter without weakening the
+   existing proof and durable-activation ordering.
+2. Integrate continuous live RPO-0 client acknowledgement, replication, repair,
+   and resynchronization with the automatic lifecycle path.
+3. Elevate all shared-host scenarios in `FAILURE_MATRIX.md` to retained
+   production-class traces and green exact-head CI evidence.
 4. Measure and publish coverage and latency distributions from linked CI runs;
    do not estimate missing values or weaken safety conditions to meet targets.
 5. Run the ordinary Ubuntu desktop A/B plus independent Witness lab in

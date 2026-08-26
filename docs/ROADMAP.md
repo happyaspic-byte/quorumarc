@@ -8,7 +8,8 @@
 - Continuity Capsule and canonical proof schema design.
 - TLA+ model before real automatic promotion.
 
-Exit rule: no live automatic failover capability is shipped.
+Exit rule: no production/live-workload automatic failover capability is shipped
+from Gate 0. The later Gate 1A controller remains explicit lab-only code.
 
 ## Gate 1 — Linux service continuity
 

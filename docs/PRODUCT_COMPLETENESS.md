@@ -17,13 +17,13 @@ implemented and physically validated.
 | Product dimension | Required QuorumArc outcome | Current evidence |
 |---|---|---|
 | Safe authority | Signed proof binds quorum, fence/expiry, lease, policy, health, commit and root | Component and bounded one-shot lab; v3 authority stores are bound to cluster/workload/node/role/store ID |
-| Automatic lifecycle | Long-running identical A/B agents perform election, failover and safe failback | Long-running lifecycle plus deterministic repeated-probe/lease-guard decision state machine implemented; harness scheduling/execution remains and no autonomous daemon exists |
+| Automatic lifecycle | Long-running identical A/B agents perform election, failover and safe failback | A separate bounded process now authenticates reports and executes repeated-probe/lease-guard promotion; trusted time, durable management state, lease renewal, planned switch, and production failback remain |
 | External uniqueness | At least one real enforced endpoint/effect adapter plus verified fence read-back | Not implemented |
 | Data continuity | Named synchronous workload profiles with a durable client-ack boundary and recovery proof | Counter component demonstration only |
 | Setup | Validated package, configuration wizard, one-command preflight and rollback-safe upgrade | One-command bounded self-test implemented; installer not implemented |
-| Operations | Local Web/API status, topology, alarms, reason codes, receipts and guided repair | CLI diagnostics only |
+| Operations | Local Web/API status, topology, alarms, reason codes, receipts and guided repair | CLI diagnostics plus synced bounded-controller decision traces; no API/Web console |
 | Workload coverage | systemd and container profiles first; KVM and supported databases later | Not implemented |
-| Security lifecycle | Provisioning, least privilege, rotation, revocation, SBOM, provenance and independent review | Candidate/Witness plus pinned-controller command authentication, latest-request replay handling, and CI dependency checks; no RBAC, durable management replay state, rotation workflow, SBOM/provenance, or independent review |
+| Security lifecycle | Provisioning, least privilege, rotation, revocation, SBOM, provenance and independent review | Candidate/Witness plus pinned-controller command authentication, process-local latest-request replay handling, and CI dependency checks; no RBAC, durable management replay state, rotation workflow, SBOM/provenance, or independent review |
 | Availability evidence | 25 integrated scenarios, latency percentiles, zero single-writer violations and zero acknowledged loss | Shared-host source paths cover 25/25, including bounded replication/Witness faults and crash restart; exact-head, end-to-end, timing, and physical evidence remain required |
 | Physical evidence | Two data hosts, independent Witness, NIC/switch/power/storage/fence/VIP campaigns | Not performed |
 | Serviceability | Backup, restore, node replacement, upgrade, rollback, support bundle and runbooks | Read-only identity-aware proof/store inspection plus documentation sketches |

@@ -14,16 +14,17 @@ Passing the first lab does not imply that the second has passed.
 
 ## GitHub-hosted Gate 1A topology
 
-The intended workflow starts the same lab binary in Node A/bootstrap, Node
-B/peer, and Witness modes. Role selection is explicit configuration, not
-election. Each receives a unique loopback address or port, role-appropriate
+The intended workflow starts the same lab binary in Node A, Node B, Witness,
+and bounded controller modes. Node identities are explicit configuration; the
+controller deterministically selects Node A for bootstrap and later uses safe
+epoch transfer rules. Each receives a unique loopback address or port, role-appropriate
 test key material, and a separate durable directory. A deterministic
 user-space fault proxy is preferred when privileged namespaces are unreliable on
 hosted runners.
 
 ```mermaid
 flowchart TD
-    T["Fault controller"] --> A["Node A process"]
+    T["Bounded controller / fault injector"] --> A["Node A process"]
     T --> B["Node B process"]
     T --> W["Witness process"]
     A --> S["Generation-aware test sink"]
