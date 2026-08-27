@@ -1,6 +1,7 @@
 # TWO-HOST-SHARED-WITNESS-LAB campaign
 
 - Date: 2026-08-27
+- Exact commit: e1eb07e
 - Class: TWO-HOST-SHARED-WITNESS-LAB
 - Node A: 172.30.1.22
 - Node B: 172.30.1.21
