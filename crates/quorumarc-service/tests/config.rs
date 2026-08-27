@@ -1,6 +1,12 @@
 #![allow(clippy::expect_used)]
 
+use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use quorumarc_service::config::{ConfigError, ProductionConfig};
+
+static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 const VALID: &str = r#"
 schema_version = "1"
@@ -218,4 +224,75 @@ fn production_reload_swaps_log_level_and_refuses_safety_changes() {
         current.reload(&fence),
         Err(ConfigError::UnsafeReload)
     ));
+}
+
+#[test]
+fn production_prerequisites_refuse_missing_store_and_signing_key() {
+    let config = ProductionConfig::parse(VALID).expect("valid production config");
+    assert!(matches!(
+        config.verify_local_prerequisites(),
+        Err(ConfigError::StoreUnavailable)
+    ));
+}
+
+#[test]
+fn production_prerequisites_accept_restricted_store_and_key() {
+    let (directory, config) = isolated_production_config();
+    let store = directory.join("store");
+    let key = directory.join("node.seed");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    fs::write(&key, [7_u8; 32]).expect("key");
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("key mode");
+    let config = ProductionConfig::parse(&config).expect("parse");
+    config
+        .verify_local_prerequisites()
+        .expect("restricted store and key");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_prerequisites_refuse_group_readable_key_and_symlink_store() {
+    let (directory, config_text) = isolated_production_config();
+    let store = directory.join("store");
+    let key = directory.join("node.seed");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    fs::write(&key, [7_u8; 32]).expect("key");
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).expect("group readable");
+    let config = ProductionConfig::parse(&config_text).expect("parse");
+    assert!(matches!(
+        config.verify_local_prerequisites(),
+        Err(ConfigError::SigningKeyUnavailable)
+    ));
+
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("restore key");
+    let alias = directory.join("alias-store");
+    let _ = fs::remove_dir(&store);
+    fs::create_dir(&alias).expect("alias");
+    fs::set_permissions(&alias, fs::Permissions::from_mode(0o700)).expect("alias mode");
+    symlink(&alias, &store).expect("symlink store");
+    assert!(matches!(
+        config.verify_local_prerequisites(),
+        Err(ConfigError::StoreUnavailable)
+    ));
+    let _ = fs::remove_dir_all(directory);
+}
+
+fn isolated_production_config() -> (std::path::PathBuf, String) {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-prereq-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let store = directory.join("store");
+    let key = directory.join("node.seed");
+    let text = VALID
+        .replace(
+            "/var/lib/quorumarc/authority",
+            store.to_str().expect("utf8"),
+        )
+        .replace("/etc/quorumarc/node-a.seed", key.to_str().expect("utf8"));
+    (directory, text)
 }

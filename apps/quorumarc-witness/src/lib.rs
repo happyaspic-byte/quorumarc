@@ -414,6 +414,14 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
         );
         return write_error_exit(result, EXIT_UNAVAILABLE);
     }
+    if let Err(error) = config.verify_local_prerequisites() {
+        let result = writeln!(
+            stderr,
+            "refused=true reason={} voting=false effect_gate=closed",
+            error.reason_code()
+        );
+        return write_error_exit(result, EXIT_UNAVAILABLE);
+    }
     let clock = match quorumarc_service::clock::BootClock::open_system() {
         Ok(clock) => clock,
         Err(_error) => {

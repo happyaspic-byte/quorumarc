@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,6 +50,31 @@ failure_domain = "power-w"
 "#;
 
 #[test]
+fn production_daemon_refuses_missing_store_and_signing_key() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-prereq-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, PRODUCTION_CONFIG)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(!output.status.success());
+    assert!(stderr.contains("CONFIG_STORE_UNAVAILABLE"));
+    assert!(stderr.contains("\"effect_gate\":\"closed\""));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
+#[test]
 fn production_daemon_stays_effect_closed_until_sigterm_drain() -> Result<(), Box<dyn Error>> {
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
@@ -57,7 +83,8 @@ fn production_daemon_stays_effect_closed_until_sigterm_drain() -> Result<(), Box
     ));
     fs::create_dir_all(&directory)?;
     let config = directory.join("agent.toml");
-    fs::write(&config, PRODUCTION_CONFIG)?;
+    let config_text = production_config_with_prerequisites(&directory)?;
+    fs::write(&config, &config_text)?;
 
     let socket = directory.join("status.sock");
     let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
@@ -103,7 +130,8 @@ fn production_daemon_reloads_log_level_and_refuses_unsafe_sighup() -> Result<(),
     ));
     fs::create_dir_all(&directory)?;
     let config = directory.join("agent.toml");
-    fs::write(&config, PRODUCTION_CONFIG)?;
+    let config_text = production_config_with_prerequisites(&directory)?;
+    fs::write(&config, &config_text)?;
     let socket = directory.join("status.sock");
     let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
         .args(["daemon", "--config"])
@@ -121,7 +149,7 @@ fn production_daemon_reloads_log_level_and_refuses_unsafe_sighup() -> Result<(),
 
     fs::write(
         &config,
-        PRODUCTION_CONFIG.replace(
+        config_text.replace(
             "automatic_promotion = true",
             "automatic_promotion = true\nlog_level = \"debug\"",
         ),
@@ -134,7 +162,12 @@ fn production_daemon_reloads_log_level_and_refuses_unsafe_sighup() -> Result<(),
 
     fs::write(
         &config,
-        PRODUCTION_CONFIG.replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\""),
+        config_text
+            .replace(
+                "automatic_promotion = true",
+                "automatic_promotion = true\nlog_level = \"debug\"",
+            )
+            .replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\""),
     )?;
     send_signal(child.id(), "-HUP")?;
     thread::sleep(Duration::from_millis(200));
@@ -162,7 +195,7 @@ fn production_daemon_pings_systemd_watchdog_without_ready_state() -> Result<(), 
     ));
     fs::create_dir_all(&directory)?;
     let config = directory.join("agent.toml");
-    fs::write(&config, PRODUCTION_CONFIG)?;
+    fs::write(&config, production_config_with_prerequisites(&directory)?)?;
     let notify_socket = directory.join("notify.sock");
     let listener = std::os::unix::net::UnixDatagram::bind(&notify_socket)?;
     listener.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -187,6 +220,26 @@ fn production_daemon_pings_systemd_watchdog_without_ready_state() -> Result<(), 
     assert!(output.status.success());
     let _ = fs::remove_dir_all(directory);
     Ok(())
+}
+
+fn production_config_with_prerequisites(
+    directory: &std::path::Path,
+) -> Result<String, Box<dyn Error>> {
+    let store = directory.join("store");
+    let key = directory.join("node.seed");
+    fs::create_dir(&store)?;
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700))?;
+    fs::write(&key, [7_u8; 32])?;
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
+    Ok(PRODUCTION_CONFIG
+        .replace(
+            "/var/lib/quorumarc/authority",
+            store.to_str().ok_or("utf8")?,
+        )
+        .replace(
+            "/etc/quorumarc/secrets/node-a.seed",
+            key.to_str().ok_or("utf8")?,
+        ))
 }
 
 fn send_signal(pid: u32, signal: &str) -> Result<(), Box<dyn Error>> {

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -72,6 +73,8 @@ pub enum ConfigError {
     InvalidTopology,
     LocalIdentityMismatch,
     WitnessEndpointMismatch,
+    StoreUnavailable,
+    SigningKeyUnavailable,
     UnsafeReload,
     InvalidValue(String),
     MissingField(String),
@@ -96,6 +99,8 @@ impl ConfigError {
             Self::InvalidTopology => "CONFIG_INVALID_TOPOLOGY",
             Self::LocalIdentityMismatch => "CONFIG_LOCAL_IDENTITY_MISMATCH",
             Self::WitnessEndpointMismatch => "CONFIG_WITNESS_ENDPOINT_MISMATCH",
+            Self::StoreUnavailable => "CONFIG_STORE_UNAVAILABLE",
+            Self::SigningKeyUnavailable => "CONFIG_SIGNING_KEY_UNAVAILABLE",
             Self::UnsafeReload => "CONFIG_UNSAFE_RELOAD",
             Self::InvalidValue(_) => "CONFIG_INVALID_VALUE",
             Self::MissingField(_) => "CONFIG_MISSING_FIELD",
@@ -234,6 +239,29 @@ impl ProductionConfig {
         }
 
         Ok(config)
+    }
+
+    /// Verifies local store and private-key prerequisites without reading key material.
+    pub fn verify_local_prerequisites(&self) -> Result<(), ConfigError> {
+        let store = std::fs::symlink_metadata(&self.store_dir)
+            .map_err(|_error| ConfigError::StoreUnavailable)?;
+        if !store.file_type().is_dir()
+            || store.file_type().is_symlink()
+            || store.permissions().mode() & 0o077 != 0
+        {
+            return Err(ConfigError::StoreUnavailable);
+        }
+
+        let key = std::fs::symlink_metadata(&self.signing_key)
+            .map_err(|_error| ConfigError::SigningKeyUnavailable)?;
+        if !key.file_type().is_file()
+            || key.file_type().is_symlink()
+            || key.permissions().mode() & 0o077 != 0
+            || key.len() != 32
+        {
+            return Err(ConfigError::SigningKeyUnavailable);
+        }
+        Ok(())
     }
 
     /// Reloads only non-safety fields after a complete re-parse.

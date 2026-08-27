@@ -708,6 +708,14 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     EXIT_CONFIG,
                 );
             }
+            if let Err(error) = config.verify_local_prerequisites() {
+                return CliReport::refusal(
+                    "daemon",
+                    error.reason_code(),
+                    "local store or signing key prerequisites are unavailable",
+                    EXIT_CONFIG,
+                );
+            }
             let clock = match quorumarc_service::clock::BootClock::open_system() {
                 Ok(clock) => clock,
                 Err(_error) => {

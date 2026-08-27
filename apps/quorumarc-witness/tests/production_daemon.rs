@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,7 +58,7 @@ fn production_witness_daemon_stays_nonvoting_until_sigterm_drain() -> Result<(),
     ));
     fs::create_dir_all(&directory)?;
     let config = directory.join("witness.toml");
-    fs::write(&config, WITNESS_CONFIG)?;
+    fs::write(&config, witness_config_with_prerequisites(&directory)?)?;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-witness"))
         .args(["daemon", "--config"])
@@ -95,7 +96,8 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
     ));
     fs::create_dir_all(&directory)?;
     let config = directory.join("witness.toml");
-    fs::write(&config, WITNESS_CONFIG)?;
+    let config_text = witness_config_with_prerequisites(&directory)?;
+    fs::write(&config, &config_text)?;
     let socket = directory.join("status.sock");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-witness"))
@@ -114,7 +116,7 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
 
     fs::write(
         &config,
-        WITNESS_CONFIG.replace(
+        config_text.replace(
             "automatic_promotion = false",
             "automatic_promotion = false\nlog_level = \"debug\"",
         ),
@@ -132,7 +134,12 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
 
     fs::write(
         &config,
-        WITNESS_CONFIG.replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\""),
+        config_text
+            .replace(
+                "automatic_promotion = false",
+                "automatic_promotion = false\nlog_level = \"debug\"",
+            )
+            .replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\""),
     )?;
     assert!(
         Command::new("kill")
@@ -159,6 +166,26 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
     assert!(stdout.contains("WITNESS_DAEMON_STOPPED_NONVOTING"));
     let _ = fs::remove_dir_all(directory);
     Ok(())
+}
+
+fn witness_config_with_prerequisites(
+    directory: &std::path::Path,
+) -> Result<String, Box<dyn Error>> {
+    let store = directory.join("store");
+    let key = directory.join("witness.seed");
+    fs::create_dir(&store)?;
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700))?;
+    fs::write(&key, [9_u8; 32])?;
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
+    Ok(WITNESS_CONFIG
+        .replace(
+            "/var/lib/quorumarc-witness/control",
+            store.to_str().ok_or("utf8")?,
+        )
+        .replace(
+            "/etc/quorumarc/secrets/witness-a.seed",
+            key.to_str().ok_or("utf8")?,
+        ))
 }
 
 fn read_status(socket: &std::path::Path) -> Result<String, Box<dyn Error>> {
