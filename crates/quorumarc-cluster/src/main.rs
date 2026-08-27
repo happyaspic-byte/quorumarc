@@ -253,11 +253,14 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--mode-file",
                     "--max-connections",
                     "--timeout-ms",
+                    "--expected-peer-ip",
                 ],
                 &["--allow-lifecycle-lab", "--allow-private-lan-lab"],
             )?;
             require_lifecycle_opt_in(&options)?;
             serve_fault_proxy(FaultProxyConfig {
+                bind_policy: lifecycle_bind_policy(&options)?,
+                expected_peer_ips: expected_peer_ips(&options)?,
                 listen: options.socket("--listen")?,
                 ready_file: options.path("--ready-file")?,
                 upstream: options.socket("--upstream")?,

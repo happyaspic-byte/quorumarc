@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use quorumarc_runtime::FrameCodec;
 
+use crate::lab_net::{LabBindPolicy, account_lab_peer, ensure_lab_bind};
 use crate::path_guard::{prepare_file_parent, require_ready_disjoint, write_ready_file};
 use crate::{ClusterError, err};
 
@@ -17,6 +18,8 @@ const MAX_DELAY_MS: u64 = 1_000;
 /// Bounded loopback fault-proxy settings for the GitHub lifecycle laboratory.
 #[derive(Clone, Debug)]
 pub struct FaultProxyConfig {
+    pub bind_policy: LabBindPolicy,
+    pub expected_peer_ips: Vec<std::net::IpAddr>,
     pub listen: SocketAddr,
     pub ready_file: PathBuf,
     pub upstream: SocketAddr,
@@ -44,8 +47,7 @@ enum ProxyMode {
 /// proxy can delay, duplicate, drop, corrupt, replay, or reorder opaque frames
 /// but cannot create valid authority evidence.
 pub fn serve_fault_proxy(config: FaultProxyConfig) -> Result<(), ClusterError> {
-    ensure_loopback(config.listen)?;
-    ensure_loopback(config.upstream)?;
+    ensure_fault_proxy_addresses(&config)?;
     ensure_bounds(config.max_connections, config.io_timeout)?;
     require_ready_disjoint(
         &config.ready_file,
@@ -65,7 +67,7 @@ pub fn serve_fault_proxy(config: FaultProxyConfig) -> Result<(), ClusterError> {
     let local = listener
         .local_addr()
         .map_err(|error| err("FAULT_PROXY_BIND_FAILED", error.to_string()))?;
-    ensure_loopback(local)?;
+    ensure_lab_bind(config.bind_policy, local)?;
     let codec = FrameCodec::new(MAX_PROXY_FRAME)
         .map_err(|error| err("FAULT_PROXY_FRAME_CONFIG_FAILED", error.to_string()))?;
     write_ready_file(&config.ready_file, &local.to_string())?;
@@ -81,8 +83,13 @@ pub fn serve_fault_proxy(config: FaultProxyConfig) -> Result<(), ClusterError> {
         let (mut downstream, remote) = listener
             .accept()
             .map_err(|error| err("FAULT_PROXY_ACCEPT_FAILED", error.to_string()))?;
-        remaining -= 1;
-        if !remote.ip().is_loopback() {
+        if let Err(error) = account_lab_peer(
+            &mut remaining,
+            config.bind_policy,
+            remote,
+            &config.expected_peer_ips,
+        ) {
+            eprintln!("event=fault_proxy_peer_refusal {error}");
             continue;
         }
         configure_stream(&downstream, config.io_timeout)?;
@@ -206,13 +213,13 @@ fn reorder_pair(
     eprintln!("event=fault_proxy_reorder_buffered");
     let (mut second_downstream, second_remote) =
         accept_loopback_partner(listener, config.io_timeout)?;
-    *remaining -= 1;
-    if !second_remote.ip().is_loopback() {
-        return Err(err(
-            "FAULT_PROXY_REORDER_REFUSED",
-            "reorder partner was not loopback",
-        ));
-    }
+    account_lab_peer(
+        remaining,
+        config.bind_policy,
+        second_remote,
+        &config.expected_peer_ips,
+    )
+    .map_err(|error| err("FAULT_PROXY_REORDER_REFUSED", error.to_string()))?;
     configure_stream(&second_downstream, config.io_timeout)?;
     let second_request = read_downstream_request(&mut second_downstream, codec)?;
     let second_response = upstream_exchange(config, codec, &second_request)?;
@@ -390,14 +397,9 @@ fn parse_mode(value: &str) -> Result<ProxyMode, ClusterError> {
     }
 }
 
-fn ensure_loopback(address: SocketAddr) -> Result<(), ClusterError> {
-    if !address.ip().is_loopback() {
-        return Err(err(
-            "NON_LOOPBACK_REFUSED",
-            format!("{address} is outside the bounded localhost fault lab"),
-        ));
-    }
-    Ok(())
+fn ensure_fault_proxy_addresses(config: &FaultProxyConfig) -> Result<(), ClusterError> {
+    ensure_lab_bind(config.bind_policy, config.listen)?;
+    ensure_lab_bind(config.bind_policy, config.upstream)
 }
 
 fn ensure_bounds(max_connections: u64, timeout: Duration) -> Result<(), ClusterError> {
@@ -459,5 +461,57 @@ mod tests {
         assert!(ensure_bounds(1, Duration::ZERO).is_err());
         assert!(ensure_bounds(1, Duration::from_secs(11)).is_err());
         ensure_bounds(1, Duration::from_millis(1)).expect("valid bounds");
+    }
+
+    fn proxy_config(listen: SocketAddr, upstream: SocketAddr) -> FaultProxyConfig {
+        FaultProxyConfig {
+            bind_policy: LabBindPolicy::LoopbackOnly,
+            expected_peer_ips: Vec::new(),
+            listen,
+            ready_file: PathBuf::from("/tmp/fault-proxy.ready"),
+            upstream,
+            mode_file: PathBuf::from("/tmp/fault-proxy.mode"),
+            max_connections: 1,
+            io_timeout: Duration::from_millis(1),
+        }
+    }
+
+    #[test]
+    fn loopback_fault_proxy_rejects_private_lan_bind() {
+        let config = proxy_config(
+            SocketAddr::from(([172, 30, 1, 22], 9)),
+            SocketAddr::from(([127, 0, 0, 1], 10)),
+        );
+        assert_eq!(
+            ensure_fault_proxy_addresses(&config)
+                .expect_err("lan bind refused")
+                .reason_code(),
+            "NON_LOOPBACK_REFUSED"
+        );
+    }
+
+    #[test]
+    fn private_lan_fault_proxy_accepts_pinned_172_30_1_hosts_and_rejects_public() {
+        let mut config = proxy_config(
+            SocketAddr::from(([172, 30, 1, 22], 9)),
+            SocketAddr::from(([172, 30, 1, 21], 10)),
+        );
+        config.bind_policy = LabBindPolicy::PrivateLan;
+        ensure_fault_proxy_addresses(&config).expect("private lan bind");
+        config.listen = SocketAddr::from(([0, 0, 0, 0], 9));
+        assert_eq!(
+            ensure_fault_proxy_addresses(&config)
+                .expect_err("unspecified refused")
+                .reason_code(),
+            "PRIVATE_LAN_ADDRESS_REFUSED"
+        );
+        config.listen = SocketAddr::from(([8, 8, 8, 8], 9));
+        config.upstream = SocketAddr::from(([172, 30, 1, 21], 10));
+        assert_eq!(
+            ensure_fault_proxy_addresses(&config)
+                .expect_err("public refused")
+                .reason_code(),
+            "PRIVATE_LAN_ADDRESS_REFUSED"
+        );
     }
 }

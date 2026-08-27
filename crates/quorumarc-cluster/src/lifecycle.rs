@@ -33,7 +33,7 @@ use quorumarc_wire::{
 use sha2::{Digest, Sha256};
 
 use crate::keys::{load_private_seed, load_public_key, require_distinct_role_keys};
-use crate::lab_net::{LabBindPolicy, ensure_lab_bind, ensure_lab_peer};
+use crate::lab_net::{LabBindPolicy, account_lab_peer, ensure_lab_bind};
 use crate::path_guard::{
     OwnerLock, prepare_file_parent, prepare_store_directory, require_disjoint_store_and_file,
     require_keys_disjoint, require_ready_disjoint, write_ready_file,
@@ -1200,6 +1200,16 @@ impl LifecycleClient {
         now_ms: u64,
         operation: CounterOperation,
     ) -> Result<LifecycleReport, ClusterError> {
+        self.retry_workload_with_timeout(epoch, now_ms, operation, self.timeout)
+    }
+
+    pub(crate) fn retry_workload_with_timeout(
+        &mut self,
+        epoch: u64,
+        now_ms: u64,
+        operation: CounterOperation,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
         self.issue(
             OutboundCommand {
                 kind: CommandKind::RetryWorkload,
@@ -1209,7 +1219,7 @@ impl LifecycleClient {
                 expected_commit_index: operation.expected_commit_index,
                 increment: operation.increment,
             },
-            self.timeout,
+            timeout,
         )
     }
 
@@ -2000,9 +2010,15 @@ pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterEr
         LifecycleState::Standby.as_str()
     );
 
-    for _ in 0..config.max_connections {
+    let mut remaining = config.max_connections;
+    while remaining > 0 {
         let (mut stream, remote) = accept(&listener, "LIFECYCLE_NODE_ACCEPT_FAILED")?;
-        if let Err(error) = ensure_lab_peer(config.bind_policy, remote, &config.expected_peer_ips) {
+        if let Err(error) = account_lab_peer(
+            &mut remaining,
+            config.bind_policy,
+            remote,
+            &config.expected_peer_ips,
+        ) {
             eprintln!("event=lifecycle_node_peer_refusal {error}");
             continue;
         }
@@ -2145,9 +2161,15 @@ pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), Clu
         node_b_key,
     };
 
-    for _ in 0..config.max_connections {
+    let mut remaining = config.max_connections;
+    while remaining > 0 {
         let (mut stream, remote) = accept(&listener, "LIFECYCLE_WITNESS_ACCEPT_FAILED")?;
-        if let Err(error) = ensure_lab_peer(config.bind_policy, remote, &config.expected_peer_ips) {
+        if let Err(error) = account_lab_peer(
+            &mut remaining,
+            config.bind_policy,
+            remote,
+            &config.expected_peer_ips,
+        ) {
             eprintln!("event=lifecycle_witness_peer_refusal {error}");
             continue;
         }

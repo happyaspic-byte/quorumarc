@@ -63,7 +63,7 @@ pub fn ensure_lab_peer(
     expected_ips: &[IpAddr],
 ) -> Result<(), ClusterError> {
     ensure_lab_bind(policy, remote)?;
-    if remote.ip().is_loopback() {
+    if policy == LabBindPolicy::LoopbackOnly && remote.ip().is_loopback() {
         return Ok(());
     }
     if expected_ips.contains(&remote.ip()) {
@@ -74,6 +74,25 @@ pub fn ensure_lab_peer(
             format!("{} is not an expected laboratory source", remote.ip()),
         ))
     }
+}
+
+/// Validates peer source pinning and decrements the remaining connection budget
+/// only on successful admission.
+pub(crate) fn account_lab_peer(
+    remaining: &mut u64,
+    policy: LabBindPolicy,
+    remote: SocketAddr,
+    expected_ips: &[IpAddr],
+) -> Result<(), ClusterError> {
+    if *remaining == 0 {
+        return Err(err(
+            "LAB_CONNECTION_BUDGET_EXHAUSTED",
+            "laboratory connection budget exhausted",
+        ));
+    }
+    ensure_lab_peer(policy, remote, expected_ips)?;
+    *remaining = remaining.saturating_sub(1);
+    Ok(())
 }
 
 fn private_lan_host(ip: IpAddr) -> bool {
@@ -175,6 +194,49 @@ mod tests {
                 .reason_code(),
             "PRIVATE_LAN_ADDRESS_REFUSED"
         );
+        assert_eq!(
+            ensure_lab_peer(policy, addr([127, 0, 0, 1], 9), &expected)
+                .expect_err("unpinned loopback")
+                .reason_code(),
+            "PRIVATE_LAN_PEER_REFUSED"
+        );
+        let loopback_expected = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        ensure_lab_peer(policy, addr([127, 0, 0, 1], 9), &loopback_expected)
+            .expect("pinned loopback");
+    }
+
+    #[test]
+    fn refused_peers_do_not_consume_connection_budget() {
+        let policy = LabBindPolicy::from_flags(true, true).expect("private lan lab");
+        let expected = [IpAddr::V4(Ipv4Addr::new(172, 30, 1, 22))];
+        let mut remaining = 1_u64;
+        assert_eq!(
+            account_lab_peer(&mut remaining, policy, addr([127, 0, 0, 1], 9), &expected)
+                .expect_err("unpinned loopback")
+                .reason_code(),
+            "PRIVATE_LAN_PEER_REFUSED"
+        );
+        assert_eq!(remaining, 1);
+        account_lab_peer(
+            &mut remaining,
+            policy,
+            addr([172, 30, 1, 22], 40_001),
+            &expected,
+        )
+        .expect("pinned source");
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            account_lab_peer(
+                &mut remaining,
+                policy,
+                addr([172, 30, 1, 22], 40_002),
+                &expected,
+            )
+            .expect_err("exhausted")
+            .reason_code(),
+            "LAB_CONNECTION_BUDGET_EXHAUSTED"
+        );
+        assert_eq!(remaining, 0);
     }
 
     #[test]

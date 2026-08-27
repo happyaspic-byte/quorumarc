@@ -424,10 +424,10 @@ impl OwnerLock {
             }
         };
         if let Err(error) = owned.try_lock_exclusive() {
-            drop(path_lock);
             if created {
                 let _cleanup = fs::remove_file(file);
             }
+            drop(path_lock);
             return Err(err(
                 "OWNER_LOCK_REFUSED",
                 format!(

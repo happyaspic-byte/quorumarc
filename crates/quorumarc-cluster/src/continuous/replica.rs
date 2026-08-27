@@ -7,7 +7,7 @@ use quorumarc_runtime::FrameCodec;
 
 use super::protocol::{MAX_CONTINUOUS_FRAME, ReplicaKind, ReplicaRequest, ReplicaResponse};
 use crate::keys::{load_private_seed, load_public_key, require_distinct_role_keys};
-use crate::lab_net::{LabBindPolicy, ensure_lab_bind, ensure_lab_peer};
+use crate::lab_net::{LabBindPolicy, account_lab_peer, ensure_lab_bind};
 use crate::path_guard::{
     OwnerLock, prepare_file_parent, require_keys_disjoint, require_ready_disjoint, write_ready_file,
 };
@@ -72,13 +72,17 @@ pub fn serve_continuous_replica(config: ContinuousReplicaConfig) -> Result<(), C
         .map_err(|error| err("CONTINUOUS_REPLICA_WAL_REFUSED", error.to_string()))?;
     write_ready_file(&config.ready_file, &local.to_string())?;
 
-    for _ in 0..config.max_connections {
+    let mut remaining = config.max_connections;
+    while remaining > 0 {
         let (mut stream, remote) = listener
             .accept()
             .map_err(|error| err("CONTINUOUS_REPLICA_ACCEPT_FAILED", error.to_string()))?;
-        if let Err(error) =
-            ensure_lab_peer(config.bind_policy, remote, &config.expected_primary_ips)
-        {
+        if let Err(error) = account_lab_peer(
+            &mut remaining,
+            config.bind_policy,
+            remote,
+            &config.expected_primary_ips,
+        ) {
             eprintln!("event=continuous_replica_peer_refusal {error}");
             continue;
         }

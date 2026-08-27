@@ -285,7 +285,12 @@ pub fn run_lifecycle_controller(
                 }
                 if let Some(operation) = config.successor_retry {
                     if promotions == config.max_promotions {
-                        let retry = client.retry_workload(epoch, now_ms, operation)?;
+                        let timeout = successor_retry_timeout(
+                            remaining_runtime(started, config.max_runtime),
+                            config.authority_timeout,
+                        )?;
+                        let retry = client
+                            .retry_workload_with_timeout(epoch, now_ms, operation, timeout)?;
                         if retry.reason_code != LifecycleReasonCode::WorkloadRetryConfirmed {
                             return Err(err(
                                 "LIFECYCLE_CONTROLLER_RETRY_REFUSED",
@@ -353,6 +358,13 @@ fn runtime_timeout(remaining: Duration, configured: Duration) -> Result<Duration
         ));
     }
     Ok(remaining.min(configured))
+}
+
+fn successor_retry_timeout(
+    remaining: Duration,
+    configured: Duration,
+) -> Result<Duration, ClusterError> {
+    runtime_timeout(remaining, configured)
 }
 
 fn controller_now_ms(
@@ -786,6 +798,15 @@ mod tests {
         assert_eq!(
             runtime_timeout(Duration::from_secs(5), Duration::from_secs(3)),
             Ok(Duration::from_secs(3))
+        );
+        assert_eq!(
+            successor_retry_timeout(Duration::from_millis(7), Duration::from_secs(3)),
+            Ok(Duration::from_millis(7))
+        );
+        assert_eq!(
+            successor_retry_timeout(Duration::ZERO, Duration::from_secs(3))
+                .map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_CONTROLLER_TIMEOUT")
         );
     }
 
