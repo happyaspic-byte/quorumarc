@@ -20,6 +20,12 @@ store_dir = "/var/lib/quorumarc/authority"
 signing_key = "/etc/quorumarc/node-a.seed"
 automatic_promotion = true
 
+[tls]
+certificate_chain = "/etc/quorumarc/tls/node-a.crt"
+private_key = "/etc/quorumarc/tls/node-a.key"
+trusted_roots = "/etc/quorumarc/tls/ca.crt"
+server_name = "witness.example.internal"
+
 [fence]
 mechanism = "hardware-power"
 profile = "pdu-a"
@@ -58,6 +64,45 @@ fn production_config_accepts_exact_three_member_hardware_fenced_profile() {
     assert_eq!(config.members().len(), 3);
     assert!(config.automatic_promotion());
     assert_eq!(config.effect_gate_state(), "closed");
+}
+
+#[test]
+fn production_config_requires_absolute_mtls_paths_and_server_name() {
+    let config = ProductionConfig::parse(VALID).expect("valid production config");
+    assert_eq!(
+        config.tls_certificate_chain(),
+        std::path::Path::new("/etc/quorumarc/tls/node-a.crt")
+    );
+    assert_eq!(
+        config.tls_private_key(),
+        std::path::Path::new("/etc/quorumarc/tls/node-a.key")
+    );
+    assert_eq!(
+        config.tls_trusted_roots(),
+        std::path::Path::new("/etc/quorumarc/tls/ca.crt")
+    );
+    assert_eq!(config.tls_server_name(), "witness.example.internal");
+
+    for relative in [
+        "etc/quorumarc/tls/node-a.crt",
+        "etc/quorumarc/tls/node-a.key",
+        "etc/quorumarc/tls/ca.crt",
+    ] {
+        let invalid = VALID.replace(&format!("/{}", relative), relative);
+        assert!(matches!(
+            ProductionConfig::parse(&invalid),
+            Err(ConfigError::PathMustBeAbsolute(_))
+        ));
+    }
+
+    let invalid_server_name = VALID.replace(
+        "server_name = \"witness.example.internal\"",
+        "server_name = \"127.0.0.1\"",
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&invalid_server_name),
+        Err(ConfigError::InvalidValue(_))
+    ));
 }
 
 #[test]

@@ -6,6 +6,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use rustix::fs::{FlockOperation, OFlags, flock};
+use rustls::pki_types::ServerName;
 use serde::Deserialize;
 
 /// Strict production cluster configuration.
@@ -25,10 +26,20 @@ pub struct ProductionConfig {
     automatic_promotion: bool,
     #[serde(default = "default_log_level")]
     log_level: String,
+    tls: TlsConfig,
     fence: FenceConfig,
     workload: WorkloadConfig,
     effect: EffectConfig,
     members: Vec<MemberConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    certificate_chain: PathBuf,
+    private_key: PathBuf,
+    trusted_roots: PathBuf,
+    server_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -144,6 +155,32 @@ impl ProductionConfig {
         }
         if !config.signing_key.is_absolute() {
             return Err(ConfigError::PathMustBeAbsolute("signing_key".to_owned()));
+        }
+        if !config.tls.certificate_chain.is_absolute() {
+            return Err(ConfigError::PathMustBeAbsolute(
+                "tls.certificate_chain".to_owned(),
+            ));
+        }
+        if !config.tls.private_key.is_absolute() {
+            return Err(ConfigError::PathMustBeAbsolute(
+                "tls.private_key".to_owned(),
+            ));
+        }
+        if !config.tls.trusted_roots.is_absolute() {
+            return Err(ConfigError::PathMustBeAbsolute(
+                "tls.trusted_roots".to_owned(),
+            ));
+        }
+        if ServerName::try_from(config.tls.server_name.as_str()).is_err()
+            || config.tls.server_name.parse::<IpAddr>().is_ok()
+            || config.tls.server_name.is_empty()
+            || config
+                .tls
+                .server_name
+                .bytes()
+                .any(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(ConfigError::InvalidValue("tls.server_name".to_owned()));
         }
         if config.members.len() != 3 {
             return Err(ConfigError::InvalidValue(
@@ -351,6 +388,30 @@ impl ProductionConfig {
     #[must_use]
     pub fn members(&self) -> &[MemberConfig] {
         &self.members
+    }
+
+    /// Local TLS certificate chain path.
+    #[must_use]
+    pub fn tls_certificate_chain(&self) -> &std::path::Path {
+        &self.tls.certificate_chain
+    }
+
+    /// Local TLS private key path.
+    #[must_use]
+    pub fn tls_private_key(&self) -> &std::path::Path {
+        &self.tls.private_key
+    }
+
+    /// Trusted peer root certificate bundle path.
+    #[must_use]
+    pub fn tls_trusted_roots(&self) -> &std::path::Path {
+        &self.tls.trusted_roots
+    }
+
+    /// Expected DNS identity of the Witness server.
+    #[must_use]
+    pub fn tls_server_name(&self) -> &str {
+        &self.tls.server_name
     }
 
     /// Whether automatic promotion is requested after fence eligibility.

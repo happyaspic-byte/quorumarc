@@ -23,6 +23,12 @@ witness = "172.30.1.200:7602"
 store_dir = "/var/lib/quorumarc-witness/control"
 signing_key = "/etc/quorumarc/secrets/witness-a.seed"
 automatic_promotion = false
+
+[tls]
+certificate_chain = "/etc/quorumarc/tls/witness-a.crt"
+private_key = "/etc/quorumarc/tls/witness-a.key"
+trusted_roots = "/etc/quorumarc/tls/ca.crt"
+server_name = "witness.example.internal"
 [fence]
 mechanism = "hardware-power"
 profile = "pdu-a"

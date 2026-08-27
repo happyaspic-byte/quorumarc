@@ -25,6 +25,12 @@ store_dir = "/var/lib/quorumarc/authority"
 signing_key = "/etc/quorumarc/secrets/node-a.seed"
 automatic_promotion = true
 
+[tls]
+certificate_chain = "/etc/quorumarc/tls/node-a.crt"
+private_key = "/etc/quorumarc/tls/node-a.key"
+trusted_roots = "/etc/quorumarc/tls/ca.crt"
+server_name = "witness.example.internal"
+
 [fence]
 mechanism = "hardware-power"
 profile = "pdu-a"
