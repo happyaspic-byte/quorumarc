@@ -17,5 +17,6 @@ pub mod operations;
 pub mod protocol;
 pub mod reload;
 pub mod signal;
+pub mod tls;
 pub mod watchdog;
 pub mod witness;

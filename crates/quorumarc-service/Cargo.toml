@@ -16,6 +16,7 @@ quorumarc-runtime = { path = "../quorumarc-runtime", version = "=0.1.0" }
 quorumarc-store = { path = "../quorumarc-store", version = "=0.1.0" }
 quorumarc-wire = { path = "../quorumarc-wire", version = "=0.1.0" }
 rustix = { version = "=1.1.4", features = ["fs", "time"] }
+rustls = { version = "=0.23.37", default-features = false, features = ["ring", "std"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 sha2 = "=0.10.8"
 signal-hook = "=0.3.18"
@@ -23,3 +24,6 @@ toml = "=0.8.23"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rcgen = "=0.13.2"
