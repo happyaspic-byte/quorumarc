@@ -1,9 +1,12 @@
 #![allow(clippy::expect_used)]
 
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 use ed25519_dalek::SigningKey;
-use quorumarc_service::controller::{DurableController, SwitchRole};
+use quorumarc_service::controller::{
+    DurableController, DurableProgressLease, ProgressLeaseError, SwitchRole,
+};
 use quorumarc_service::management_journal::ManagementOutcome;
 use quorumarc_service::protocol::{
     AdmissionError, ProductionFrame, ProductionFrameKind, ProductionRequest,
@@ -118,5 +121,80 @@ fn durable_controller_refuses_stale_replay_without_suspecting_node_failure() {
     assert!(!authentication.is_node_failure_suspicion());
     assert_eq!(controller.highest_sequence(), 1);
     assert!(!controller.effects_open());
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn progress_lease_renews_only_after_new_durable_progress_and_survives_restart() {
+    let directory =
+        std::env::temp_dir().join(format!("quorumarc-progress-lease-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("directory");
+    let mut lease = DurableProgressLease::open(&directory, [31; 16]).expect("open");
+
+    assert_eq!(lease.expires_at_ms(), None);
+    assert_eq!(lease.observe_heartbeat(100), None);
+    assert_eq!(lease.expires_at_ms(), None);
+    assert_eq!(lease.record_progress(12, 100, 50), Ok(150));
+    assert_eq!(lease.expires_at_ms(), Some(150));
+    assert_eq!(lease.observe_heartbeat(120), Some(150));
+    assert_eq!(
+        lease.record_progress(12, 120, 50),
+        Err(ProgressLeaseError::ProgressNotAdvanced)
+    );
+    assert_eq!(lease.expires_at_ms(), Some(150));
+    drop(lease);
+
+    let resumed = DurableProgressLease::open(&directory, [31; 16]).expect("resume");
+    assert_eq!(resumed.highest_progress_commit(), 12);
+    assert_eq!(resumed.expires_at_ms(), Some(150));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn progress_lease_refuses_clock_overflow_and_copied_identity() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-progress-overflow-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let mut lease = DurableProgressLease::open(&directory, [32; 16]).expect("open");
+    assert_eq!(
+        lease.record_progress(1, u64::MAX, 1),
+        Err(ProgressLeaseError::ClockOverflow)
+    );
+    assert_eq!(lease.expires_at_ms(), None);
+    drop(lease);
+    assert!(matches!(
+        DurableProgressLease::open(&directory, [33; 16]),
+        Err(ProgressLeaseError::IdentityMismatch)
+    ));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn progress_lease_refuses_symlink_and_group_accessible_files() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-progress-security-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let outside = directory.join("outside.lease");
+    fs::write(&outside, b"dummy").expect("write");
+    let link = directory.join("progress.lease");
+    symlink(&outside, &link).expect("symlink");
+    assert!(matches!(
+        DurableProgressLease::open(&directory, [34; 16]),
+        Err(ProgressLeaseError::Corrupt)
+    ));
+    let _ = fs::remove_file(&link);
+
+    let mut lease = DurableProgressLease::open(&directory, [35; 16]).expect("create");
+    lease.record_progress(1, 10, 10).expect("record");
+    drop(lease);
+    fs::set_permissions(&link, fs::Permissions::from_mode(0o644)).expect("chmod");
+    assert!(matches!(
+        DurableProgressLease::open(&directory, [35; 16]),
+        Err(ProgressLeaseError::Corrupt)
+    ));
     let _ = fs::remove_dir_all(directory);
 }
