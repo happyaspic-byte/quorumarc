@@ -86,6 +86,21 @@ fn management_journal_refuses_capacity_before_ack_and_remains_recoverable() {
 }
 
 #[test]
+fn management_journal_refuses_second_writer_until_first_drops() {
+    let directory =
+        std::env::temp_dir().join(format!("quorumarc-management-owner-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("create journal fixture");
+    let first = ManagementJournal::open(&directory, [19; 16]).expect("first");
+    assert!(matches!(
+        ManagementJournal::open(&directory, [19; 16]),
+        Err(JournalError::OwnerLockRefused)
+    ));
+    drop(first);
+    assert!(ManagementJournal::open(&directory, [19; 16]).is_ok());
+    fs::remove_dir_all(directory).expect("remove journal fixture");
+}
+
+#[test]
 fn copied_management_journal_refuses_another_identity() {
     let directory = std::env::temp_dir().join(format!(
         "quorumarc-management-identity-{}",

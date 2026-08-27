@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::OFlags;
+use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
 
 const MAGIC: &[u8; 8] = b"QARCMJ02";
@@ -22,6 +22,7 @@ pub struct ManagementJournal {
     path: PathBuf,
     identity: [u8; IDENTITY_LEN],
     operations: Vec<ManagementOperation>,
+    _owner: File,
 }
 
 /// One signed management operation identity.
@@ -47,6 +48,7 @@ pub enum JournalError {
     StaleSequence,
     InvalidOperation,
     Capacity,
+    OwnerLockRefused,
     Corrupt,
     Io,
 }
@@ -82,6 +84,7 @@ impl ManagementJournal {
             .open(&path)
         {
             Ok(mut file) => {
+                lock_owner(&file)?;
                 file.write_all(&header(identity))
                     .and_then(|()| file.sync_all())
                     .map_err(|_error| JournalError::Io)?;
@@ -92,9 +95,20 @@ impl ManagementJournal {
                     path,
                     identity,
                     operations: Vec::new(),
+                    _owner: file,
                 })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let owner = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+                    .open(&path)
+                    .map_err(|_error| match fs::symlink_metadata(&path) {
+                        Ok(metadata) if metadata.file_type().is_symlink() => JournalError::Corrupt,
+                        Ok(_) | Err(_) => JournalError::Io,
+                    })?;
+                lock_owner(&owner)?;
                 let (recovered_identity, operations) = recover(&path)?;
                 if recovered_identity != identity {
                     return Err(JournalError::IdentityMismatch);
@@ -103,6 +117,7 @@ impl ManagementJournal {
                     path,
                     identity,
                     operations,
+                    _owner: owner,
                 })
             }
             Err(_error) => Err(JournalError::Io),
@@ -173,6 +188,11 @@ impl ManagementJournal {
         self.operations.push(operation);
         Ok(ManagementOutcome::Committed)
     }
+}
+
+fn lock_owner(file: &File) -> Result<(), JournalError> {
+    flock(file, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_error| JournalError::OwnerLockRefused)
 }
 
 fn header(identity: [u8; IDENTITY_LEN]) -> [u8; HEADER_LEN] {

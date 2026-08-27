@@ -198,7 +198,9 @@ impl AuthenticatedRequestJournal {
             JournalError::InvalidOperation
             | JournalError::Corrupt
             | JournalError::IdentityMismatch => AdmissionError::Malformed,
-            JournalError::Capacity | JournalError::Io => AdmissionError::ReplayRefused,
+            JournalError::Capacity | JournalError::OwnerLockRefused | JournalError::Io => {
+                AdmissionError::ReplayRefused
+            }
         })
     }
 
