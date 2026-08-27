@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use quorumarc_core::TrustedClock;
@@ -63,6 +64,34 @@ impl BootClock {
         TrustedClock::now_ms(self)
     }
 
+    /// Persists the first boot identity and refuses a different later boot.
+    pub fn bind_store(&self, store: &Path) -> Result<(), BootClockError> {
+        let path = store.join("boot.id");
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(self.boot_id.as_bytes())
+                    .and_then(|()| file.write_all(b"\n"))
+                    .and_then(|()| file.sync_all())
+                    .map_err(|_error| BootClockError::SourceUnavailable)?;
+                sync_directory(store)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let mut file =
+                    File::open(&path).map_err(|_error| BootClockError::SourceUnavailable)?;
+                let mut value = String::new();
+                file.read_to_string(&mut value)
+                    .map_err(|_error| BootClockError::SourceUnavailable)?;
+                if value.trim() != self.boot_id {
+                    return Err(BootClockError::BootChanged);
+                }
+                file.sync_all()
+                    .map_err(|_error| BootClockError::SourceUnavailable)?;
+                sync_directory(store)
+            }
+            Err(_error) => Err(BootClockError::SourceUnavailable),
+        }
+    }
+
     /// Refuses if the kernel boot identity no longer matches the bound value.
     pub fn verify_boot(&self) -> Result<(), BootClockError> {
         let current = read_boot_id(&self.boot_id_path)?;
@@ -99,6 +128,12 @@ impl TrustedClock for BootClock {
             }
         }
     }
+}
+
+fn sync_directory(path: &Path) -> Result<(), BootClockError> {
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|_error| BootClockError::SourceUnavailable)
 }
 
 fn timespec_ms(ts: rustix::time::Timespec) -> u64 {

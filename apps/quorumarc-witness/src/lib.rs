@@ -435,6 +435,19 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
             return write_error_exit(result, EXIT_UNAVAILABLE);
         }
     };
+    if let Err(error) = clock.bind_store(config.store_dir()) {
+        let reason = match error {
+            quorumarc_service::clock::BootClockError::BootChanged => {
+                "WITNESS_BOOT_IDENTITY_CHANGED"
+            }
+            _ => "WITNESS_BOOT_CLOCK_UNAVAILABLE",
+        };
+        let result = writeln!(
+            stderr,
+            "refused=true reason={reason} voting=false effect_gate=closed"
+        );
+        return write_error_exit(result, EXIT_UNAVAILABLE);
+    }
     let boot_id = clock.boot_id().to_owned();
     let status = quorumarc_service::operations::StatusHandle::new(
         quorumarc_service::operations::NodeStatusReport::new(

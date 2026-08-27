@@ -324,6 +324,12 @@ impl ProductionConfig {
         &self.role
     }
 
+    /// Local durable store directory.
+    #[must_use]
+    pub fn store_dir(&self) -> &std::path::Path {
+        &self.store_dir
+    }
+
     /// Static membership.
     #[must_use]
     pub fn members(&self) -> &[MemberConfig] {

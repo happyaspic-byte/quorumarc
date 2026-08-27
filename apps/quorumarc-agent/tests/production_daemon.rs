@@ -314,6 +314,35 @@ fn production_daemon_refuses_second_process_on_the_same_store() -> Result<(), Bo
     Ok(())
 }
 
+#[test]
+fn production_daemon_refuses_stored_boot_identity_change() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-boot-change-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, production_config_with_prerequisites(&directory)?)?;
+    fs::write(
+        directory.join("store").join("boot.id"),
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n",
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(!output.status.success());
+    assert!(stderr.contains("BOOT_IDENTITY_CHANGED"));
+    assert!(stderr.contains("\"effect_gate\":\"closed\""));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
 fn production_config_with_prerequisites(
     directory: &std::path::Path,
 ) -> Result<String, Box<dyn Error>> {

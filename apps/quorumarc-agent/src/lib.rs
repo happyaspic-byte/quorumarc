@@ -730,6 +730,20 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
+            if let Err(error) = clock.bind_store(config.store_dir()) {
+                let reason = match error {
+                    quorumarc_service::clock::BootClockError::BootChanged => {
+                        "BOOT_IDENTITY_CHANGED"
+                    }
+                    _ => "BOOT_CLOCK_UNAVAILABLE",
+                };
+                return CliReport::refusal(
+                    "daemon",
+                    reason,
+                    "stored boot identity disagrees with the current kernel boot",
+                    EXIT_CONFIG,
+                );
+            }
             let boot_id = clock.boot_id().to_owned();
             let status = quorumarc_service::operations::StatusHandle::new(
                 quorumarc_service::operations::NodeStatusReport::new(

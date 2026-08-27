@@ -59,3 +59,24 @@ fn boot_clock_rejects_malformed_kernel_sources() {
     ));
     fs::remove_dir_all(directory).expect("remove clock fixture");
 }
+
+#[test]
+fn persisted_boot_identity_accepts_same_boot_and_refuses_reboot() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-service-boot-record-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create clock fixture");
+    let store = directory.join("store");
+    fs::create_dir(&store).expect("store");
+    let clock = BootClock::open_system().expect("system clock");
+    clock.bind_store(&store).expect("first persist");
+    clock
+        .bind_store(&store)
+        .expect("same boot remains eligible");
+
+    let record = store.join("boot.id");
+    fs::write(&record, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n").expect("stale boot");
+    assert_eq!(clock.bind_store(&store), Err(BootClockError::BootChanged));
+    fs::remove_dir_all(directory).expect("remove clock fixture");
+}
