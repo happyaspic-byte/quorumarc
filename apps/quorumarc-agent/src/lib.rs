@@ -102,6 +102,7 @@ enum Command {
     Run(RunOptions),
     Health { config: Option<PathBuf> },
     ValidateConfig { config: Option<PathBuf> },
+    Daemon { config: Option<PathBuf> },
     InspectProof(ProofOptions),
     InspectStore { store: PathBuf },
     SimulateFailure { scenario: Scenario, seed: u64 },
@@ -250,6 +251,7 @@ where
         Command::Run(options) => run(options),
         Command::Health { config } => health(config.as_deref()),
         Command::ValidateConfig { config } => validate_config(config.as_deref()),
+        Command::Daemon { config } => daemon(config.as_deref()),
         Command::InspectProof(options) => inspect_proof(options),
         Command::InspectStore { store } => inspect_store(&store),
         Command::SimulateFailure { scenario, seed } => simulate_failure(scenario, seed),
@@ -272,6 +274,9 @@ fn parse_command(arguments: &[OsString]) -> Result<Command, Failure> {
             config: parse_single_path_option(options, "--config")?,
         }),
         "validate-config" => Ok(Command::ValidateConfig {
+            config: parse_single_path_option(options, "--config")?,
+        }),
+        "daemon" => Ok(Command::Daemon {
             config: parse_single_path_option(options, "--config")?,
         }),
         "inspect-proof" => parse_proof_options(options).map(Command::InspectProof),
@@ -629,6 +634,54 @@ fn validate_config(config_path: Option<&Path>) -> CliReport {
     }
 }
 
+fn daemon(config_path: Option<&Path>) -> CliReport {
+    let Some(path) = config_path else {
+        return CliReport::refusal(
+            "daemon",
+            "CONFIG_REQUIRED",
+            "daemon requires an explicit --config file",
+            EXIT_CONFIG,
+        );
+    };
+    let bytes = match read_bounded(path, MAX_CONFIG_SIZE, "CONFIG") {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            return CliReport::refusal("daemon", failure.reason, failure.detail, failure.exit_code);
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            return CliReport::refusal(
+                "daemon",
+                "CONFIG_INVALID_UTF8",
+                error.to_string(),
+                EXIT_CONFIG,
+            );
+        }
+    };
+    match quorumarc_service::config::ProductionConfig::parse(&text) {
+        Ok(_config) => {
+            let node = quorumarc_service::node::ProductionNode::effect_closed();
+            CliReport::refusal(
+                "daemon",
+                "PRODUCTION_ACTIVATION_NOT_IMPLEMENTED",
+                format!(
+                    "production daemon remains {} until independent Witness, fence, and EffectGate adapters are complete",
+                    node.effect_gate_state()
+                ),
+                EXIT_CONFIG,
+            )
+        }
+        Err(error) => CliReport::refusal(
+            "daemon",
+            error.reason_code(),
+            format!("{error:?}"),
+            EXIT_CONFIG,
+        ),
+    }
+}
+
 fn run(options: RunOptions) -> CliReport {
     let Some(config_path) = options.config.as_deref() else {
         return CliReport::refusal(
@@ -819,7 +872,7 @@ fn help() -> CliReport {
         ("status", "ok".to_owned()),
         (
             "usage",
-            "quorumarc-agent <status|run|health|validate-config|inspect-proof|inspect-store|simulate-failure> [options]"
+            "quorumarc-agent <status|run|health|validate-config|daemon|inspect-proof|inspect-store|simulate-failure> [options]"
                 .to_owned(),
         ),
         ("effect_gate", "closed".to_owned()),
@@ -1476,6 +1529,14 @@ mod tests {
         assert_eq!(report.exit_code(), EXIT_CONFIG);
         assert!(contains_reason(&report, "CONFIG_REQUIRED"));
         assert!(contains_reason(&report, "effect_gate"));
+    }
+
+    #[test]
+    fn daemon_requires_explicit_production_configuration() {
+        let report = execute(["daemon"]);
+        assert_eq!(report.exit_code(), EXIT_CONFIG);
+        assert!(contains_reason(&report, "CONFIG_REQUIRED"));
+        assert!(contains_reason(&report, "\"effect_gate\":\"closed\""));
     }
 
     #[test]

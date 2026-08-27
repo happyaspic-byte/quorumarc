@@ -63,6 +63,8 @@ pub enum ConfigError {
     DuplicateField(String),
     PathMustBeAbsolute(String),
     AutomaticPromotionRequiresAuthoritativeFence,
+    FenceReadBackRequired,
+    FailureDomainNotIndependent,
     WitnessFailureDomainNotIndependent,
     InvalidValue(String),
     MissingField(String),
@@ -80,6 +82,8 @@ impl ConfigError {
             Self::AutomaticPromotionRequiresAuthoritativeFence => {
                 "AUTOMATIC_PROMOTION_REQUIRES_AUTHORITATIVE_FENCE"
             }
+            Self::FenceReadBackRequired => "FENCE_READ_BACK_REQUIRED",
+            Self::FailureDomainNotIndependent => "FAILURE_DOMAIN_NOT_INDEPENDENT",
             Self::WitnessFailureDomainNotIndependent => "WITNESS_FAILURE_DOMAIN_NOT_INDEPENDENT",
             Self::InvalidValue(_) => "CONFIG_INVALID_VALUE",
             Self::MissingField(_) => "CONFIG_MISSING_FIELD",
@@ -123,6 +127,17 @@ impl ProductionConfig {
             && config.fence.mechanism != "storage-reservation"
         {
             return Err(ConfigError::AutomaticPromotionRequiresAuthoritativeFence);
+        }
+        if config.automatic_promotion && !config.fence.read_back {
+            return Err(ConfigError::FenceReadBackRequired);
+        }
+        let failure_domains: BTreeSet<_> = config
+            .members
+            .iter()
+            .map(|member| member.failure_domain.as_str())
+            .collect();
+        if failure_domains.len() != config.members.len() {
+            return Err(ConfigError::FailureDomainNotIndependent);
         }
 
         let data_hosts: BTreeSet<_> = config

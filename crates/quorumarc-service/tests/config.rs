@@ -70,6 +70,24 @@ fn automatic_promotion_rejects_gate_expiry_and_shared_witness_profiles() {
 }
 
 #[test]
+fn automatic_promotion_requires_read_back_and_three_distinct_failure_domains() {
+    let no_read_back = VALID.replace("read_back = true", "read_back = false");
+    assert!(matches!(
+        ProductionConfig::parse(&no_read_back),
+        Err(ConfigError::FenceReadBackRequired)
+    ));
+
+    let shared_domain = VALID.replace(
+        "failure_domain = \"power-w\"",
+        "failure_domain = \"power-a\"",
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&shared_domain),
+        Err(ConfigError::FailureDomainNotIndependent)
+    ));
+}
+
+#[test]
 fn unknown_duplicate_and_relative_paths_fail_closed() {
     assert!(matches!(
         ProductionConfig::parse(&format!("{VALID}surprise = \"unsafe\"\n")),
