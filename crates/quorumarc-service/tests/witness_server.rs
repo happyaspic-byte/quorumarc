@@ -234,7 +234,7 @@ fn production_witness_server_refuses_runtime_identity_mismatch_with_membership()
     let tls =
         server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca]).expect("tls");
     assert!(matches!(
-        ProductionWitnessServer::bind(membership(), tls, runtime),
+        ProductionWitnessServer::bind(membership(), tls, runtime, Duration::from_secs(1)),
         Err(quorumarc_service::witness::WitnessServerError::InvalidRuntime)
     ));
     let _ = fs::remove_dir_all(directory);
@@ -283,9 +283,52 @@ fn production_witness_server_refuses_policy_candidate_mismatch_with_membership()
     let tls =
         server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca]).expect("tls");
     assert!(matches!(
-        ProductionWitnessServer::bind(membership(), tls, runtime),
+        ProductionWitnessServer::bind(membership(), tls, runtime, Duration::from_secs(1)),
         Err(quorumarc_service::witness::WitnessServerError::InvalidRuntime)
     ));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_witness_server_honors_configured_io_timeout() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-configured-timeout-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let node_a = SigningKey::from_bytes(&[7_u8; 32]);
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &node_a, &node_b);
+    let (ca, server_id, client_id) = issue_identities();
+    let server_config =
+        server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca.clone()])
+            .expect("server config");
+    let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
+        .expect("client config");
+    let server = ProductionWitnessServer::bind(
+        membership(),
+        server_config,
+        runtime,
+        Duration::from_millis(1_000),
+    )
+    .expect("bind");
+    let listen_addr = server.local_addr().expect("local addr");
+    let shutdown = ShutdownToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_thread = thread::spawn(move || server.serve_until(&shutdown_clone));
+
+    let stream = connect_retry(listen_addr).expect("connect");
+    thread::sleep(Duration::from_millis(700));
+    let server_name = ServerName::try_from("witness.test").expect("server name");
+    let connection =
+        ClientConnection::new(Arc::new(client_config), server_name).expect("client TLS");
+    let mut tls = StreamOwned::new(connection, stream);
+    write_frame(&mut tls, &signed_vote_request(&node_a));
+    let reply = ProductionVoteReply::decode(&read_status(&mut tls)).expect("vote reply");
+    assert!(reply.is_granted());
+
+    shutdown.request();
+    server_thread.join().expect("server thread").expect("serve");
     let _ = fs::remove_dir_all(directory);
 }
 
@@ -305,7 +348,9 @@ fn production_witness_server_returns_signed_policy_checked_vote_over_mtls() {
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_config, runtime, Duration::from_secs(1))
+            .expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -341,7 +386,9 @@ fn production_witness_server_exact_vote_retry_returns_same_signed_vote() {
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_config, runtime, Duration::from_secs(1))
+            .expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -399,7 +446,9 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     )
     .expect("client config");
 
-    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_config, runtime, Duration::from_secs(1))
+            .expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -448,7 +497,9 @@ fn production_witness_server_rejects_non_vote_max_payload_without_advancing_epoc
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_config, runtime, Duration::from_secs(1))
+            .expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -492,7 +543,9 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_config, runtime, Duration::from_secs(1))
+            .expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -534,7 +587,9 @@ fn production_witness_server_shutdown_closes_and_joins_idle_workers() {
     let (ca, server_id, _) = issue_identities();
     let server_config = server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca])
         .expect("server config");
-    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_config, runtime, Duration::from_secs(1))
+            .expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();

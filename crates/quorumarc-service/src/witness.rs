@@ -140,7 +140,6 @@ fn canonical_ip(address: IpAddr) -> IpAddr {
     }
 }
 
-const WITNESS_IO_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_WITNESS_CONNECTIONS: usize = 32;
 const MAX_WITNESS_FRAME: usize =
     8 + 2 + 1 + 4 * (1 + 128) + 16 + 8 + 8 + 8 + 8 + 32 + 4 + 65_536 + 64;
@@ -1017,6 +1016,7 @@ pub struct ProductionWitnessServer {
     listener: TcpListener,
     tls_config: Arc<ServerConfig>,
     runtime: Arc<Mutex<ProductionWitnessRuntime>>,
+    io_timeout: Duration,
 }
 
 impl ProductionWitnessServer {
@@ -1024,8 +1024,11 @@ impl ProductionWitnessServer {
         membership: WitnessMembership,
         tls_config: MtlsServerConfig,
         runtime: ProductionWitnessRuntime,
+        io_timeout: Duration,
     ) -> Result<Self, WitnessServerError> {
-        if !runtime.matches_membership(&membership) {
+        if !runtime.matches_membership(&membership)
+            || !(Duration::from_secs(1)..=Duration::from_secs(120)).contains(&io_timeout)
+        {
             return Err(WitnessServerError::InvalidRuntime);
         }
         let listener = TcpListener::bind(membership.witness_address())
@@ -1034,6 +1037,7 @@ impl ProductionWitnessServer {
             listener,
             tls_config: tls_config.into_arc(),
             runtime: Arc::new(Mutex::new(runtime)),
+            io_timeout,
         })
     }
 
@@ -1048,6 +1052,7 @@ impl ProductionWitnessServer {
             .set_nonblocking(true)
             .map_err(|_error| WitnessServerError::SocketServeFailed)?;
         let mut workers = Vec::new();
+        let io_timeout = self.io_timeout;
         while !shutdown.is_requested() {
             reap_finished_workers(&mut workers);
             match self.listener.accept() {
@@ -1060,7 +1065,7 @@ impl ProductionWitnessServer {
                     let handle = thread::Builder::new()
                         .name("quorumarc-witness-conn".to_owned())
                         .spawn(move || {
-                            let _ = serve_stream(stream, tls_config, runtime);
+                            let _ = serve_stream(stream, tls_config, runtime, io_timeout);
                         })
                         .map_err(|_error| WitnessServerError::SocketServeFailed)?;
                     workers.push(ConnectionWorker { control, handle });
@@ -1110,11 +1115,12 @@ fn serve_stream(
     stream: TcpStream,
     tls_config: Arc<ServerConfig>,
     runtime: Arc<Mutex<ProductionWitnessRuntime>>,
+    io_timeout: Duration,
 ) -> Result<(), WitnessServerError> {
     stream
         .set_nonblocking(false)
-        .and_then(|()| stream.set_read_timeout(Some(WITNESS_IO_TIMEOUT)))
-        .and_then(|()| stream.set_write_timeout(Some(WITNESS_IO_TIMEOUT)))
+        .and_then(|()| stream.set_read_timeout(Some(io_timeout)))
+        .and_then(|()| stream.set_write_timeout(Some(io_timeout)))
         .map_err(|_error| WitnessServerError::SocketServeFailed)?;
     let connection = ServerConnection::new(tls_config)
         .map_err(|_error| WitnessServerError::SocketServeFailed)?;
