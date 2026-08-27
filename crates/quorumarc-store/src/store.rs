@@ -234,9 +234,8 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
         self.persist(next)
     }
 
-    /// Persists a vote before it is emitted. An exact retry is idempotent;
-    /// another vote in the same epoch is rejected as a double vote.
-    pub fn record_vote(&mut self, vote: VoteRecord) -> Result<DurabilityReceipt, StoreError> {
+    /// Checks whether a vote can be recorded without changing durable state.
+    pub fn preflight_vote(&self, vote: &VoteRecord) -> Result<TransitionOutcome, StoreError> {
         self.ensure_writable()?;
         if vote.epoch() < self.state.highest_epoch {
             return Err(StoreError::StaleEpoch {
@@ -246,8 +245,8 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
         }
         if let Some(existing) = &self.state.last_vote {
             if existing.epoch() == vote.epoch() {
-                if existing == &vote {
-                    return Ok(self.already_durable());
+                if existing == vote {
+                    return Ok(TransitionOutcome::AlreadyDurable);
                 }
                 return Err(StoreError::DoubleVote {
                     epoch: vote.epoch(),
@@ -259,7 +258,15 @@ impl<B: StorageBackend> DurableAuthorityStore<B> {
                 epoch: vote.epoch(),
             });
         }
+        Ok(TransitionOutcome::Committed)
+    }
 
+    /// Persists a vote before it is emitted. An exact retry is idempotent;
+    /// another vote in the same epoch is rejected as a double vote.
+    pub fn record_vote(&mut self, vote: VoteRecord) -> Result<DurabilityReceipt, StoreError> {
+        if self.preflight_vote(&vote)? == TransitionOutcome::AlreadyDurable {
+            return Ok(self.already_durable());
+        }
         let mut next = self.state.clone();
         next.highest_epoch = vote.epoch();
         next.last_vote = Some(vote);

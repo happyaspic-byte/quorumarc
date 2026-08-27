@@ -60,6 +60,22 @@ fn witness_membership_requires_two_data_nodes_and_independent_witness() {
         mapped_shared,
         Err(WitnessMembershipError::SharedHost)
     ));
+
+    let shared_data_host = WitnessMembership::new(
+        "node-a",
+        SocketAddr::from(([172, 30, 1, 22], 7601)),
+        "power-a",
+        "node-b",
+        SocketAddr::from(([172, 30, 1, 22], 7609)),
+        "power-b",
+        "witness-a",
+        SocketAddr::from(([172, 30, 1, 23], 7602)),
+        "power-w",
+    );
+    assert!(matches!(
+        shared_data_host,
+        Err(WitnessMembershipError::SharedHost)
+    ));
 }
 
 #[test]

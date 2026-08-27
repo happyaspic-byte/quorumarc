@@ -1,8 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -67,7 +68,10 @@ impl WitnessMembership {
         if node_a_id == node_b_id || node_a_id == witness_id || node_b_id == witness_id {
             return Err(WitnessMembershipError::DuplicateMember);
         }
-        if same_host(node_a.ip(), witness.ip()) || same_host(node_b.ip(), witness.ip()) {
+        if same_host(node_a.ip(), node_b.ip())
+            || same_host(node_a.ip(), witness.ip())
+            || same_host(node_b.ip(), witness.ip())
+        {
             return Err(WitnessMembershipError::SharedHost);
         }
         if canonical_ip(witness.ip()) == IpAddr::V4(Ipv4Addr::new(172, 30, 1, 84)) {
@@ -87,6 +91,21 @@ impl WitnessMembership {
             witness_id,
             witness,
         })
+    }
+
+    #[must_use]
+    pub fn node_a_id(&self) -> &str {
+        &self.node_a_id
+    }
+
+    #[must_use]
+    pub fn node_b_id(&self) -> &str {
+        &self.node_b_id
+    }
+
+    #[must_use]
+    pub fn witness_id(&self) -> &str {
+        &self.witness_id
     }
 
     /// Independent Witness listen address.
@@ -401,6 +420,9 @@ fn vote_reply_take<'a>(
 pub enum ProductionVoteError {
     Malformed,
     AuthenticationFailed,
+    EpochJump,
+    IncarnationRollback,
+    IncarnationIo,
     UnsupportedRuntime,
 }
 
@@ -408,6 +430,8 @@ pub enum ProductionVoteError {
 pub enum ProductionWitnessOpenError {
     OwnerLockRefused,
     SignerIdentityMismatch,
+    CredentialKeyConflict,
+    IncarnationJournal,
     Actor(WitnessOpenError),
 }
 
@@ -421,8 +445,186 @@ struct WitnessOwnerLock {
     _file: File,
 }
 
+struct CandidateIncarnationJournal {
+    directory: PathBuf,
+    path: PathBuf,
+    highest: BTreeMap<String, u64>,
+    poisoned: bool,
+}
+
+impl CandidateIncarnationJournal {
+    fn open(directory: &Path) -> Result<Self, ProductionWitnessOpenError> {
+        const MAGIC: &[u8; 8] = b"QARCIC01";
+        let path = directory.join("candidate-incarnations.journal");
+        let temporary = directory.join("candidate-incarnations.journal.tmp");
+        match fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_error) => return Err(ProductionWitnessOpenError::IncarnationJournal),
+        }
+        let highest = match OpenOptions::new()
+            .read(true)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|_error| ProductionWitnessOpenError::IncarnationJournal)?;
+                if !metadata.is_file()
+                    || metadata.permissions().mode() & 0o077 != 0
+                    || metadata.len() > 1_048_576
+                {
+                    return Err(ProductionWitnessOpenError::IncarnationJournal);
+                }
+                let mut bytes = Vec::new();
+                (&mut file)
+                    .take(1_048_577)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_error| ProductionWitnessOpenError::IncarnationJournal)?;
+                if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
+                    return Err(ProductionWitnessOpenError::IncarnationJournal);
+                }
+                recover_incarnations(&bytes[MAGIC.len()..])?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(_error) => return Err(ProductionWitnessOpenError::IncarnationJournal),
+        };
+        let journal = Self {
+            directory: directory.to_owned(),
+            path,
+            highest,
+            poisoned: false,
+        };
+        if !journal.path.exists() {
+            journal
+                .persist(&journal.highest.clone())
+                .map_err(|_error| ProductionWitnessOpenError::IncarnationJournal)?;
+        }
+        Ok(journal)
+    }
+
+    fn record(
+        &mut self,
+        candidate: &CanonicalId,
+        incarnation: u64,
+    ) -> Result<(), ProductionVoteError> {
+        if self.poisoned {
+            return Err(ProductionVoteError::IncarnationIo);
+        }
+        let current = self.highest.get(candidate.as_str()).copied().unwrap_or(0);
+        if incarnation < current {
+            return Err(ProductionVoteError::IncarnationRollback);
+        }
+        if incarnation == current {
+            return Ok(());
+        }
+        let mut next = self.highest.clone();
+        next.insert(candidate.as_str().to_owned(), incarnation);
+        if self.persist(&next).is_err() {
+            self.poisoned = true;
+            return Err(ProductionVoteError::IncarnationIo);
+        }
+        self.highest = next;
+        Ok(())
+    }
+
+    fn persist(&self, highest: &BTreeMap<String, u64>) -> std::io::Result<()> {
+        let temporary = self.directory.join("candidate-incarnations.journal.tmp");
+        let mut bytes = b"QARCIC01".to_vec();
+        for (candidate, incarnation) in highest {
+            let candidate_len = u8::try_from(candidate.len()).map_err(|_error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "candidate id too long")
+            })?;
+            let mut record = vec![candidate_len];
+            record.extend_from_slice(candidate.as_bytes());
+            record.extend_from_slice(&incarnation.to_be_bytes());
+            let mut hasher = Sha256::new();
+            hasher.update(b"quorumarc/candidate-incarnation/v1\0");
+            hasher.update(&record);
+            record.extend_from_slice(&hasher.finalize());
+            bytes.extend_from_slice(&record);
+        }
+        if bytes.len() > 1_048_576 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate incarnation state exceeds capacity",
+            ));
+        }
+        let _ = fs::remove_file(&temporary);
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &self.path)?;
+        File::open(&self.directory)?.sync_all()
+    }
+}
+
+fn recover_incarnations(bytes: &[u8]) -> Result<BTreeMap<String, u64>, ProductionWitnessOpenError> {
+    let mut cursor = 0_usize;
+    let mut highest = BTreeMap::new();
+    while cursor < bytes.len() {
+        let len = usize::from(
+            *bytes
+                .get(cursor)
+                .ok_or(ProductionWitnessOpenError::IncarnationJournal)?,
+        );
+        cursor = cursor.saturating_add(1);
+        if len == 0 || len > 128 {
+            return Err(ProductionWitnessOpenError::IncarnationJournal);
+        }
+        let body_end = cursor
+            .checked_add(len)
+            .and_then(|value| value.checked_add(8))
+            .ok_or(ProductionWitnessOpenError::IncarnationJournal)?;
+        let checksum_end = body_end
+            .checked_add(32)
+            .ok_or(ProductionWitnessOpenError::IncarnationJournal)?;
+        let body = bytes
+            .get(cursor.saturating_sub(1)..body_end)
+            .ok_or(ProductionWitnessOpenError::IncarnationJournal)?;
+        let checksum = bytes
+            .get(body_end..checksum_end)
+            .ok_or(ProductionWitnessOpenError::IncarnationJournal)?;
+        let candidate = std::str::from_utf8(
+            bytes
+                .get(cursor..cursor + len)
+                .ok_or(ProductionWitnessOpenError::IncarnationJournal)?,
+        )
+        .map_err(|_error| ProductionWitnessOpenError::IncarnationJournal)?;
+        CanonicalId::new(candidate)
+            .map_err(|_error| ProductionWitnessOpenError::IncarnationJournal)?;
+        let incarnation = u64::from_be_bytes(
+            bytes
+                .get(cursor + len..body_end)
+                .ok_or(ProductionWitnessOpenError::IncarnationJournal)?
+                .try_into()
+                .map_err(|_error| ProductionWitnessOpenError::IncarnationJournal)?,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(b"quorumarc/candidate-incarnation/v1\0");
+        hasher.update(body);
+        if checksum != hasher.finalize().as_slice() || incarnation == 0 {
+            return Err(ProductionWitnessOpenError::IncarnationJournal);
+        }
+        let current = highest.get(candidate).copied().unwrap_or(0);
+        if incarnation <= current {
+            return Err(ProductionWitnessOpenError::IncarnationJournal);
+        }
+        highest.insert(candidate.to_owned(), incarnation);
+        cursor = checksum_end;
+    }
+    Ok(highest)
+}
+
 struct ProductionVoteRuntimeState {
     _owner_lock: WitnessOwnerLock,
+    incarnations: CandidateIncarnationJournal,
     cluster_id: String,
     witness_id: CanonicalId,
     key_id: CanonicalId,
@@ -481,16 +683,20 @@ impl ProductionWitnessRuntime {
         signing_key: SigningKey,
         credentials: impl IntoIterator<Item = CandidateCredential>,
     ) -> Result<Self, ProductionWitnessOpenError> {
+        let credentials = credentials.into_iter().collect::<Vec<_>>();
+        let witness_key = signing_key.verifying_key();
+        let mut credential_keys = BTreeSet::new();
+        if credentials.iter().any(|credential| {
+            credential.verifying_key == witness_key
+                || !credential_keys.insert(credential.verifying_key.to_bytes())
+        }) {
+            return Err(ProductionWitnessOpenError::CredentialKeyConflict);
+        }
         let owner_lock = acquire_witness_owner_lock(directory)?;
+        let incarnations = CandidateIncarnationJournal::open(directory)?;
         let cluster_id = store_identity.cluster_id().to_owned();
         let witness_id = policy.witness_id().clone();
         let key_id = policy.key_id().clone();
-        pin_witness_signer_identity(
-            directory,
-            &witness_id,
-            &key_id,
-            &signing_key.verifying_key(),
-        )?;
         let actor = WitnessVoteActor::open(
             policy,
             signing_key.clone(),
@@ -498,14 +704,21 @@ impl ProductionWitnessRuntime {
             store_identity,
             FileBackend,
         )?;
+        pin_witness_signer_identity(
+            directory,
+            &witness_id,
+            &key_id,
+            &signing_key.verifying_key(),
+        )?;
         Ok(Self {
             mode: RuntimeMode::Vote(Box::new(ProductionVoteRuntimeState {
                 _owner_lock: owner_lock,
+                incarnations,
                 cluster_id,
                 witness_id,
                 key_id,
                 signing_key,
-                credentials: credentials.into_iter().collect(),
+                credentials,
                 actor,
             })),
         })
@@ -526,6 +739,7 @@ impl ProductionWitnessRuntime {
             return Err(ProductionVoteError::UnsupportedRuntime);
         };
         let ProductionVoteRuntimeState {
+            incarnations,
             cluster_id,
             witness_id,
             key_id,
@@ -569,27 +783,62 @@ impl ProductionWitnessRuntime {
             lease_not_before_ms: payload.lease_not_before_ms(),
             lease_expires_at_ms: payload.lease_expires_at_ms(),
         };
+        let expected_epoch = actor.highest_durable_epoch().saturating_add(1);
+        if binding.epoch > expected_epoch {
+            return Err(ProductionVoteError::EpochJump);
+        }
+        if let Some(code) = actor.preflight_vote(&binding) {
+            return attest_vote_reply(
+                ProductionVoteReply {
+                    cluster_id: cluster_id.clone(),
+                    witness_id: witness_id.clone(),
+                    key_id: key_id.clone(),
+                    binding,
+                    code,
+                    signed_vote: None,
+                    durable_generation: None,
+                    attestation: [0; 64],
+                },
+                signing_key,
+            );
+        }
+        incarnations.record(&binding.candidate_node_id, binding.candidate_incarnation)?;
         let reply = actor.handle_vote(&binding);
-        let mut production_reply = ProductionVoteReply {
-            cluster_id: cluster_id.clone(),
-            witness_id: witness_id.clone(),
-            key_id: key_id.clone(),
-            binding,
-            code: reply.code(),
-            signed_vote: reply.signed_vote().cloned(),
-            durable_generation: reply.durable_generation(),
-            attestation: [0; 64],
-        };
-        let statement = production_reply.encode_statement()?;
-        production_reply.attestation = signing_key
-            .sign(&vote_reply_attestation_preimage(&statement))
-            .to_bytes();
-        Ok(production_reply)
+        attest_vote_reply(
+            ProductionVoteReply {
+                cluster_id: cluster_id.clone(),
+                witness_id: witness_id.clone(),
+                key_id: key_id.clone(),
+                binding,
+                code: reply.code(),
+                signed_vote: reply.signed_vote().cloned(),
+                durable_generation: reply.durable_generation(),
+                attestation: [0; 64],
+            },
+            signing_key,
+        )
     }
 
     #[must_use]
     pub const fn is_vote_mode(&self) -> bool {
         matches!(self.mode, RuntimeMode::Vote(_))
+    }
+
+    #[must_use]
+    pub fn matches_membership(&self, membership: &WitnessMembership) -> bool {
+        let RuntimeMode::Vote(state) = &self.mode else {
+            return false;
+        };
+        let candidate_ids: BTreeSet<_> = state
+            .credentials
+            .iter()
+            .map(|credential| credential.node_id.as_str())
+            .collect();
+        let expected = BTreeSet::from([membership.node_a_id(), membership.node_b_id()]);
+        state.witness_id.as_str() == membership.witness_id()
+            && candidate_ids == expected
+            && state.credentials.len() == 2
+            && state.actor.policy_matches_candidates(expected)
     }
 
     #[must_use]
@@ -612,6 +861,17 @@ impl ProductionWitnessRuntime {
     pub const fn effects_open(&self) -> bool {
         false
     }
+}
+
+fn attest_vote_reply(
+    mut reply: ProductionVoteReply,
+    signing_key: &SigningKey,
+) -> Result<ProductionVoteReply, ProductionVoteError> {
+    let statement = reply.encode_statement()?;
+    reply.attestation = signing_key
+        .sign(&vote_reply_attestation_preimage(&statement))
+        .to_bytes();
+    Ok(reply)
 }
 
 fn pin_witness_signer_identity(
@@ -739,7 +999,7 @@ impl ProductionWitnessServer {
         tls_config: MtlsServerConfig,
         runtime: ProductionWitnessRuntime,
     ) -> Result<Self, WitnessServerError> {
-        if !runtime.is_vote_mode() {
+        if !runtime.matches_membership(&membership) {
             return Err(WitnessServerError::InvalidRuntime);
         }
         let listener = TcpListener::bind(membership.witness_address())
@@ -853,6 +1113,11 @@ fn serve_stream(
                 .map_err(|_error| WitnessServerError::SocketServeFailed)?,
             Err(ProductionVoteError::Malformed) => b"MALFORMED\n".to_vec(),
             Err(ProductionVoteError::AuthenticationFailed) => b"AUTHENTICATION_FAILED\n".to_vec(),
+            Err(ProductionVoteError::EpochJump) => b"EPOCH_JUMP_REFUSED\n".to_vec(),
+            Err(ProductionVoteError::IncarnationRollback) => {
+                b"INCARNATION_ROLLBACK_REFUSED\n".to_vec()
+            }
+            Err(ProductionVoteError::IncarnationIo) => b"DURABILITY_REFUSED\n".to_vec(),
             Err(ProductionVoteError::UnsupportedRuntime) => {
                 return Err(WitnessServerError::InvalidRuntime);
             }

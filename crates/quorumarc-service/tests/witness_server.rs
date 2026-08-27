@@ -90,7 +90,7 @@ fn signed_request(
             request_id,
             sequence,
             incarnation: 1,
-            epoch: 4,
+            epoch: 1,
             progress_commit: 12,
             policy_hash: [23; 32],
             payload: payload.to_vec(),
@@ -189,6 +189,104 @@ fn read_status(tls: &mut StreamOwned<ClientConnection, TcpStream>) -> Vec<u8> {
     let mut body = vec![0_u8; len];
     tls.read_exact(&mut body).expect("read resp body");
     body
+}
+
+#[test]
+fn production_witness_server_refuses_runtime_identity_mismatch_with_membership() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-identity-mismatch-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let node_x = SigningKey::from_bytes(&[17; 32]);
+    let node_y = SigningKey::from_bytes(&[19; 32]);
+    let policy = WitnessPolicy::new(
+        canonical_id("witness-x"),
+        canonical_id("witness-x-key"),
+        canonical_id("orders-api"),
+        [23; 32],
+        [canonical_id("node-x"), canonical_id("node-y")],
+        5_000,
+    )
+    .expect("policy");
+    let identity = StoreIdentity::new(
+        "prod-cluster",
+        "orders-api",
+        "witness-x",
+        StoreRole::Witness,
+        [71; 16],
+    )
+    .expect("identity");
+    let runtime = ProductionWitnessRuntime::open_vote_actor(
+        &directory,
+        identity,
+        policy,
+        SigningKey::from_bytes(&[29; 32]),
+        [
+            CandidateCredential::new("node-x", "node-x-key", node_x.verifying_key())
+                .expect("node x"),
+            CandidateCredential::new("node-y", "node-y-key", node_y.verifying_key())
+                .expect("node y"),
+        ],
+    )
+    .expect("runtime");
+    let (ca, server_id, _) = issue_identities();
+    let tls =
+        server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca]).expect("tls");
+    assert!(matches!(
+        ProductionWitnessServer::bind(membership(), tls, runtime),
+        Err(quorumarc_service::witness::WitnessServerError::InvalidRuntime)
+    ));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_witness_server_refuses_policy_candidate_mismatch_with_membership() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-policy-membership-mismatch-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let node_a = SigningKey::from_bytes(&[7; 32]);
+    let node_b = SigningKey::from_bytes(&[9; 32]);
+    let policy = WitnessPolicy::new(
+        canonical_id("witness-a"),
+        canonical_id("witness-2026-01"),
+        canonical_id("orders-api"),
+        [23; 32],
+        [canonical_id("node-a")],
+        5_000,
+    )
+    .expect("policy");
+    let identity = StoreIdentity::new(
+        "prod-cluster",
+        "orders-api",
+        "witness-a",
+        StoreRole::Witness,
+        [72; 16],
+    )
+    .expect("identity");
+    let runtime = ProductionWitnessRuntime::open_vote_actor(
+        &directory,
+        identity,
+        policy,
+        SigningKey::from_bytes(&[29; 32]),
+        [
+            CandidateCredential::new("node-a", "node-a-2026-01", node_a.verifying_key())
+                .expect("node a"),
+            CandidateCredential::new("node-b", "node-b-2026-01", node_b.verifying_key())
+                .expect("node b"),
+        ],
+    )
+    .expect("runtime");
+    let (ca, server_id, _) = issue_identities();
+    let tls =
+        server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca]).expect("tls");
+    assert!(matches!(
+        ProductionWitnessServer::bind(membership(), tls, runtime),
+        Err(quorumarc_service::witness::WitnessServerError::InvalidRuntime)
+    ));
+    let _ = fs::remove_dir_all(directory);
 }
 
 #[test]
@@ -419,7 +517,7 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
     shutdown.request();
     server_thread.join().expect("server thread");
     let resumed = vote_runtime(&directory, &key, &node_b);
-    assert_eq!(resumed.highest_epoch(), 4);
+    assert_eq!(resumed.highest_epoch(), 1);
     let _ = fs::remove_dir_all(directory);
 }
 

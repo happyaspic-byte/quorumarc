@@ -261,37 +261,60 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
         })
     }
 
-    /// Evaluates, persists, then returns a signed vote.
-    ///
-    /// Signature creation occurs only after `record_vote` supplies a
-    /// durability receipt.
-    pub fn handle_vote(&mut self, binding: &QuorumBinding) -> VoteReply {
+    /// Returns the refusal code for a binding that cannot reach durable voting.
+    #[must_use]
+    pub fn preflight_vote(&self, binding: &QuorumBinding) -> Option<VoteReasonCode> {
         if !binding_is_structurally_valid(binding) {
-            return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding);
+            return Some(VoteReasonCode::RefusedMalformedBinding);
         }
         if binding.workload_id != self.policy.workload_id {
-            return VoteReply::refused(VoteReasonCode::RefusedWorkloadMismatch);
+            return Some(VoteReasonCode::RefusedWorkloadMismatch);
         }
         if binding.policy_hash != self.policy.policy_hash {
-            return VoteReply::refused(VoteReasonCode::RefusedPolicyMismatch);
+            return Some(VoteReasonCode::RefusedPolicyMismatch);
         }
         if !self
             .policy
             .allowed_candidates
             .contains(&binding.candidate_node_id)
         {
-            return VoteReply::refused(VoteReasonCode::RefusedCandidateNotAllowed);
+            return Some(VoteReasonCode::RefusedCandidateNotAllowed);
         }
         let Some(lease_duration) = binding
             .lease_expires_at_ms
             .checked_sub(binding.lease_not_before_ms)
         else {
-            return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding);
+            return Some(VoteReasonCode::RefusedMalformedBinding);
         };
         if lease_duration > self.policy.max_lease_duration_ms {
-            return VoteReply::refused(VoteReasonCode::RefusedLeaseTooLong);
+            return Some(VoteReasonCode::RefusedLeaseTooLong);
         }
+        let proposal_digest = match binding.proposal_digest() {
+            Ok(digest) => digest,
+            Err(_) => return Some(VoteReasonCode::RefusedMalformedBinding),
+        };
+        let record = match VoteRecord::new(
+            binding.epoch,
+            binding.candidate_node_id.as_str(),
+            proposal_digest,
+        ) {
+            Ok(record) => record,
+            Err(_) => return Some(VoteReasonCode::RefusedMalformedBinding),
+        };
+        self.store
+            .preflight_vote(&record)
+            .err()
+            .map(|error| map_store_error(&error))
+    }
 
+    /// Evaluates, persists, then returns a signed vote.
+    ///
+    /// Signature creation occurs only after `record_vote` supplies a
+    /// durability receipt.
+    pub fn handle_vote(&mut self, binding: &QuorumBinding) -> VoteReply {
+        if let Some(code) = self.preflight_vote(binding) {
+            return VoteReply::refused(code);
+        }
         let proposal_digest = match binding.proposal_digest() {
             Ok(digest) => digest,
             Err(_) => return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding),
@@ -304,7 +327,6 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
             Ok(record) => record,
             Err(_) => return VoteReply::refused(VoteReasonCode::RefusedMalformedBinding),
         };
-
         let receipt = match self.store.record_vote(record) {
             Ok(receipt) => receipt,
             Err(error) => return VoteReply::refused(map_store_error(&error)),
@@ -323,6 +345,21 @@ impl<B: StorageBackend> WitnessVoteActor<B> {
             TransitionOutcome::AlreadyDurable => VoteReasonCode::GrantedAlreadyDurable,
         };
         VoteReply::granted(code, signed_vote, receipt.generation())
+    }
+
+    /// Whether policy admits exactly the supplied candidate identities.
+    #[must_use]
+    pub fn policy_matches_candidates<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        let candidates = candidates.into_iter().collect::<BTreeSet<_>>();
+        self.policy.allowed_candidates.len() == candidates.len()
+            && self
+                .policy
+                .allowed_candidates
+                .iter()
+                .all(|candidate| candidates.contains(candidate.as_str()))
     }
 
     /// Highest epoch known durable by this actor.
