@@ -153,6 +153,42 @@ fn production_daemon_reloads_log_level_and_refuses_unsafe_sighup() -> Result<(),
     Ok(())
 }
 
+#[test]
+fn production_daemon_pings_systemd_watchdog_without_ready_state() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-agent-watchdog-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, PRODUCTION_CONFIG)?;
+    let notify_socket = directory.join("notify.sock");
+    let listener = std::os::unix::net::UnixDatagram::bind(&notify_socket)?;
+    listener.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+    let child = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .env("NOTIFY_SOCKET", &notify_socket)
+        .env("WATCHDOG_USEC", "100000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut buf = [0_u8; 128];
+    let (len, _) = listener.recv_from(&mut buf)?;
+    let ping = std::str::from_utf8(&buf[..len])?;
+    assert_eq!(ping.trim(), "WATCHDOG=1");
+    assert!(!ping.contains("READY=1"));
+
+    send_signal(child.id(), "-TERM")?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success());
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
 fn send_signal(pid: u32, signal: &str) -> Result<(), Box<dyn Error>> {
     let status = Command::new("kill")
         .args([signal, &pid.to_string()])

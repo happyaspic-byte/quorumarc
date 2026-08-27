@@ -2,6 +2,8 @@
 
 use std::error::Error;
 use std::fs;
+use std::io::Read;
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -94,15 +96,21 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
     fs::create_dir_all(&directory)?;
     let config = directory.join("witness.toml");
     fs::write(&config, WITNESS_CONFIG)?;
+    let socket = directory.join("status.sock");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-witness"))
         .args(["daemon", "--config"])
         .arg(&config)
+        .args(["--status-socket"])
+        .arg(&socket)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    thread::sleep(Duration::from_millis(100));
-    assert!(child.try_wait()?.is_none());
+    wait_for_socket(&socket, &mut child)?;
+    let initial = read_status(&socket)?;
+    assert!(initial.contains("\"log_level\":\"info\""));
+    assert!(initial.contains("\"cluster_id\":\"prod-cluster\""));
+    assert!(initial.contains("\"effect_gate\":\"closed\""));
 
     fs::write(
         &config,
@@ -117,7 +125,9 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
             .status()?
             .success()
     );
-    thread::sleep(Duration::from_millis(100));
+    let reloaded = wait_for_status(&socket, "\"log_level\":\"debug\"")?;
+    assert!(reloaded.contains("\"cluster_id\":\"prod-cluster\""));
+    assert!(reloaded.contains("\"effect_gate\":\"closed\""));
     assert!(child.try_wait()?.is_none());
 
     fs::write(
@@ -130,7 +140,11 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
             .status()?
             .success()
     );
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(200));
+    let refused = read_status(&socket)?;
+    assert!(refused.contains("\"log_level\":\"debug\""));
+    assert!(refused.contains("\"cluster_id\":\"prod-cluster\""));
+    assert!(refused.contains("\"effect_gate\":\"closed\""));
     assert!(child.try_wait()?.is_none());
 
     assert!(
@@ -145,4 +159,39 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
     assert!(stdout.contains("WITNESS_DAEMON_STOPPED_NONVOTING"));
     let _ = fs::remove_dir_all(directory);
     Ok(())
+}
+
+fn read_status(socket: &std::path::Path) -> Result<String, Box<dyn Error>> {
+    let mut client = UnixStream::connect(socket)?;
+    let mut body = String::new();
+    client.read_to_string(&mut body)?;
+    Ok(body)
+}
+
+fn wait_for_status(socket: &std::path::Path, needle: &str) -> Result<String, Box<dyn Error>> {
+    for _ in 0..50 {
+        if let Ok(body) = read_status(socket) {
+            if body.contains(needle) {
+                return Ok(body);
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err("status never matched".into())
+}
+
+fn wait_for_socket(
+    path: &std::path::Path,
+    child: &mut std::process::Child,
+) -> Result<(), Box<dyn Error>> {
+    for _ in 0..50 {
+        if child.try_wait()?.is_some() {
+            return Err("daemon exited before status socket".into());
+        }
+        if path.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err("status socket was not created".into())
 }

@@ -27,6 +27,10 @@ fn agent_unit_is_sandboxed_and_starts_closed_daemon() {
             "ExecStart=/usr/bin/quorumarc-agent daemon --config /etc/quorumarc-agent/agent.toml --status-socket /run/quorumarc/status.sock"
         )
     );
+    assert!(unit.contains("Type=simple"));
+    assert!(unit.contains("NotifyAccess=main"));
+    assert!(unit.contains("WatchdogSec=30s"));
+    assert!(!unit.contains("READY=1"));
     assert!(!unit.contains("--allow-"));
     assert!(!unit.contains("EffectGateExpired"));
 }
@@ -37,6 +41,9 @@ fn witness_unit_is_sandboxed_and_does_not_share_data_host_paths() {
     assert!(unit.contains("User=quorumarc-witness"));
     assert!(unit.contains("ProtectSystem=strict"));
     assert!(unit.contains("NoNewPrivileges=yes"));
+    assert!(unit.contains("Type=simple"));
+    assert!(unit.contains("NotifyAccess=main"));
+    assert!(unit.contains("WatchdogSec=30s"));
     assert!(unit.contains(
         "ExecStart=/usr/bin/quorumarc-witness daemon --config /etc/quorumarc-witness/witness.toml"
     ));

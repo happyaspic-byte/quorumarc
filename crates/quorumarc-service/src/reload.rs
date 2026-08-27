@@ -1,6 +1,9 @@
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+use rustix::fs::OFlags;
 
 use crate::config::ProductionConfig;
 use crate::operations::{NodeStatusReport, StatusHandle};
@@ -19,18 +22,28 @@ pub enum ReloadReadError {
 
 /// Bounded file read refusing oversized configurations or directory paths.
 pub fn read_config_file(path: &Path) -> Result<String, ReloadReadError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|_error| ReloadReadError::InvalidFileType)?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_error| ReloadReadError::InvalidFileType)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_error| ReloadReadError::InvalidFileType)?;
+    if !metadata.is_file() {
         return Err(ReloadReadError::InvalidFileType);
     }
     if metadata.len() > MAX_CONFIG_SIZE as u64 {
         return Err(ReloadReadError::TooLarge);
     }
-    let mut file = File::open(path).map_err(|_error| ReloadReadError::Io)?;
+    let mut bounded = (&mut file).take(MAX_CONFIG_SIZE as u64 + 1);
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    bounded
+        .read_to_end(&mut bytes)
         .map_err(|_error| ReloadReadError::Io)?;
+    if bytes.len() > MAX_CONFIG_SIZE {
+        return Err(ReloadReadError::TooLarge);
+    }
     String::from_utf8(bytes).map_err(|_error| ReloadReadError::InvalidUtf8)
 }
 

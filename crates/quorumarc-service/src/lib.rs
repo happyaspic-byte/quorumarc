@@ -16,4 +16,5 @@ pub mod node;
 pub mod operations;
 pub mod reload;
 pub mod signal;
+pub mod watchdog;
 pub mod witness;

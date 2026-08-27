@@ -69,6 +69,7 @@ pub struct Cli {
     key: Option<PathBuf>,
     store: Option<PathBuf>,
     proof: Option<PathBuf>,
+    status_socket: Option<PathBuf>,
 }
 
 impl Cli {
@@ -122,6 +123,7 @@ where
         key: None,
         store: None,
         proof: None,
+        status_socket: None,
     };
     while let Some(option) = arguments.next() {
         if !option_allowed(command, &option) {
@@ -135,6 +137,7 @@ where
             "--key" => &mut cli.key,
             "--store" => &mut cli.store,
             "--proof" => &mut cli.proof,
+            "--status-socket" => &mut cli.status_socket,
             unknown => return Err(CliError::UnknownOption(unknown.to_owned())),
         };
         if target.is_some() {
@@ -150,8 +153,11 @@ where
 
 fn option_allowed(command: Command, option: &str) -> bool {
     match command {
-        Command::Status | Command::Run | Command::Health | Command::Daemon => {
+        Command::Status | Command::Run | Command::Health => {
             matches!(option, "--config" | "--key" | "--store")
+        }
+        Command::Daemon => {
+            matches!(option, "--config" | "--key" | "--store" | "--status-socket")
         }
         Command::InspectProof => option == "--proof",
         Command::InspectStore => option == "--store",
@@ -427,6 +433,24 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
             None,
         ),
     );
+    let status_server = match cli.status_socket.as_deref() {
+        Some(socket) => {
+            match quorumarc_service::operations::LocalStatusServer::bind_shared(
+                socket,
+                status.clone(),
+            ) {
+                Ok(server) => Some(server),
+                Err(_error) => {
+                    let result = writeln!(
+                        stderr,
+                        "refused=true reason=WITNESS_STATUS_SOCKET_BIND_FAILED voting=false effect_gate=closed"
+                    );
+                    return write_error_exit(result, EXIT_UNAVAILABLE);
+                }
+            }
+        }
+        None => None,
+    };
     let shutdown = quorumarc_service::signal::ShutdownToken::new();
     let reload = shutdown.reload_token();
     let _guard = match shutdown.register_process_signals() {
@@ -439,21 +463,96 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
             return write_error_exit(result, EXIT_UNAVAILABLE);
         }
     };
+    let watchdog = match quorumarc_service::watchdog::SystemdWatchdog::from_environment_variables(
+        std::env::var("NOTIFY_SOCKET").ok().as_deref(),
+        std::env::var("WATCHDOG_USEC").ok().as_deref(),
+    ) {
+        Ok(watchdog) => watchdog,
+        Err(_error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_WATCHDOG_CONFIGURATION_INVALID voting=false effect_gate=closed"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
     let config_path = config_path.to_path_buf();
-    let reload_status = status;
-    let reload_worker = std::thread::spawn(move || {
-        quorumarc_service::reload::run_reload_loop(
-            &config_path,
-            config,
-            "witness",
-            &reload_status,
-            &boot_id,
-            || clock.now_ms(),
-            &reload,
-        );
-    });
+    let reload_status = status.clone();
+    let reload_worker = match std::thread::Builder::new()
+        .name("quorumarc-witness-reload".to_owned())
+        .spawn(move || {
+            quorumarc_service::reload::run_reload_loop(
+                &config_path,
+                config,
+                "witness",
+                &reload_status,
+                &boot_id,
+                || clock.now_ms(),
+                &reload,
+            );
+        }) {
+        Ok(worker) => worker,
+        Err(_error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_RELOAD_WORKER_START_FAILED voting=false effect_gate=closed"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
+    let watchdog_worker = match watchdog {
+        Some(watchdog) => {
+            let worker_shutdown = shutdown.clone();
+            match std::thread::Builder::new()
+                .name("quorumarc-witness-watchdog".to_owned())
+                .spawn(move || watchdog.run_until(&worker_shutdown))
+            {
+                Ok(worker) => Some(worker),
+                Err(_error) => {
+                    shutdown.request();
+                    let _ = reload_worker.join();
+                    let result = writeln!(
+                        stderr,
+                        "refused=true reason=WITNESS_WATCHDOG_WORKER_START_FAILED voting=false effect_gate=closed"
+                    );
+                    return write_error_exit(result, EXIT_UNAVAILABLE);
+                }
+            }
+        }
+        None => None,
+    };
+    let status_worker = match status_server {
+        Some(server) => {
+            let worker_shutdown = shutdown.clone();
+            match std::thread::Builder::new()
+                .name("quorumarc-witness-status".to_owned())
+                .spawn(move || server.serve_until(&worker_shutdown))
+            {
+                Ok(worker) => Some(worker),
+                Err(_error) => {
+                    shutdown.request();
+                    if let Some(worker) = watchdog_worker {
+                        let _ = worker.join();
+                    }
+                    let _ = reload_worker.join();
+                    let result = writeln!(
+                        stderr,
+                        "refused=true reason=WITNESS_STATUS_WORKER_START_FAILED voting=false effect_gate=closed"
+                    );
+                    return write_error_exit(result, EXIT_UNAVAILABLE);
+                }
+            }
+        }
+        None => None,
+    };
     let mut node = quorumarc_service::node::ProductionNode::effect_closed();
     let _report = node.run_until_shutdown(&shutdown);
+    if let Some(worker) = status_worker {
+        let _ = worker.join();
+    }
+    if let Some(worker) = watchdog_worker {
+        let _ = worker.join();
+    }
     let _ = reload_worker.join();
     let result = writeln!(
         stdout,
@@ -515,7 +614,7 @@ fn simulate_failure<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
 fn help<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
     let result = writeln!(
         stdout,
-        "Usage: quorumarc-witness <status|run|health|inspect-proof|inspect-store|simulate-failure|daemon> [--config PATH] [--key PATH] [--store DIR] [--proof FILE]\n\
+        "Usage: quorumarc-witness <status|run|health|inspect-proof|inspect-store|simulate-failure|daemon> [--config PATH] [--key PATH] [--store DIR] [--proof FILE] [--status-socket PATH]\n\
          Gate 1A lab diagnostics are available; run, daemon, and direct voting fail closed."
     );
     write_exit(result, stderr)

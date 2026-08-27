@@ -742,13 +742,13 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
-            let status_worker = match options.status_socket.as_deref() {
+            let status_server = match options.status_socket.as_deref() {
                 Some(socket) => {
-                    let server = match quorumarc_service::operations::LocalStatusServer::bind_shared(
+                    match quorumarc_service::operations::LocalStatusServer::bind_shared(
                         socket,
                         status.clone(),
                     ) {
-                        Ok(server) => server,
+                        Ok(server) => Some(server),
                         Err(_error) => {
                             return CliReport::refusal(
                                 "daemon",
@@ -757,29 +757,102 @@ fn daemon(options: DaemonOptions) -> CliReport {
                                 EXIT_CONFIG,
                             );
                         }
-                    };
-                    let worker_shutdown = shutdown.clone();
-                    Some(std::thread::spawn(move || {
-                        server.serve_until(&worker_shutdown)
-                    }))
+                    }
                 }
                 None => None,
             };
+            let watchdog =
+                match quorumarc_service::watchdog::SystemdWatchdog::from_environment_variables(
+                    std::env::var("NOTIFY_SOCKET").ok().as_deref(),
+                    std::env::var("WATCHDOG_USEC").ok().as_deref(),
+                ) {
+                    Ok(watchdog) => watchdog,
+                    Err(_error) => {
+                        return CliReport::refusal(
+                            "daemon",
+                            "WATCHDOG_CONFIGURATION_INVALID",
+                            "cannot configure fail-closed systemd watchdog pings",
+                            EXIT_CONFIG,
+                        );
+                    }
+                };
             let config_path = path.to_path_buf();
             let reload_status = status.clone();
-            let reload_worker = std::thread::spawn(move || {
-                quorumarc_service::reload::run_reload_loop(
-                    &config_path,
-                    config,
-                    "data",
-                    &reload_status,
-                    &boot_id,
-                    || clock.now_ms(),
-                    &reload,
-                );
-            });
+            let reload_worker = match std::thread::Builder::new()
+                .name("quorumarc-agent-reload".to_owned())
+                .spawn(move || {
+                    quorumarc_service::reload::run_reload_loop(
+                        &config_path,
+                        config,
+                        "data",
+                        &reload_status,
+                        &boot_id,
+                        || clock.now_ms(),
+                        &reload,
+                    );
+                }) {
+                Ok(worker) => worker,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "RELOAD_WORKER_START_FAILED",
+                        "cannot start fail-closed configuration reload worker",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
+            let status_worker = match status_server {
+                Some(server) => {
+                    let worker_shutdown = shutdown.clone();
+                    match std::thread::Builder::new()
+                        .name("quorumarc-agent-status".to_owned())
+                        .spawn(move || server.serve_until(&worker_shutdown))
+                    {
+                        Ok(worker) => Some(worker),
+                        Err(_error) => {
+                            shutdown.request();
+                            let _ = reload_worker.join();
+                            return CliReport::refusal(
+                                "daemon",
+                                "STATUS_WORKER_START_FAILED",
+                                "cannot start read-only status worker",
+                                EXIT_CONFIG,
+                            );
+                        }
+                    }
+                }
+                None => None,
+            };
+            let watchdog_worker = match watchdog {
+                Some(watchdog) => {
+                    let worker_shutdown = shutdown.clone();
+                    match std::thread::Builder::new()
+                        .name("quorumarc-agent-watchdog".to_owned())
+                        .spawn(move || watchdog.run_until(&worker_shutdown))
+                    {
+                        Ok(worker) => Some(worker),
+                        Err(_error) => {
+                            shutdown.request();
+                            if let Some(worker) = status_worker {
+                                let _ = worker.join();
+                            }
+                            let _ = reload_worker.join();
+                            return CliReport::refusal(
+                                "daemon",
+                                "WATCHDOG_WORKER_START_FAILED",
+                                "cannot start fail-closed watchdog worker",
+                                EXIT_CONFIG,
+                            );
+                        }
+                    }
+                }
+                None => None,
+            };
             let report = node.run_until_shutdown(&shutdown);
             if let Some(worker) = status_worker {
+                let _ = worker.join();
+            }
+            if let Some(worker) = watchdog_worker {
                 let _ = worker.join();
             }
             let _ = reload_worker.join();

@@ -161,6 +161,67 @@ fn reload_wait_wakes_on_request_and_cancels_on_shutdown() {
 }
 
 #[test]
+fn watchdog_pings_running_daemon_and_never_emits_ready() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-watchdog-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let notify_socket = directory.join("notify.sock");
+    let listener = std::os::unix::net::UnixDatagram::bind(&notify_socket).expect("bind notify");
+    listener
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("timeout");
+
+    let watchdog = quorumarc_service::watchdog::SystemdWatchdog::from_socket_path(
+        &notify_socket,
+        Duration::from_millis(20),
+    )
+    .expect("watchdog");
+    assert!(!watchdog.emitted_ready());
+
+    let shutdown = ShutdownToken::new();
+    let worker_shutdown = shutdown.clone();
+    let handle = thread::spawn(move || watchdog.run_until(&worker_shutdown));
+
+    let mut buf = [0_u8; 128];
+    let (len, _) = listener.recv_from(&mut buf).expect("first ping");
+    let first = std::str::from_utf8(&buf[..len]).expect("utf8");
+    assert_eq!(first.trim(), "WATCHDOG=1");
+    assert!(!first.contains("READY=1"));
+
+    shutdown.request();
+    handle.join().expect("watchdog stop");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn watchdog_detects_half_interval_from_systemd_environment() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-watchdog-env-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let notify_socket = directory.join("notify.sock");
+    std::os::unix::net::UnixDatagram::bind(&notify_socket).expect("bind notify");
+
+    let watchdog = quorumarc_service::watchdog::SystemdWatchdog::from_environment_variables(
+        Some(notify_socket.to_str().expect("utf8")),
+        Some("2000000"),
+    )
+    .expect("env watchdog")
+    .expect("some watchdog");
+    assert_eq!(watchdog.interval(), Duration::from_secs(1));
+    assert!(
+        quorumarc_service::watchdog::SystemdWatchdog::from_environment_variables(None, None)
+            .is_ok_and(|watchdog| watchdog.is_none())
+    );
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn effect_closed_daemon_stops_without_ever_becoming_ready() {
     let mut node = ProductionNode::effect_closed();
     let shutdown = ShutdownToken::new();

@@ -38,7 +38,8 @@ LimitNOFILE=1024
 TimeoutStopSec=15
 KillSignal=SIGTERM
 Restart=no
-NotifyAccess=none
+NotifyAccess=main
+WatchdogSec=30s
 
 [Install]
 WantedBy=multi-user.target
