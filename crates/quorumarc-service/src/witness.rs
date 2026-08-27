@@ -1,5 +1,4 @@
-use std::net::IpAddr;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Static three-member Witness membership.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,6 +17,8 @@ pub enum WitnessMembershipError {
     SharedHost,
     SharedFailureDomain,
     InvalidMember,
+    ReservedWitnessHost,
+    DuplicateMember,
 }
 
 impl WitnessMembership {
@@ -40,8 +41,14 @@ impl WitnessMembership {
         if node_a_id.is_empty() || node_b_id.is_empty() || witness_id.is_empty() {
             return Err(WitnessMembershipError::InvalidMember);
         }
+        if node_a_id == node_b_id || node_a_id == witness_id || node_b_id == witness_id {
+            return Err(WitnessMembershipError::DuplicateMember);
+        }
         if same_host(node_a.ip(), witness.ip()) || same_host(node_b.ip(), witness.ip()) {
             return Err(WitnessMembershipError::SharedHost);
+        }
+        if canonical_ip(witness.ip()) == IpAddr::V4(Ipv4Addr::new(172, 30, 1, 84)) {
+            return Err(WitnessMembershipError::ReservedWitnessHost);
         }
         if node_a_domain == witness_domain
             || node_b_domain == witness_domain
@@ -79,5 +86,12 @@ impl WitnessMembership {
 }
 
 fn same_host(left: IpAddr, right: IpAddr) -> bool {
-    left == right
+    canonical_ip(left) == canonical_ip(right)
+}
+
+fn canonical_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
+    }
 }
