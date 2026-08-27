@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -373,5 +373,56 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
     )
     .expect("resume");
     assert_eq!(resumed.highest_sequence(), 1);
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_witness_server_shutdown_closes_and_joins_idle_workers() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-server-shutdown-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let runtime = ProductionWitnessRuntime::open(
+        &directory,
+        [45; 16],
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    )
+    .expect("open");
+    let (ca, server_id, _) = issue_identities();
+    let server_config = server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca])
+        .expect("server config");
+    let server =
+        ProductionWitnessServer::bind("127.0.0.1:0".parse().expect("addr"), server_config, runtime)
+            .expect("bind");
+    let listen_addr = server.local_addr().expect("local addr");
+    let shutdown = ShutdownToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_thread = thread::spawn(move || server.serve_until(&shutdown_clone));
+
+    let mut idle = connect_retry(listen_addr).expect("idle connect");
+    idle.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("read timeout");
+    shutdown.request();
+    assert!(server_thread.join().expect("server thread").is_ok());
+
+    let mut byte = [0_u8; 1];
+    let closed = idle.read(&mut byte);
+    let closed_by_server = match closed {
+        Ok(0) => true,
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+        ),
+        Ok(_) => false,
+    };
+    assert!(closed_by_server);
+    let _ = idle.shutdown(Shutdown::Both);
     let _ = fs::remove_dir_all(directory);
 }

@@ -1,8 +1,8 @@
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
@@ -110,6 +110,7 @@ fn canonical_ip(address: IpAddr) -> IpAddr {
 }
 
 const WITNESS_IO_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_WITNESS_CONNECTIONS: usize = 32;
 const MAX_WITNESS_FRAME: usize =
     8 + 2 + 1 + 4 * (1 + 128) + 16 + 8 + 8 + 8 + 8 + 32 + 4 + 65_536 + 64;
 
@@ -189,16 +190,26 @@ impl ProductionWitnessServer {
         self.listener
             .set_nonblocking(true)
             .map_err(|_error| WitnessServerError::SocketServeFailed)?;
+        let mut workers = Vec::new();
         while !shutdown.is_requested() {
+            reap_finished_workers(&mut workers);
             match self.listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((stream, _addr)) if workers.len() < MAX_WITNESS_CONNECTIONS => {
+                    let control = stream
+                        .try_clone()
+                        .map_err(|_error| WitnessServerError::SocketServeFailed)?;
                     let tls_config = Arc::clone(&self.tls_config);
                     let runtime = Arc::clone(&self.runtime);
-                    let _ = thread::Builder::new()
+                    let handle = thread::Builder::new()
                         .name("quorumarc-witness-conn".to_owned())
                         .spawn(move || {
                             let _ = serve_stream(stream, tls_config, runtime);
-                        });
+                        })
+                        .map_err(|_error| WitnessServerError::SocketServeFailed)?;
+                    workers.push(ConnectionWorker { control, handle });
+                }
+                Ok((stream, _addr)) => {
+                    let _ = stream.shutdown(Shutdown::Both);
                 }
                 Err(error)
                     if matches!(
@@ -211,7 +222,30 @@ impl ProductionWitnessServer {
                 Err(_error) => return Err(WitnessServerError::SocketServeFailed),
             }
         }
+        for worker in &workers {
+            let _ = worker.control.shutdown(Shutdown::Both);
+        }
+        for worker in workers {
+            let _ = worker.handle.join();
+        }
         Ok(())
+    }
+}
+
+struct ConnectionWorker {
+    control: TcpStream,
+    handle: JoinHandle<()>,
+}
+
+fn reap_finished_workers(workers: &mut Vec<ConnectionWorker>) {
+    let mut index = 0;
+    while index < workers.len() {
+        if workers[index].handle.is_finished() {
+            let worker = workers.swap_remove(index);
+            let _ = worker.handle.join();
+        } else {
+            index += 1;
+        }
     }
 }
 
