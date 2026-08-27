@@ -7,6 +7,7 @@
 #![deny(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
+pub mod adapters;
 pub mod clock;
 pub mod config;
 pub mod controller;
