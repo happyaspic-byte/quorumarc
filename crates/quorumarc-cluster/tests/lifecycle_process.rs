@@ -1035,9 +1035,14 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
             .reason_code,
         LifecycleReasonCode::Promoted
     );
+    let exact = CounterOperation {
+        id: OperationId::new([9; 16]),
+        expected_commit_index: 0,
+        increment: 1,
+    };
     let confirmed = lab
         .node_b_client
-        .retry_workload(2, second_start + 1, [9; 16])
+        .retry_workload(2, second_start + 1, exact)
         .expect("confirm recovered operation");
     assert_eq!(
         confirmed.reason_code,
@@ -1053,15 +1058,40 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
     );
     let repeated = lab
         .node_b_client
-        .retry_workload(2, second_start + 2, [9; 16])
+        .retry_workload(2, second_start + 2, exact)
         .expect("new signed request for same operation");
     assert_eq!(
         repeated.reason_code,
         LifecycleReasonCode::WorkloadRetryConfirmed
     );
+    let conflicting = lab
+        .node_b_client
+        .retry_workload(
+            2,
+            second_start + 3,
+            CounterOperation {
+                id: OperationId::new([9; 16]),
+                expected_commit_index: 0,
+                increment: 999,
+            },
+        )
+        .expect("conflicting duplicate refusal");
+    assert_eq!(
+        conflicting.reason_code,
+        LifecycleReasonCode::RefusedWorkloadRetry
+    );
+    assert_eq!(conflicting.state, LifecycleState::Active);
     let unknown = lab
         .node_b_client
-        .retry_workload(2, second_start + 3, [57; 16])
+        .retry_workload(
+            2,
+            second_start + 4,
+            CounterOperation {
+                id: OperationId::new([57; 16]),
+                expected_commit_index: 0,
+                increment: 1,
+            },
+        )
         .expect("unknown operation refusal");
     assert_eq!(
         unknown.reason_code,
@@ -1084,28 +1114,30 @@ fn duplicate_acknowledged_workload_operation_is_confirmed_after_failover() {
 
 #[test]
 fn lagging_candidate_is_refused_before_witness_authority() {
+    let _guard = PROCESS_LAB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let lagging = NodeSpec {
         wal: WalMode::Empty,
         ..NodeSpec::normal()
     };
-    let mut lab = Lab::start("lagging", NodeSpec::normal(), lagging);
-    let (second_start, _) = lease_window(2);
-    assert_eq!(
-        lab.node_a_client
-            .promote(1, 1_000)
-            .expect("promote A")
-            .reason_code,
-        LifecycleReasonCode::Promoted
+    let fixture = Fixture::new("lagging", lagging, NodeSpec::normal());
+    let ready = fixture.root.join("node-a.ready");
+    let child = spawn_node(
+        &fixture,
+        LifecycleNodeId::NodeA,
+        SocketAddr::from_str("127.0.0.1:9").expect("loopback address"),
+        &ready,
+        lagging,
     );
-    let report = lab
-        .node_b_client
-        .promote(2, second_start)
-        .expect("lag refusal");
-    assert_eq!(
-        report.reason_code,
-        LifecycleReasonCode::RefusedCandidateLagging
+    let output = child.wait_with_output().expect("collect lagging refusal");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("LIFECYCLE_PROGRESS_CONTRACT_REFUSED")
     );
-    assert_eq!(report.effect_count, 0);
+    assert!(!ready.exists());
+    assert!(!fixture.root.join("node-a-store/authority.journal").exists());
+    fs::remove_dir_all(&fixture.root).expect("remove lagging fixture");
     record_pass(11, "candidate_data_lag");
 }
 
@@ -1313,17 +1345,30 @@ fn policy_mismatch_is_fail_closed() {
 
 #[test]
 fn state_root_mismatch_is_fail_closed() {
+    let _guard = PROCESS_LAB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let different = NodeSpec {
         wal: WalMode::DifferentRoot,
         ..NodeSpec::normal()
     };
-    let mut lab = Lab::start("root", different, NodeSpec::normal());
-    let report = lab.node_a_client.promote(1, 1_000).expect("root refusal");
-    assert_eq!(
-        report.reason_code,
-        LifecycleReasonCode::RefusedCandidateLagging
+    let fixture = Fixture::new("root", different, NodeSpec::normal());
+    let ready = fixture.root.join("node-a.ready");
+    let child = spawn_node(
+        &fixture,
+        LifecycleNodeId::NodeA,
+        SocketAddr::from_str("127.0.0.1:9").expect("loopback address"),
+        &ready,
+        different,
     );
-    assert_eq!(report.effect_count, 0);
+    let output = child.wait_with_output().expect("collect root refusal");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("LIFECYCLE_PROGRESS_CONTRACT_REFUSED")
+    );
+    assert!(!ready.exists());
+    assert!(!fixture.root.join("node-a-store/authority.journal").exists());
+    fs::remove_dir_all(&fixture.root).expect("remove root fixture");
     record_pass(21, "state_root_mismatch");
 }
 

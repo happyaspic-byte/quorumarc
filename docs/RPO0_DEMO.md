@@ -32,20 +32,28 @@ record. Exact operation retries return the stable signed result without another
 append. Peer loss after readiness produces `CONTINUOUS_UNKNOWN`, may leave one
 primary-only prefix, and never returns an acknowledgement.
 
-This remains a shared-host lab slice, not an end-to-end HA service. It has no
-Witness, promotion, fencing, EffectGate, alternate writer, checkpointing, repair,
-recovery CLI, or multi-host workload daemon. The fixed primary can continue
-writing independently of lifecycle authority, so running it concurrently with
-promotion is unsupported. Distinct process roles and paths do not prove distinct
-disks, machines, or failure domains.
+A sequential handoff test now stops and reaps both continuous processes, then
+starts Node A, Node B, and the Witness against the same unchanged WAL inodes with
+an exact configured `required_commit` and `state_root` contract. That exact pair
+is enforced by signed node reports, controller candidate eligibility, candidate
+vote, Witness scope, final envelope, durable promotion record, activation
+receipt, and EffectGate. After Node A is killed and its lease plus guard expire,
+Node B promotes on the same pair and confirms the exact live head operation
+shape—ID, expected prior commit, and increment—without another append.
 
-The continuous slice reports commit index and state root, but does not durably
-couple that progress to the authority store, canonical promotion envelope,
-Witness decision, or EffectGate. Consequently it does not establish failover,
-automatic recovery, client-observed durable acknowledgement history, or
-production RPO 0. Exact-head CI evidence, when available, belongs in the Draft
-PR and retained workflow artifact; this static document does not preserve an
-older run as current evidence.
+This remains a shared-host bounded lab slice, not an end-to-end HA service. It
+has no concurrent data plane during failover, lease renewal from fresh progress,
+checkpointing, repair, recovery CLI, or multi-host workload daemon. Continuous
+writer and lifecycle WAL ownership are mutually exclusive and handed off only
+after process exit. Distinct process roles and paths do not prove distinct disks,
+machines, or failure domains.
+
+The sequential bridge durably couples the exact configured head pair to each
+node authority store and to the signed promotion/activation path. It does not
+persist an independent client-delivery decision, keep replication available
+during failover, or establish production RPO 0. Exact-head CI evidence, when
+available, belongs in the Draft PR and retained workflow artifact; this static
+document does not preserve an older run as current evidence.
 
 Physical power, storage-cache, controller, independent-host, and network
 behavior is **PHYSICAL-REQUIRED**. Hosted-runner process tests remain

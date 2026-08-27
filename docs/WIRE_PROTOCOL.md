@@ -46,7 +46,7 @@ membership discovery, and a durable multi-operator management plane remain
 ## Bounded lifecycle control frames
 
 The lifecycle lab uses fixed-size big-endian schemas inside the bounded frame
-codec. A signed command is exactly 124 bytes:
+codec. A signed command is exactly 140 bytes:
 
 | Field | Bytes |
 |---|---:|
@@ -57,13 +57,16 @@ codec. A signed command is exactly 124 bytes:
 | Logical time | 8 |
 | Epoch | 8 |
 | Stable operation ID | 16 |
+| Expected prior commit | 8 |
+| Increment | 8 |
 | Target node tag | 1 |
 | Ed25519 signature | 64 |
 
 The request ID has eight `0x51` domain bytes followed by a non-zero monotonic
 u64 counter. The command signature uses the
-`quorumarc/lifecycle/command/ed25519/v1\0` domain and binds the target node.
-Unused epoch/operation fields must be canonical zero. The live node accepts a
+`quorumarc/lifecycle/command/ed25519/v2\0` domain and binds the target node.
+Only `RetryWorkload` carries an expected prior commit and non-zero increment;
+other commands encode both fields as canonical zero. The live node accepts a
 strictly newer counter, returns the cached signed decision for the exact latest
 request, and rejects an older counter or same counter with changed content.
 This anti-replay state is process-local and is not a durable management
@@ -258,8 +261,9 @@ verified object into core evidence, applies the safety policy, persists
 incarnation/vote/promotion/activation generations, rechecks proposal/final
 digests plus commit/root/lease, and uses an immutable fixture clock for one
 test-sink effect. Role-independent owner locks prevent two local roles from
-claiming the same store or WAL path. These locks do not prevent copied stores,
-copied credentials, distributed races, or rollback outside one filesystem.
+claiming the same store or WAL path, while an additional WAL-inode lock covers
+hard-link aliases. These locks do not prevent copied stores, copied credentials,
+distributed races, or rollback outside one filesystem.
 
 The core continuity receipt does not carry the final-envelope digest. The
 one-shot adapter therefore rechecks that digest in the durable authority store

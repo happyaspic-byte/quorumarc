@@ -8,11 +8,11 @@ use std::time::Duration;
 use quorumarc_cluster::{
     BootstrapConfig, ClusterError, ContinuousClient, ContinuousPrimaryConfig,
     ContinuousReplicaConfig, ContinuousSubmitOutcome, FaultProxyConfig, LifecycleControllerConfig,
-    LifecycleNodeConfig, LifecycleNodeId, LifecycleStoreFault, LifecycleWitnessConfig, PeerConfig,
-    SelfTestConfig, WitnessConfig, lifecycle_policy_hash, load_private_seed, load_public_key,
-    run_bootstrap, run_lifecycle_controller, run_self_test, serve_continuous_primary,
-    serve_continuous_replica, serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness,
-    serve_peer, serve_witness,
+    LifecycleNodeConfig, LifecycleNodeId, LifecycleProgressContract, LifecycleStoreFault,
+    LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig, default_progress_contract,
+    lifecycle_policy_hash, load_private_seed, load_public_key, run_bootstrap,
+    run_lifecycle_controller, run_self_test, serve_continuous_primary, serve_continuous_replica,
+    serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness, serve_peer, serve_witness,
 };
 use quorumarc_rpo0::{CounterOperation, OperationId};
 
@@ -114,6 +114,8 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--timeout-ms",
                     "--policy-byte",
                     "--store-fault",
+                    "--required-commit",
+                    "--state-root-hex",
                 ],
                 &["--allow-lifecycle-lab"],
             )?;
@@ -132,6 +134,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 max_connections: options.u64("--max-connections")?,
                 io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
                 policy_hash,
+                progress_contract: progress_contract(&options)?,
                 store_fault: parse_store_fault(options.optional_value("--store-fault"))?,
             })
         }
@@ -148,6 +151,8 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--max-connections",
                     "--timeout-ms",
                     "--policy-byte",
+                    "--required-commit",
+                    "--state-root-hex",
                 ],
                 &["--allow-lifecycle-lab"],
             )?;
@@ -163,6 +168,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 max_connections: options.u64("--max-connections")?,
                 io_timeout: Duration::from_millis(options.u64("--timeout-ms")?),
                 policy_hash,
+                progress_contract: progress_contract(&options)?,
             })
         }
         "lifecycle-controller" => {
@@ -182,6 +188,8 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--observation-timeout-ms",
                     "--authority-timeout-ms",
                     "--max-runtime-ms",
+                    "--required-commit",
+                    "--state-root-hex",
                 ],
                 &["--allow-lifecycle-lab", "--emit-test-effect"],
             )?;
@@ -202,6 +210,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 ),
                 authority_timeout: Duration::from_millis(options.u64("--authority-timeout-ms")?),
                 max_runtime: Duration::from_millis(options.u64("--max-runtime-ms")?),
+                progress_contract: progress_contract(&options)?,
                 emit_test_effect: options.flag("--emit-test-effect"),
             })?;
             println!(
@@ -614,6 +623,47 @@ fn require_lifecycle_opt_in(options: &Options) -> Result<(), ClusterError> {
             "LIFECYCLE_LAB_DISABLED",
             "lifecycle service requires explicit --allow-lifecycle-lab",
         ))
+    }
+}
+
+fn progress_contract(options: &Options) -> Result<LifecycleProgressContract, ClusterError> {
+    match (
+        options.optional_value("--required-commit"),
+        options.optional_value("--state-root-hex"),
+    ) {
+        (None, None) => default_progress_contract(),
+        (Some(commit), Some(root)) => {
+            let required_commit = commit
+                .parse::<u64>()
+                .map_err(|error| cli_error(format!("invalid --required-commit: {error}")))?;
+            LifecycleProgressContract::new(required_commit, decode_hex_32(root)?)
+        }
+        _ => Err(cli_error(
+            "--required-commit and --state-root-hex must be supplied together",
+        )),
+    }
+}
+
+fn decode_hex_32(value: &str) -> Result<[u8; 32], ClusterError> {
+    if value.len() != 64 {
+        return Err(cli_error(
+            "state root must be exactly 64 lowercase hex characters",
+        ));
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        decoded[index] = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(value: u8) -> Result<u8, ClusterError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(cli_error("state root must use lowercase hexadecimal")),
     }
 }
 

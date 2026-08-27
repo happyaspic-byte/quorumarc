@@ -41,9 +41,10 @@ pub use fault_proxy::{FaultProxyConfig, serve_fault_proxy};
 pub use keys::{load_private_seed, load_public_key};
 pub use lifecycle::{
     LifecycleAutoController, LifecycleAutoDecision, LifecycleAutoReason, LifecycleClient,
-    LifecycleNodeConfig, LifecycleNodeId, LifecycleReasonCode, LifecycleReport, LifecycleState,
-    LifecycleStoreFault, LifecycleWitnessConfig, lifecycle_lease, lifecycle_policy_hash,
-    serve_lifecycle_node, serve_lifecycle_witness,
+    LifecycleNodeConfig, LifecycleNodeId, LifecycleProgressContract, LifecycleReasonCode,
+    LifecycleReport, LifecycleState, LifecycleStoreFault, LifecycleWitnessConfig,
+    default_progress_contract, lifecycle_lease, lifecycle_policy_hash, serve_lifecycle_node,
+    serve_lifecycle_witness,
 };
 pub use peer::{PeerConfig, serve_peer};
 pub use self_test::{SelfTestConfig, SelfTestReport, run_self_test};

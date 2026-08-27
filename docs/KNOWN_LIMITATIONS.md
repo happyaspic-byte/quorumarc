@@ -63,7 +63,7 @@ failover and write-latency distributions do not exist.
 | Exact-head workspace tests | The [Draft PR](https://github.com/happyaspic-byte/quorumarc/pull/2) links the exact commit, run, inventory, and artifact | These are component/process results, not global scenario PASS results |
 | Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
 | Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
-| GitHub-hosted process | Long-running Node A/B plus Witness, separate automatic controller and fault proxies, alongside the earlier one-shot labs and a separate fixed-primary continuous two-copy counter slice | Shared host; the continuous slice is not bound to lifecycle authority, fencing, Witness, EffectGate, failover, or independent failure domains |
+| GitHub-hosted process | Long-running Node A/B plus Witness, automatic controller/fault proxies, one-shot labs, and a sequential continuous-to-lifecycle bridge binding live commit/root through successor recovery | Shared host; continuous writes stop before lifecycle handoff, and no physical failure-domain or endpoint enforcement exists |
 | Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for
@@ -117,10 +117,12 @@ bounded logical-time lab.
 
 The bounded bootstrap is explicitly named `LAB_GENESIS_ONE_SHOT`. A
 role-independent OS advisory owner lock prevents local peer/candidate/Witness roles
-from claiming the same declared store or WAL path; readiness, keys, journals,
-locks, and WAL paths are also checked for local aliases. These checks may
-prevent concurrent honest processes from owning the same local files and the
-kernel releases ownership after `SIGKILL`, but they are not distributed locks.
+from claiming the same declared store path. WAL ownership additionally locks the
+WAL inode itself so a hard-link alias cannot acquire a second owner. Readiness,
+keys, journals, lock sidecars, and WAL paths are also checked for local aliases.
+These checks may prevent concurrent honest processes from owning the same local
+files and the kernel releases ownership after `SIGKILL`, but they are not
+distributed locks.
 Copying the trusted directories and
 Witness credential to another instance can authorize another logical effect.
 This slice must never be reported as global single-writer proof or scenario 1
@@ -158,10 +160,13 @@ They cannot prove that arbitrary disks, controllers, filesystems, hypervisors,
 or firmware honor flushes, nor defeat an undetectable rollback of every trusted
 copy.
 
-Authority frame v3 binds cluster/workload/node/role and a non-zero provisioned
-store-instance ID. A frame opened with any different expected identity is
-refused before staging cleanup. This prevents accidental cross-node,
-cross-workload, and data-node/Witness journal reuse, but it is not a global
+Authority frame v3 binds cluster/workload/node/role and a non-zero local
+store-instance identity. Lifecycle roles derive that identity from the
+provisioned role ID plus the exact progress contract, so a committed journal
+cannot reopen under another commit/root pair. A frame opened with any different
+expected identity is refused before staging cleanup. This prevents accidental
+cross-node, cross-workload, contract-drift, and data-node/Witness journal reuse,
+but it is not a global
 uniqueness root: a perfect copy of the journal, expected identity/configuration,
 and Witness credential creates an authority clone that the first instance
 cannot observe. The CRC is damage detection, not malicious-frame

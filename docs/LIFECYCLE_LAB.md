@@ -42,9 +42,13 @@ The following claims are implemented in this laboratory:
   reply loss, corruption, stale signed-request replay, and a bounded
   two-connection reorder of opaque frames without gaining the ability to
   manufacture a valid vote or authority proof; and
-- after Active loss and safe promotion, an exact stable operation ID already
-  present in the two pre-seeded durable WALs is confirmed by the successor's
-  signed response without another append; an unknown retry remains refused.
+- after Active loss and safe promotion, an exact operation shape—stable ID,
+  expected prior commit, and increment—already present at the configured WAL
+  head is confirmed by the successor's signed response without another append;
+  a conflicting or unknown retry remains refused; and
+- a separate sequential handoff test creates two live client-acknowledged
+  operations, reaps the continuous writer/replica, and binds their exact commit
+  2/root into Node A, Node B, Witness, promotion, activation, and EffectGate.
 
 The lab-only `LifecycleAutoController` consumes fresh signed Node A/B reports,
 and `quorumarc-cluster lifecycle-controller` supplies those observations and
@@ -81,7 +85,10 @@ failover measurement.
 
 Lease renewal is deliberately absent. Heartbeats cannot extend authority. A
 new authority epoch requires another durable Witness vote and the exact
-replication progress expected by the capsule.
+`required_commit`/`state_root` contract supplied identically to both nodes, the
+Witness, and the controller. This is an exact head-root contract: lagging,
+extra-tail, or divergent progress is refused. Existing examples omit these
+options and use the fixed seed contract for backward-compatible lab fixtures.
 
 Extended Safety repeats the focused controller `SIGKILL` path twenty times,
 measures host elapsed time from fault injection to successor test effect, and
@@ -135,10 +142,12 @@ store, private key, and readiness file. Private key files must be exact mode
 `0600`. All role keys must have distinct values, and stores, WALs, keys, owner
 locks, and readiness paths must not alias.
 
-Store and WAL ownership uses a persistent local lock inode with an OS advisory
-exclusive lock. A competing live process is refused, while `SIGKILL` releases
-the kernel lock so the same configured node can restart and allocate a newer
-durable incarnation. The lock is local coordination, not distributed fencing.
+Authority stores use a persistent local owner inode; WAL ownership locks the
+WAL inode itself with an OS advisory exclusive lock, so hard-link aliases cannot
+acquire independent ownership. A competing live process is refused, while
+`SIGKILL` releases the kernel lock so the same configured node can restart and
+allocate a newer durable incarnation. These locks are local coordination, not
+distributed fencing.
 
 The bounded automatic executor uses the controller private key whose public
 key is pinned by both nodes:

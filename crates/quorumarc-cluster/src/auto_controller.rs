@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::keys::{load_private_seed, load_public_key, require_distinct_role_keys};
 use crate::lifecycle::{
     LifecycleAutoController, LifecycleAutoDecision, LifecycleAutoReason, LifecycleClient,
-    LifecycleNodeId, LifecycleReasonCode, lifecycle_lease,
+    LifecycleNodeId, LifecycleProgressContract, LifecycleReasonCode, lifecycle_lease,
 };
 use crate::path_guard::{prepare_file_parent, reject_symlink_components};
 use crate::{ClusterError, err};
@@ -35,6 +35,7 @@ pub struct LifecycleControllerConfig {
     pub observation_timeout: Duration,
     pub authority_timeout: Duration,
     pub max_runtime: Duration,
+    pub progress_contract: LifecycleProgressContract,
     pub emit_test_effect: bool,
 }
 
@@ -96,7 +97,10 @@ pub fn run_lifecycle_controller(
         controller_key,
         config.authority_timeout,
     );
-    let mut controller = LifecycleAutoController::new(config.failure_threshold)?;
+    let mut controller = LifecycleAutoController::new_with_contract(
+        config.failure_threshold,
+        config.progress_contract,
+    )?;
     let (logical_start_ms, _) = lifecycle_lease(1)?;
     let started = Instant::now();
     let mut promotions = 0_u64;
@@ -351,6 +355,10 @@ fn controller_now_ms(
 }
 
 fn validate_config(config: &LifecycleControllerConfig) -> Result<(), ClusterError> {
+    LifecycleProgressContract::new(
+        config.progress_contract.required_commit,
+        config.progress_contract.state_root,
+    )?;
     for (name, address) in [
         ("node-a", config.node_a_address),
         ("node-b", config.node_b_address),
@@ -656,6 +664,8 @@ impl ControllerTrace {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     fn config() -> LifecycleControllerConfig {
@@ -673,6 +683,8 @@ mod tests {
             observation_timeout: Duration::from_millis(25),
             authority_timeout: Duration::from_millis(100),
             max_runtime: Duration::from_secs(2),
+            progress_contract: crate::lifecycle::default_progress_contract()
+                .expect("default progress contract"),
             emit_test_effect: false,
         }
     }

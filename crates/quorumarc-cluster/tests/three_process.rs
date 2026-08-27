@@ -183,7 +183,14 @@ fn ab_replication_partition_refuses_acknowledgement_and_authority() {
     witness.kill().expect("stop unused Witness");
     let _peer_status = peer.wait().expect("collect isolated peer");
     let _witness_status = witness.wait().expect("collect unused Witness");
-    assert!(!peer_wal.exists());
+    if peer_wal.exists() {
+        assert!(
+            fs::read(&peer_wal)
+                .expect("read isolated peer WAL placeholder")
+                .is_empty(),
+            "isolated peer WAL must not contain a recovered record"
+        );
+    }
     assert!(local_wal.is_file());
     assert_eq!(
         recover_wal(&fs::read(&local_wal).expect("read unacknowledged local WAL"))

@@ -99,9 +99,7 @@ where
     S: Into<String>,
 {
     let mut arguments = arguments.into_iter().map(Into::into);
-    let first = arguments
-        .next()
-        .map_or_else(|| String::from("status"), std::convert::identity);
+    let first = arguments.next().unwrap_or_else(|| String::from("status"));
     let command = match first.as_str() {
         "status" => Command::Status,
         "run" => Command::Run,

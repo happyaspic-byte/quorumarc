@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 use fs2::FileExt;
@@ -353,20 +353,96 @@ pub(crate) fn write_ready_file(path: &Path, contents: &str) -> Result<(), Cluste
 #[derive(Debug)]
 pub(crate) struct OwnerLock {
     _file: File,
+    _path_lock: Option<File>,
+    unlink_if_empty: Option<PathBuf>,
+}
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        let Some(path) = self.unlink_if_empty.as_ref() else {
+            return;
+        };
+        let Ok(owned) = self._file.metadata() else {
+            return;
+        };
+        if owned.len() != 0 {
+            return;
+        }
+        let Ok(current) = fs::metadata(path) else {
+            return;
+        };
+        if current.len() != 0 {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if current.dev() != owned.dev() || current.ino() != owned.ino() {
+                return;
+            }
+        }
+        let _cleanup = fs::remove_file(path);
+    }
 }
 
 impl OwnerLock {
     pub(crate) fn for_store(store: &Path, role: &str) -> Result<Self, ClusterError> {
         prepare_store_directory(store)?;
-        Self::acquire(store_lock_path(store), role)
+        Ok(Self {
+            _file: Self::acquire_path(store_lock_path(store), role)?,
+            _path_lock: None,
+            unlink_if_empty: None,
+        })
     }
 
     pub(crate) fn for_file(file: &Path, role: &str) -> Result<Self, ClusterError> {
         prepare_file_parent(file)?;
-        Self::acquire(file_lock_path(file), role)
+        let path_lock = Self::acquire_path(file_lock_path(file), role)?;
+        reject_symlink_components(file)?;
+        let (owned, created) = match OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(file)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => (
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(file)
+                    .map_err(|error| {
+                        err("OWNER_LOCK_REFUSED", format!("{}: {error}", file.display()))
+                    })?,
+                false,
+            ),
+            Err(error) => {
+                return Err(err(
+                    "OWNER_LOCK_REFUSED",
+                    format!("{}: {error}", file.display()),
+                ));
+            }
+        };
+        if let Err(error) = owned.try_lock_exclusive() {
+            if created {
+                let _cleanup = fs::remove_file(file);
+            }
+            return Err(err(
+                "OWNER_LOCK_REFUSED",
+                format!(
+                    "{} is already owned by another process ({role}): {error}",
+                    file.display()
+                ),
+            ));
+        }
+        Ok(Self {
+            _file: owned,
+            _path_lock: Some(path_lock),
+            unlink_if_empty: created.then(|| file.to_path_buf()),
+        })
     }
 
-    fn acquire(path: PathBuf, role: &str) -> Result<Self, ClusterError> {
+    fn acquire_path(path: PathBuf, role: &str) -> Result<File, ClusterError> {
         reject_symlink_components(&path)?;
         let mut file = OpenOptions::new()
             .create(true)
@@ -388,7 +464,7 @@ impl OwnerLock {
             .and_then(|()| file.sync_all())
             .and_then(|()| sync_parent(&path))
             .map_err(|error| err("OWNER_LOCK_FAILED", format!("{}: {error}", path.display())))?;
-        Ok(Self { _file: file })
+        Ok(file)
     }
 }
 
@@ -489,6 +565,43 @@ mod tests {
         drop(first);
         let second = OwnerLock::for_store(&root, "witness").expect("released lock");
         drop(second);
+        fs::remove_dir_all(root).expect("remove path test directory");
+    }
+
+    #[test]
+    fn wal_owner_lock_rejects_hard_link_aliases_and_releases() {
+        let root = directory();
+        let wal = root.join("primary.wal");
+        let alias = root.join("handoff.wal");
+        fs::write(&wal, b"durable-wal").expect("create WAL");
+        fs::hard_link(&wal, &alias).expect("create hard-link alias");
+
+        let first = OwnerLock::for_file(&wal, "continuous-primary").expect("first WAL lock");
+        let error = OwnerLock::for_file(&alias, "lifecycle-node")
+            .expect_err("hard-link alias must share WAL ownership");
+        assert_eq!(error.reason_code(), "OWNER_LOCK_REFUSED");
+        drop(first);
+        let second = OwnerLock::for_file(&alias, "lifecycle-node").expect("released WAL lock");
+        drop(second);
+        assert_eq!(fs::read(&wal).expect("read unchanged WAL"), b"durable-wal");
+        fs::remove_dir_all(root).expect("remove path test directory");
+    }
+
+    #[test]
+    fn empty_wal_lock_drop_preserves_replaced_path() {
+        let root = directory();
+        let wal = root.join("primary.wal");
+        let displaced = root.join("displaced.wal");
+        let owner = OwnerLock::for_file(&wal, "continuous-primary").expect("create WAL lock");
+        fs::rename(&wal, &displaced).expect("move locked inode");
+        fs::write(&wal, b"replacement").expect("create replacement WAL");
+
+        drop(owner);
+
+        assert_eq!(
+            fs::read(&wal).expect("read replacement WAL"),
+            b"replacement"
+        );
         fs::remove_dir_all(root).expect("remove path test directory");
     }
 

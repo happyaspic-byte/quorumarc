@@ -57,13 +57,14 @@ const LEASE_STRIDE_MS: u64 = LEASE_DURATION_MS + LEASE_GUARD_MS;
 const MAX_LIFECYCLE_FRAME: usize = 4_096;
 const COMMAND_MAGIC: &[u8; 8] = b"QALCMD\0\0";
 const RESPONSE_MAGIC: &[u8; 8] = b"QALRSP\0\0";
-const COMMAND_DOMAIN: &[u8] = b"quorumarc/lifecycle/command/ed25519/v1\0";
+const COMMAND_DOMAIN: &[u8] = b"quorumarc/lifecycle/command/ed25519/v2\0";
 const RESPONSE_DOMAIN: &[u8] = b"quorumarc/lifecycle/response/ed25519/v1\0";
 const MESSAGE_ID_DOMAIN: &[u8] = b"quorumarc/lifecycle/message-id/sha256/v1\0";
 const FENCE_EVIDENCE_DOMAIN: &[u8] = b"quorumarc/lifecycle/fence-evidence/sha256/v1\0";
+const PROGRESS_STORE_ID_DOMAIN: &[u8] = b"quorumarc/lifecycle/progress-store-id/sha256/v1\0";
 const RESPONSE_UNSIGNED_LEN: usize = 110;
 const RESPONSE_LEN: usize = RESPONSE_UNSIGNED_LEN + 64;
-const COMMAND_UNSIGNED_LEN: usize = 60;
+const COMMAND_UNSIGNED_LEN: usize = 76;
 const COMMAND_LEN: usize = COMMAND_UNSIGNED_LEN + 64;
 
 /// Workload-capable identity used by the bounded lifecycle laboratory.
@@ -301,6 +302,28 @@ impl LifecycleReasonCode {
     }
 }
 
+/// Immutable workload progress that every lifecycle role must bind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LifecycleProgressContract {
+    pub required_commit: u64,
+    pub state_root: [u8; 32],
+}
+
+impl LifecycleProgressContract {
+    pub fn new(required_commit: u64, state_root: [u8; 32]) -> Result<Self, ClusterError> {
+        if required_commit == 0 || state_root.iter().all(|byte| *byte == 0) {
+            return Err(err(
+                "LIFECYCLE_PROGRESS_CONTRACT_REFUSED",
+                "progress contract requires a nonzero commit and state root",
+            ));
+        }
+        Ok(Self {
+            required_commit,
+            state_root,
+        })
+    }
+}
+
 /// Deterministic store failure used only by bounded lifecycle fault tests.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LifecycleStoreFault {
@@ -325,6 +348,7 @@ pub struct LifecycleNodeConfig {
     pub max_connections: u64,
     pub io_timeout: Duration,
     pub policy_hash: [u8; 32],
+    pub progress_contract: LifecycleProgressContract,
     pub store_fault: LifecycleStoreFault,
 }
 
@@ -340,6 +364,7 @@ pub struct LifecycleWitnessConfig {
     pub max_connections: u64,
     pub io_timeout: Duration,
     pub policy_hash: [u8; 32],
+    pub progress_contract: LifecycleProgressContract,
 }
 
 /// Authenticated response returned by a lifecycle node.
@@ -405,6 +430,7 @@ struct ObservedActive {
 /// candidate must still obtain a durable Witness vote and pass EffectGate.
 pub struct LifecycleAutoController {
     failure_threshold: u32,
+    progress_contract: LifecycleProgressContract,
     active_misses: u32,
     last_active: Option<ObservedActive>,
     pending: Option<(LifecycleNodeId, u64)>,
@@ -416,14 +442,26 @@ impl LifecycleAutoController {
     /// prevents a single transient status failure from becoming a failover
     /// attempt.
     pub fn new(failure_threshold: u32) -> Result<Self, ClusterError> {
+        Self::new_with_contract(failure_threshold, default_progress_contract()?)
+    }
+
+    pub fn new_with_contract(
+        failure_threshold: u32,
+        progress_contract: LifecycleProgressContract,
+    ) -> Result<Self, ClusterError> {
         if !(2..=16).contains(&failure_threshold) {
             return Err(err(
                 "LIFECYCLE_AUTO_POLICY_REFUSED",
                 "failure threshold must be between 2 and 16",
             ));
         }
+        LifecycleProgressContract::new(
+            progress_contract.required_commit,
+            progress_contract.state_root,
+        )?;
         Ok(Self {
             failure_threshold,
+            progress_contract,
             active_misses: 0,
             last_active: None,
             pending: None,
@@ -454,7 +492,7 @@ impl LifecycleAutoController {
             });
         }
         if let Some(report) = active_a.or(active_b) {
-            let active = active_from_report(report)?;
+            let active = active_from_report(report, self.progress_contract)?;
             if let Some(previous) = self.last_active {
                 if active.epoch < previous.epoch
                     || (active.epoch == previous.epoch && active.node != previous.node)
@@ -538,7 +576,7 @@ impl LifecycleAutoController {
             Ok(report) => report,
             Err(decision) => return Ok(decision),
         };
-        if !eligible_standby(candidate_report)? {
+        if !eligible_standby(candidate_report, self.progress_contract)? {
             return Ok(LifecycleAutoDecision::Hold {
                 reason: LifecycleAutoReason::CandidateLagging,
             });
@@ -570,7 +608,7 @@ impl LifecycleAutoController {
         if report.reason_code == LifecycleReasonCode::Promoted
             && report.state == LifecycleState::Active
         {
-            let active = active_from_report(report)?;
+            let active = active_from_report(report, self.progress_contract)?;
             if active.epoch != epoch {
                 self.halted = Some(LifecycleAutoReason::AmbiguousActive);
                 return Err(err(
@@ -613,7 +651,9 @@ impl LifecycleAutoController {
                 reason: LifecycleAutoReason::CandidateUnavailable,
             });
         };
-        if !eligible_standby(node_a)? || !eligible_standby(node_b)? {
+        if !eligible_standby(node_a, self.progress_contract)?
+            || !eligible_standby(node_b, self.progress_contract)?
+        {
             return Ok(LifecycleAutoDecision::Hold {
                 reason: LifecycleAutoReason::CandidateLagging,
             });
@@ -639,7 +679,10 @@ fn validate_auto_report(
     Ok(())
 }
 
-fn active_from_report(report: &LifecycleReport) -> Result<ObservedActive, ClusterError> {
+fn active_from_report(
+    report: &LifecycleReport,
+    progress_contract: LifecycleProgressContract,
+) -> Result<ObservedActive, ClusterError> {
     if report.highest_epoch == 0 || report.lease_expires_at_ms == 0 {
         return Err(err(
             "LIFECYCLE_AUTO_REPORT_REFUSED",
@@ -647,6 +690,14 @@ fn active_from_report(report: &LifecycleReport) -> Result<ObservedActive, Cluste
         ));
     }
     let (_, expected_expiry) = lease_for_epoch(report.highest_epoch)?;
+    if report.commit_index != progress_contract.required_commit
+        || report.state_root != progress_contract.state_root
+    {
+        return Err(err(
+            "LIFECYCLE_AUTO_REPORT_REFUSED",
+            "Active report differs from the configured progress contract",
+        ));
+    }
     if report.lease_expires_at_ms != expected_expiry {
         return Err(err(
             "LIFECYCLE_AUTO_REPORT_REFUSED",
@@ -660,10 +711,13 @@ fn active_from_report(report: &LifecycleReport) -> Result<ObservedActive, Cluste
     })
 }
 
-fn eligible_standby(report: &LifecycleReport) -> Result<bool, ClusterError> {
+fn eligible_standby(
+    report: &LifecycleReport,
+    contract: LifecycleProgressContract,
+) -> Result<bool, ClusterError> {
     Ok(report.state == LifecycleState::Standby
-        && report.commit_index >= REQUIRED_COMMIT
-        && report.state_root == expected_state_root()?)
+        && report.commit_index == contract.required_commit
+        && report.state_root == contract.state_root)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -711,36 +765,50 @@ impl CommandKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutboundCommand {
+    kind: CommandKind,
+    now_ms: u64,
+    epoch: u64,
+    operation_id: [u8; 16],
+    expected_commit_index: u64,
+    increment: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LifecycleCommand {
     request_id: [u8; 16],
     kind: CommandKind,
     now_ms: u64,
     epoch: u64,
     operation_id: [u8; 16],
+    expected_commit_index: u64,
+    increment: u64,
 }
 
 impl LifecycleCommand {
     fn to_bytes(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(59);
+        let mut bytes = Vec::with_capacity(75);
         bytes.extend_from_slice(COMMAND_MAGIC);
-        bytes.extend_from_slice(&1_u16.to_be_bytes());
+        bytes.extend_from_slice(&2_u16.to_be_bytes());
         bytes.extend_from_slice(&self.request_id);
         bytes.push(self.kind.tag());
         bytes.extend_from_slice(&self.now_ms.to_be_bytes());
         bytes.extend_from_slice(&self.epoch.to_be_bytes());
         bytes.extend_from_slice(&self.operation_id);
+        bytes.extend_from_slice(&self.expected_commit_index.to_be_bytes());
+        bytes.extend_from_slice(&self.increment.to_be_bytes());
         bytes
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self, ClusterError> {
-        if bytes.len() != 59 || bytes.get(..8) != Some(COMMAND_MAGIC.as_slice()) {
+        if bytes.len() != 75 || bytes.get(..8) != Some(COMMAND_MAGIC.as_slice()) {
             return Err(err(
                 "LIFECYCLE_COMMAND_MALFORMED",
                 "command has an invalid size or magic",
             ));
         }
         let version = read_u16(bytes, 8, "command version")?;
-        if version != 1 {
+        if version != 2 {
             return Err(err(
                 "LIFECYCLE_COMMAND_MALFORMED",
                 "unsupported command version",
@@ -762,16 +830,28 @@ impl LifecycleCommand {
             now_ms: read_u64(bytes, 27, "command time")?,
             epoch: read_u64(bytes, 35, "command epoch")?,
             operation_id: read_array::<16>(bytes, 43, "command operation ID")?,
+            expected_commit_index: read_u64(bytes, 59, "command expected commit")?,
+            increment: read_u64(bytes, 67, "command increment")?,
         };
         command.validate_canonical()?;
         Ok(command)
     }
 
     fn validate_canonical(self) -> Result<(), ClusterError> {
+        let unused_shape_zero = self.expected_commit_index == 0 && self.increment == 0;
         match self.kind {
-            CommandKind::Promote if self.epoch > 0 && self.operation_id == [0; 16] => Ok(()),
-            CommandKind::Emit | CommandKind::RetryWorkload
-                if self.epoch > 0 && self.operation_id != [0; 16] =>
+            CommandKind::Promote
+                if self.epoch > 0 && self.operation_id == [0; 16] && unused_shape_zero =>
+            {
+                Ok(())
+            }
+            CommandKind::Emit
+                if self.epoch > 0 && self.operation_id != [0; 16] && unused_shape_zero =>
+            {
+                Ok(())
+            }
+            CommandKind::RetryWorkload
+                if self.epoch > 0 && self.operation_id != [0; 16] && self.increment > 0 =>
             {
                 Ok(())
             }
@@ -780,7 +860,7 @@ impl LifecycleCommand {
             | CommandKind::Close
             | CommandKind::Stop
             | CommandKind::Replay
-                if self.epoch == 0 && self.operation_id == [0; 16] =>
+                if self.epoch == 0 && self.operation_id == [0; 16] && unused_shape_zero =>
             {
                 Ok(())
             }
@@ -823,7 +903,7 @@ impl SignedLifecycleCommand {
                 "signed command has an invalid size",
             ));
         }
-        let target_node = match read_u8(bytes, 59, "command target node")? {
+        let target_node = match read_u8(bytes, 75, "command target node")? {
             1 => LifecycleNodeId::NodeA,
             2 => LifecycleNodeId::NodeB,
             _ => {
@@ -834,7 +914,7 @@ impl SignedLifecycleCommand {
             }
         };
         Ok(Self {
-            command: LifecycleCommand::from_bytes(bytes.get(..59).ok_or_else(|| {
+            command: LifecycleCommand::from_bytes(bytes.get(..75).ok_or_else(|| {
                 err("LIFECYCLE_COMMAND_MALFORMED", "command payload is missing")
             })?)?,
             target_node,
@@ -1092,9 +1172,19 @@ impl LifecycleClient {
         &mut self,
         epoch: u64,
         now_ms: u64,
-        operation_id: [u8; 16],
+        operation: CounterOperation,
     ) -> Result<LifecycleReport, ClusterError> {
-        self.send(CommandKind::RetryWorkload, now_ms, epoch, operation_id)
+        self.issue(
+            OutboundCommand {
+                kind: CommandKind::RetryWorkload,
+                now_ms,
+                epoch,
+                operation_id: operation.id.into_bytes(),
+                expected_commit_index: operation.expected_commit_index,
+                increment: operation.increment,
+            },
+            self.timeout,
+        )
     }
 
     pub fn close(&mut self, now_ms: u64) -> Result<LifecycleReport, ClusterError> {
@@ -1142,7 +1232,17 @@ impl LifecycleClient {
         epoch: u64,
         operation_id: [u8; 16],
     ) -> Result<LifecycleReport, ClusterError> {
-        self.send_with_timeout(kind, now_ms, epoch, operation_id, self.timeout)
+        self.issue(
+            OutboundCommand {
+                kind,
+                now_ms,
+                epoch,
+                operation_id,
+                expected_commit_index: 0,
+                increment: 0,
+            },
+            self.timeout,
+        )
     }
 
     fn send_with_timeout(
@@ -1153,18 +1253,48 @@ impl LifecycleClient {
         operation_id: [u8; 16],
         timeout: Duration,
     ) -> Result<LifecycleReport, ClusterError> {
+        self.issue(
+            OutboundCommand {
+                kind,
+                now_ms,
+                epoch,
+                operation_id,
+                expected_commit_index: 0,
+                increment: 0,
+            },
+            timeout,
+        )
+    }
+
+    fn issue(
+        &mut self,
+        outbound: OutboundCommand,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
         let request_id = request_id(self.next_request);
         self.next_request = self
             .next_request
             .checked_add(1)
             .ok_or_else(|| err("LIFECYCLE_REQUEST_EXHAUSTED", "request counter overflow"))?;
-        let command = LifecycleCommand {
-            request_id,
-            kind,
-            now_ms,
-            epoch,
-            operation_id,
-        };
+        self.exchange_signed(
+            LifecycleCommand {
+                request_id,
+                kind: outbound.kind,
+                now_ms: outbound.now_ms,
+                epoch: outbound.epoch,
+                operation_id: outbound.operation_id,
+                expected_commit_index: outbound.expected_commit_index,
+                increment: outbound.increment,
+            },
+            timeout,
+        )
+    }
+
+    fn exchange_signed(
+        &mut self,
+        command: LifecycleCommand,
+        timeout: Duration,
+    ) -> Result<LifecycleReport, ClusterError> {
         command.validate_canonical()?;
         let signed =
             SignedLifecycleCommand::sign(command, self.node_id, &self.controller_signing_key)?;
@@ -1249,6 +1379,7 @@ struct LifecycleNodeRuntime {
     witness_address: SocketAddr,
     io_timeout: Duration,
     policy_hash: [u8; 32],
+    progress_contract: LifecycleProgressContract,
     store: DurableAuthorityStore<LifecycleBackend>,
     progress_commit: u64,
     progress_root: [u8; 32],
@@ -1279,11 +1410,19 @@ impl LifecycleNodeRuntime {
             .map_err(|error| err("LIFECYCLE_WAL_READ_REFUSED", error.to_string()))?;
         let recovered = recover_wal(&wal_bytes)
             .map_err(|error| err("LIFECYCLE_WAL_RECOVERY_REFUSED", error.to_string()))?;
+        if recovered.commit_index != config.progress_contract.required_commit
+            || recovered.state_root != config.progress_contract.state_root
+        {
+            return Err(err(
+                "LIFECYCLE_PROGRESS_CONTRACT_REFUSED",
+                "recovered WAL differs from the configured exact progress contract",
+            ));
+        }
         let rules = lifecycle_fault_rules(config.store_fault);
         let backend = FaultInjectingBackend::new(FileBackend, rules);
         let mut store = DurableAuthorityStore::open_in(
             &config.store_directory,
-            lifecycle_node_store_identity(config.node_id)?,
+            lifecycle_node_store_identity(config.node_id, config.progress_contract)?,
             backend,
         )
         .map_err(|error| err("LIFECYCLE_STORE_OPEN_REFUSED", error.to_string()))?;
@@ -1320,6 +1459,7 @@ impl LifecycleNodeRuntime {
             witness_address: config.witness_address,
             io_timeout: config.io_timeout,
             policy_hash: config.policy_hash,
+            progress_contract: config.progress_contract,
             store,
             progress_commit: recovered.commit_index,
             progress_root: recovered.state_root,
@@ -1382,7 +1522,7 @@ impl LifecycleNodeRuntime {
             CommandKind::Promote => self.promote(command.epoch, command.now_ms),
             CommandKind::Tick => LifecycleReasonCode::TickApplied,
             CommandKind::Emit => self.emit(command.epoch, command.operation_id),
-            CommandKind::RetryWorkload => self.retry_workload(command.epoch, command.operation_id),
+            CommandKind::RetryWorkload => self.retry_workload(command),
             CommandKind::Close => self.close(),
             CommandKind::Stop => {
                 let _ = self.close();
@@ -1434,12 +1574,9 @@ impl LifecycleNodeRuntime {
         if epoch < self.store.state().highest_epoch() {
             return LifecycleReasonCode::RefusedEpoch;
         }
-        let Ok(expected_root) = expected_state_root() else {
-            self.terminal_fault = true;
-            self.state = LifecycleState::SelfFenced;
-            return LifecycleReasonCode::RefusedTerminalFault;
-        };
-        if self.progress_commit < REQUIRED_COMMIT || self.progress_root != expected_root {
+        if self.progress_commit != self.progress_contract.required_commit
+            || self.progress_root != self.progress_contract.state_root
+        {
             return LifecycleReasonCode::RefusedCandidateLagging;
         }
         self.state = LifecycleState::Candidate;
@@ -1490,6 +1627,7 @@ impl LifecycleNodeRuntime {
             now_ms,
             lease_start,
             lease_end,
+            self.progress_contract.required_commit,
             self.progress_commit,
             self.progress_root,
             self.policy_hash,
@@ -1528,6 +1666,7 @@ impl LifecycleNodeRuntime {
             self.node_id,
             self.store.state().incarnation(),
             epoch,
+            self.progress_contract.required_commit,
             self.progress_commit,
             self.progress_root,
             self.policy_hash,
@@ -1643,8 +1782,8 @@ impl LifecycleNodeRuntime {
         }
     }
 
-    fn retry_workload(&mut self, epoch: u64, operation_id: [u8; 16]) -> LifecycleReasonCode {
-        if self.state != LifecycleState::Active || self.active_epoch != Some(epoch) {
+    fn retry_workload(&mut self, command: LifecycleCommand) -> LifecycleReasonCode {
+        if self.state != LifecycleState::Active || self.active_epoch != Some(command.epoch) {
             return LifecycleReasonCode::RefusedNotActive;
         }
         let bytes = match fs::read(&self.wal_path) {
@@ -1674,9 +1813,9 @@ impl LifecycleNodeRuntime {
             }
         };
         let operation = CounterOperation {
-            id: OperationId::new(operation_id),
-            expected_commit_index: 0,
-            increment: 1,
+            id: OperationId::new(command.operation_id),
+            expected_commit_index: command.expected_commit_index,
+            increment: command.increment,
         };
         match recovered.confirm_operation(operation) {
             Ok(Some(confirmed))
@@ -1685,13 +1824,13 @@ impl LifecycleNodeRuntime {
             {
                 LifecycleReasonCode::WorkloadRetryConfirmed
             }
-            Ok(Some(_)) => {
+            Ok(Some(confirmed)) if confirmed.commit_index == self.progress_commit => {
                 self.effects.close();
                 self.state = LifecycleState::SelfFenced;
                 self.terminal_fault = true;
                 LifecycleReasonCode::RefusedWorkloadRetry
             }
-            Ok(None) | Err(_) => LifecycleReasonCode::RefusedWorkloadRetry,
+            Ok(Some(_)) | Ok(None) | Err(_) => LifecycleReasonCode::RefusedWorkloadRetry,
         }
     }
 
@@ -1781,6 +1920,10 @@ impl LifecycleRefusal {
 
 /// Runs one long-lived Node A or Node B lifecycle service.
 pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterError> {
+    LifecycleProgressContract::new(
+        config.progress_contract.required_commit,
+        config.progress_contract.state_root,
+    )?;
     ensure_loopback(config.listen)?;
     ensure_loopback(config.witness_address)?;
     ensure_service_bounds(config.max_connections, config.io_timeout)?;
@@ -1901,6 +2044,10 @@ impl VerificationKeyResolver for LifecycleWitnessResolver {
 
 /// Runs the independent durable Witness for the bounded lifecycle laboratory.
 pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), ClusterError> {
+    LifecycleProgressContract::new(
+        config.progress_contract.required_commit,
+        config.progress_contract.state_root,
+    )?;
     ensure_loopback(config.listen)?;
     ensure_service_bounds(config.max_connections, config.io_timeout)?;
     require_keys_disjoint(
@@ -1946,7 +2093,7 @@ pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), Clu
         policy,
         SigningKey::from_bytes(witness_signing_key.as_bytes()),
         &config.store_directory,
-        lifecycle_witness_store_identity()?,
+        lifecycle_witness_store_identity(config.progress_contract)?,
         FileBackend,
     )
     .map_err(|error| err("LIFECYCLE_WITNESS_STORE_REFUSED", error.to_string()))?;
@@ -1981,6 +2128,7 @@ pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), Clu
             &witness_signing_key,
             &mut actor,
             config.policy_hash,
+            config.progress_contract,
         ) {
             eprintln!("event=lifecycle_witness_refusal {error}");
         }
@@ -1995,6 +2143,7 @@ fn handle_lifecycle_witness_connection(
     witness_signing_key: &SigningKey,
     actor: &mut WitnessVoteActor<FileBackend>,
     policy_hash: [u8; 32],
+    progress_contract: LifecycleProgressContract,
 ) -> Result<(), ClusterError> {
     let payload = codec
         .read_frame(stream)
@@ -2012,7 +2161,9 @@ fn handle_lifecycle_witness_connection(
         .map_err(|error| err("LIFECYCLE_WITNESS_REQUEST_AUTH_REFUSED", error.to_string()))?;
     let envelope = request.envelope();
     let request_digest = witness_request_digest(&payload)?;
-    if let Err(scope_error) = lifecycle_witness_scope(envelope, actor, policy_hash) {
+    if let Err(scope_error) =
+        lifecycle_witness_scope(envelope, actor, policy_hash, progress_contract)
+    {
         let response = WitnessResponse::sign(
             envelope.message_id,
             request_digest,
@@ -2117,6 +2268,7 @@ fn lifecycle_witness_scope(
     envelope: &PromotionEnvelope,
     actor: &WitnessVoteActor<FileBackend>,
     policy_hash: [u8; 32],
+    progress_contract: LifecycleProgressContract,
 ) -> Result<(), ClusterError> {
     let candidate = LifecycleNodeId::parse(envelope.candidate_node_id.as_str())?;
     let durable_epoch = actor.highest_durable_epoch();
@@ -2145,7 +2297,6 @@ fn lifecycle_witness_scope(
         ));
     }
     let (lease_start, lease_end) = lease_for_epoch(envelope.epoch)?;
-    let expected_root = expected_state_root()?;
     let votes = envelope.quorum_certificate.votes();
     let expected_target = if envelope.epoch == 1 {
         None
@@ -2161,9 +2312,9 @@ fn lifecycle_witness_scope(
     let observed_at_ms = envelope.health_attestation.observed_at_ms;
     if envelope.workload_id.as_str() != LIFECYCLE_WORKLOAD
         || envelope.policy_hash != policy_hash
-        || envelope.required_commit != REQUIRED_COMMIT
-        || envelope.durable_commit < REQUIRED_COMMIT
-        || envelope.state_root != expected_root
+        || envelope.required_commit != progress_contract.required_commit
+        || envelope.durable_commit != progress_contract.required_commit
+        || envelope.state_root != progress_contract.state_root
         || envelope.lease.not_before_ms != lease_start
         || envelope.lease.expires_at_ms != lease_end
         || envelope.quorum_certificate.threshold != 1
@@ -2195,6 +2346,7 @@ fn provisional_envelope(
     now_ms: u64,
     lease_start: u64,
     lease_end: u64,
+    required_commit: u64,
     durable_commit: u64,
     state_root: [u8; 32],
     policy_hash: [u8; 32],
@@ -2208,7 +2360,7 @@ fn provisional_envelope(
         candidate_incarnation: incarnation,
         epoch,
         policy_hash,
-        required_commit: REQUIRED_COMMIT,
+        required_commit,
         durable_commit,
         state_root,
         lease_not_before_ms: lease_start,
@@ -2366,6 +2518,7 @@ fn exact_final_scope(
     candidate: LifecycleNodeId,
     incarnation: u64,
     epoch: u64,
+    required_commit: u64,
     commit_index: u64,
     state_root: [u8; 32],
     policy_hash: [u8; 32],
@@ -2382,7 +2535,7 @@ fn exact_final_scope(
         || envelope.candidate_incarnation != incarnation
         || envelope.epoch != epoch
         || envelope.policy_hash != policy_hash
-        || envelope.required_commit != REQUIRED_COMMIT
+        || envelope.required_commit != required_commit
         || envelope.durable_commit != commit_index
         || envelope.state_root != state_root
         || envelope.lease.not_before_ms != lease_start
@@ -2566,30 +2719,67 @@ fn lifecycle_fault_rules(fault: LifecycleStoreFault) -> Vec<FaultRule> {
     }
 }
 
-fn lifecycle_node_store_identity(node: LifecycleNodeId) -> Result<StoreIdentity, ClusterError> {
-    let store_id = match node {
+fn lifecycle_node_store_identity(
+    node: LifecycleNodeId,
+    progress_contract: LifecycleProgressContract,
+) -> Result<StoreIdentity, ClusterError> {
+    let provisioned_id = match node {
         LifecycleNodeId::NodeA => [81; 16],
         LifecycleNodeId::NodeB => [82; 16],
     };
     StoreIdentity::new(
-        LIFECYCLE_CLUSTER,
+        progress_bound_cluster_id(provisioned_id, progress_contract),
         LIFECYCLE_WORKLOAD,
         node.as_str(),
         StoreRole::DataNode,
-        store_id,
+        provisioned_id,
     )
     .map_err(|error| err("LIFECYCLE_STORE_IDENTITY_INVALID", error.to_string()))
 }
 
-fn lifecycle_witness_store_identity() -> Result<StoreIdentity, ClusterError> {
+fn lifecycle_witness_store_identity(
+    progress_contract: LifecycleProgressContract,
+) -> Result<StoreIdentity, ClusterError> {
     StoreIdentity::new(
-        LIFECYCLE_CLUSTER,
+        progress_bound_cluster_id([83; 16], progress_contract),
         LIFECYCLE_WORKLOAD,
         LIFECYCLE_WITNESS,
         StoreRole::Witness,
         [83; 16],
     )
     .map_err(|error| err("LIFECYCLE_STORE_IDENTITY_INVALID", error.to_string()))
+}
+
+fn progress_bound_cluster_id(
+    provisioned_id: [u8; 16],
+    progress_contract: LifecycleProgressContract,
+) -> String {
+    format!(
+        "{LIFECYCLE_CLUSTER}.{}",
+        encode_lower_hex(&progress_identity_digest(provisioned_id, progress_contract))
+    )
+}
+
+fn progress_identity_digest(
+    provisioned_id: [u8; 16],
+    progress_contract: LifecycleProgressContract,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(PROGRESS_STORE_ID_DOMAIN);
+    digest.update(provisioned_id);
+    digest.update(progress_contract.required_commit.to_be_bytes());
+    digest.update(progress_contract.state_root);
+    digest.finalize().into()
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn lease_for_epoch(epoch: u64) -> Result<(u64, u64), ClusterError> {
@@ -2606,6 +2796,10 @@ fn lease_for_epoch(epoch: u64) -> Result<(u64, u64), ClusterError> {
         .checked_add(LEASE_DURATION_MS)
         .ok_or_else(|| err("LIFECYCLE_EPOCH_REFUSED", "lease expiry overflow"))?;
     Ok((start, end))
+}
+
+pub fn default_progress_contract() -> Result<LifecycleProgressContract, ClusterError> {
+    LifecycleProgressContract::new(REQUIRED_COMMIT, expected_state_root()?)
 }
 
 fn expected_state_root() -> Result<[u8; 32], ClusterError> {
@@ -2786,6 +2980,8 @@ pub fn lifecycle_lease(epoch: u64) -> Result<(u64, u64), ClusterError> {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use quorumarc_store::StoreError;
+
     use super::*;
 
     fn auto_report(
@@ -2814,6 +3010,103 @@ mod tests {
     }
 
     #[test]
+    fn progress_contract_requires_exact_nonzero_commit_and_root() {
+        assert_eq!(
+            LifecycleProgressContract::new(2, [9; 32]),
+            Ok(LifecycleProgressContract {
+                required_commit: 2,
+                state_root: [9; 32],
+            })
+        );
+        assert_eq!(
+            LifecycleProgressContract::new(0, [9; 32]).map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_PROGRESS_CONTRACT_REFUSED")
+        );
+        assert_eq!(
+            LifecycleProgressContract::new(2, [0; 32]).map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_PROGRESS_CONTRACT_REFUSED")
+        );
+    }
+
+    #[test]
+    fn progress_contract_is_bound_into_all_lifecycle_store_identities() {
+        let first = LifecycleProgressContract::new(2, [9; 32]).expect("first contract");
+        let second = LifecycleProgressContract::new(3, [11; 32]).expect("second contract");
+
+        assert_ne!(
+            lifecycle_node_store_identity(LifecycleNodeId::NodeA, first)
+                .expect("first node identity"),
+            lifecycle_node_store_identity(LifecycleNodeId::NodeA, second)
+                .expect("second node identity")
+        );
+        assert_ne!(
+            lifecycle_witness_store_identity(first).expect("first Witness identity"),
+            lifecycle_witness_store_identity(second).expect("second Witness identity")
+        );
+    }
+
+    #[test]
+    fn durable_store_refuses_progress_contract_drift_across_reopen() {
+        let first = LifecycleProgressContract::new(2, [9; 32]).expect("first contract");
+        let second = LifecycleProgressContract::new(3, [11; 32]).expect("second contract");
+        let directory = std::env::temp_dir().join(format!(
+            "quorumarc-progress-identity-{}-{}",
+            std::process::id(),
+            7
+        ));
+        if directory.exists() {
+            fs::remove_dir_all(&directory).expect("cleanup progress identity fixture");
+        }
+        fs::create_dir_all(&directory).expect("create progress identity fixture");
+        let identity =
+            lifecycle_node_store_identity(LifecycleNodeId::NodeA, first).expect("first identity");
+        {
+            let mut store = DurableAuthorityStore::open_in(&directory, identity, FileBackend)
+                .expect("open first contract store");
+            store
+                .allocate_incarnation(1)
+                .expect("bind first contract identity");
+        }
+        let drifted = lifecycle_node_store_identity(LifecycleNodeId::NodeA, second)
+            .expect("drifted identity");
+        let error = DurableAuthorityStore::open_in(&directory, drifted, FileBackend)
+            .err()
+            .expect("drifted contract must not reopen the same journal");
+        assert!(matches!(error, StoreError::IdentityMismatch { .. }));
+        fs::remove_dir_all(&directory).expect("remove progress identity fixture");
+    }
+    #[test]
+    fn configured_progress_contract_controls_standby_eligibility() {
+        let contract = LifecycleProgressContract::new(2, [19; 32]).expect("valid contract");
+        let mut report = auto_report(LifecycleNodeId::NodeA, LifecycleState::Standby, 0, 2);
+        report.state_root = [19; 32];
+        assert_eq!(eligible_standby(&report, contract), Ok(true));
+        report.commit_index = 1;
+        assert_eq!(eligible_standby(&report, contract), Ok(false));
+        report.commit_index = 2;
+        report.state_root = [20; 32];
+        assert_eq!(eligible_standby(&report, contract), Ok(false));
+    }
+
+    #[test]
+    fn exact_retry_command_round_trips_operation_shape() {
+        let command = LifecycleCommand {
+            request_id: request_id(1),
+            kind: CommandKind::RetryWorkload,
+            now_ms: LEASE_BASE_MS,
+            epoch: 1,
+            operation_id: [19; 16],
+            expected_commit_index: 7,
+            increment: 11,
+        };
+
+        assert_eq!(
+            LifecycleCommand::from_bytes(&command.to_bytes()).expect("decode exact retry"),
+            command
+        );
+    }
+
+    #[test]
     fn command_decoder_rejects_noncanonical_unused_fields() {
         let mut bytes = LifecycleCommand {
             request_id: request_id(1),
@@ -2821,9 +3114,11 @@ mod tests {
             now_ms: LEASE_BASE_MS,
             epoch: 0,
             operation_id: [0; 16],
+            expected_commit_index: 0,
+            increment: 0,
         }
         .to_bytes();
-        bytes[58] = 1;
+        bytes[59] = 1;
         let error = LifecycleCommand::from_bytes(&bytes).expect_err("unused field must fail");
         assert_eq!(error.reason_code(), "LIFECYCLE_COMMAND_MALFORMED");
     }
@@ -2837,6 +3132,8 @@ mod tests {
             now_ms: LEASE_BASE_MS,
             epoch: 1,
             operation_id: [0; 16],
+            expected_commit_index: 0,
+            increment: 0,
         };
         let signed = SignedLifecycleCommand::sign(command, LifecycleNodeId::NodeA, &controller)
             .expect("sign command");

@@ -11,7 +11,9 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use quorumarc_rpo0::recover_wal;
+use quorumarc_cluster::{LifecycleClient, LifecycleNodeId, LifecycleReasonCode, LifecycleState};
+use quorumarc_rpo0::{CounterOperation, OperationId, recover_wal};
+use quorumarc_store::AuthoritySnapshot;
 use quorumarc_wire::SigningKey;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -22,9 +24,13 @@ struct Fixture {
     client_seed: PathBuf,
     primary_seed: PathBuf,
     replica_seed: PathBuf,
+    witness_seed: PathBuf,
+    controller_seed: PathBuf,
     client_public: PathBuf,
     primary_public: PathBuf,
     replica_public: PathBuf,
+    witness_public: PathBuf,
+    controller_public: PathBuf,
     primary_wal: PathBuf,
     replica_wal: PathBuf,
 }
@@ -41,9 +47,13 @@ impl Fixture {
             client_seed: root.join("client.seed"),
             primary_seed: root.join("primary.seed"),
             replica_seed: root.join("replica.seed"),
+            witness_seed: root.join("witness.seed"),
+            controller_seed: root.join("controller.seed"),
             client_public: root.join("client.public"),
             primary_public: root.join("primary.public"),
             replica_public: root.join("replica.public"),
+            witness_public: root.join("witness.public"),
+            controller_public: root.join("controller.public"),
             primary_wal: root.join("primary.wal"),
             replica_wal: root.join("replica.wal"),
             root,
@@ -51,9 +61,13 @@ impl Fixture {
         write_private(&fixture.client_seed, [41; 32]);
         write_private(&fixture.primary_seed, [43; 32]);
         write_private(&fixture.replica_seed, [47; 32]);
+        write_private(&fixture.witness_seed, [49; 32]);
+        write_private(&fixture.controller_seed, [53; 32]);
         write_public(&fixture.client_public, [41; 32]);
         write_public(&fixture.primary_public, [43; 32]);
         write_public(&fixture.replica_public, [47; 32]);
+        write_public(&fixture.witness_public, [49; 32]);
+        write_public(&fixture.controller_public, [53; 32]);
         fixture
     }
 }
@@ -110,8 +124,117 @@ fn live_client_ack_requires_two_process_durable_copies_and_exact_retry_is_stable
     let recovered = recover_wal(&primary_bytes).expect("recover continuous WAL");
     assert_eq!(recovered.commit_index, 2);
     assert_eq!(recovered.value, 7);
+
+    let root_hex = encode_hex(&recovered.state_root);
+    let witness_ready = fixture.root.join("lifecycle-witness.ready");
+    let node_a_ready = fixture.root.join("lifecycle-node-a.ready");
+    let node_b_ready = fixture.root.join("lifecycle-node-b.ready");
+    let mut witness = spawn_lifecycle_witness(&fixture, &witness_ready, &root_hex);
+    let witness_address = wait_ready(&witness_ready, &mut witness);
+    let mut node_a = spawn_lifecycle_node(
+        &fixture,
+        LifecycleNodeId::NodeA,
+        &fixture.primary_wal,
+        witness_address,
+        &node_a_ready,
+        &root_hex,
+    );
+    let mut node_b = spawn_lifecycle_node(
+        &fixture,
+        LifecycleNodeId::NodeB,
+        &fixture.replica_wal,
+        witness_address,
+        &node_b_ready,
+        &root_hex,
+    );
+    let node_a_address = wait_ready(&node_a_ready, &mut node_a);
+    let node_b_address = wait_ready(&node_b_ready, &mut node_b);
+    let controller = SigningKey::from_bytes(&[53; 32]);
+    let mut node_a_client = LifecycleClient::new(
+        node_a_address,
+        LifecycleNodeId::NodeA,
+        SigningKey::from_bytes(&[43; 32]).verifying_key(),
+        controller.clone(),
+        Duration::from_secs(3),
+    );
+    let mut node_b_client = LifecycleClient::new(
+        node_b_address,
+        LifecycleNodeId::NodeB,
+        SigningKey::from_bytes(&[47; 32]).verifying_key(),
+        controller,
+        Duration::from_secs(3),
+    );
+    for report in [
+        node_a_client.status(1_000).expect("node A live progress"),
+        node_b_client.status(1_000).expect("node B live progress"),
+    ] {
+        assert_eq!(report.state, LifecycleState::Standby);
+        assert_eq!(report.commit_index, 2);
+        assert_eq!(report.state_root, recovered.state_root);
+    }
+    let promoted_a = node_a_client
+        .promote(1, 1_000)
+        .expect("promote live-progress A");
+    assert_eq!(promoted_a.reason_code, LifecycleReasonCode::Promoted);
+    assert_eq!(promoted_a.commit_index, 2);
+    assert_eq!(promoted_a.state_root, recovered.state_root);
+    node_a.kill().expect("kill live-progress A");
+    node_a.wait().expect("collect killed live-progress A");
+    let promoted_b = node_b_client
+        .promote(2, 2_250)
+        .expect("promote live-progress B");
+    assert_eq!(promoted_b.reason_code, LifecycleReasonCode::Promoted);
+    assert_eq!(promoted_b.commit_index, 2);
+    assert_eq!(promoted_b.state_root, recovered.state_root);
+    let confirmed = node_b_client
+        .retry_workload(
+            2,
+            2_251,
+            CounterOperation {
+                id: OperationId::new([83; 16]),
+                expected_commit_index: 1,
+                increment: 4,
+            },
+        )
+        .expect("confirm exact live operation on successor");
+    assert_eq!(
+        confirmed.reason_code,
+        LifecycleReasonCode::WorkloadRetryConfirmed
+    );
+    for store in ["lifecycle-node-a-store", "lifecycle-node-b-store"] {
+        let bytes = fs::read(fixture.root.join(store).join("authority.journal"))
+            .expect("read live-progress authority journal");
+        let snapshot = AuthoritySnapshot::decode(&bytes).expect("decode live-progress authority");
+        assert_eq!(snapshot.state().commit_index(), 2);
+        assert_eq!(
+            snapshot
+                .state()
+                .state_root()
+                .expect("authority progress root")
+                .as_bytes(),
+            &recovered.state_root
+        );
+        let promotion = snapshot
+            .state()
+            .last_promotion()
+            .expect("live-progress promotion record");
+        assert_eq!(promotion.commit_index(), 2);
+        assert_eq!(promotion.state_root().as_bytes(), &recovered.state_root);
+    }
+    node_b_client.stop(9_000).expect("stop live-progress B");
+    node_b.wait().expect("collect stopped live-progress B");
+    witness.kill().expect("stop live-progress Witness");
+    witness.wait().expect("collect live-progress Witness");
+    assert_eq!(
+        fs::read(&fixture.primary_wal).expect("read post-lifecycle primary WAL"),
+        primary_bytes
+    );
+    assert_eq!(
+        fs::read(&fixture.replica_wal).expect("read post-lifecycle replica WAL"),
+        replica_bytes
+    );
     eprintln!(
-        "scenario=20 name=live_continuous_two_copy_ack seed=1 class=github-process-continuous-rpo0 status=PASS submitted=3 acknowledged=3 refused=0 unknown=0 acknowledged_write_loss=0 duplicate_applications=0"
+        "scenario=20 name=live_continuous_two_copy_ack_failover_recovery seed=1 class=github-process-continuous-lifecycle status=PASS submitted=3 acknowledged=3 refused=0 unknown=0 acknowledged_write_loss=0 duplicate_applications=0 single_writer_violations=0 bound_commit=2"
     );
 }
 
@@ -234,6 +357,95 @@ fn peer_loss_after_readiness_returns_unknown_and_never_acknowledges_one_copy() {
     );
 }
 
+fn spawn_lifecycle_witness(fixture: &Fixture, ready: &Path, root_hex: &str) -> Child {
+    Command::new(binary())
+        .arg("lifecycle-witness")
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--ready-file")
+        .arg(ready)
+        .arg("--store")
+        .arg(fixture.root.join("lifecycle-witness-store"))
+        .arg("--signing-key")
+        .arg(&fixture.witness_seed)
+        .arg("--node-a-public-key")
+        .arg(&fixture.primary_public)
+        .arg("--node-b-public-key")
+        .arg(&fixture.replica_public)
+        .arg("--max-connections")
+        .arg("8")
+        .arg("--timeout-ms")
+        .arg("3000")
+        .arg("--policy-byte")
+        .arg("165")
+        .arg("--required-commit")
+        .arg("2")
+        .arg("--state-root-hex")
+        .arg(root_hex)
+        .arg("--allow-lifecycle-lab")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn live-progress Witness")
+}
+
+fn spawn_lifecycle_node(
+    fixture: &Fixture,
+    node: LifecycleNodeId,
+    wal: &Path,
+    witness: SocketAddr,
+    ready: &Path,
+    root_hex: &str,
+) -> Child {
+    let (seed, store) = match node {
+        LifecycleNodeId::NodeA => (
+            &fixture.primary_seed,
+            fixture.root.join("lifecycle-node-a-store"),
+        ),
+        LifecycleNodeId::NodeB => (
+            &fixture.replica_seed,
+            fixture.root.join("lifecycle-node-b-store"),
+        ),
+    };
+    Command::new(binary())
+        .arg("lifecycle-node")
+        .arg("--node")
+        .arg(node.as_str())
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--ready-file")
+        .arg(ready)
+        .arg("--wal")
+        .arg(wal)
+        .arg("--store")
+        .arg(store)
+        .arg("--signing-key")
+        .arg(seed)
+        .arg("--witness-public-key")
+        .arg(&fixture.witness_public)
+        .arg("--controller-public-key")
+        .arg(&fixture.controller_public)
+        .arg("--witness")
+        .arg(witness.to_string())
+        .arg("--max-connections")
+        .arg("16")
+        .arg("--timeout-ms")
+        .arg("3000")
+        .arg("--policy-byte")
+        .arg("165")
+        .arg("--store-fault")
+        .arg("none")
+        .arg("--required-commit")
+        .arg("2")
+        .arg("--state-root-hex")
+        .arg(root_hex)
+        .arg("--allow-lifecycle-lab")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn live-progress lifecycle node")
+}
+
 fn spawn_replica(fixture: &Fixture, ready: &Path, max_connections: u64) -> Child {
     Command::new(binary())
         .arg("continuous-replica")
@@ -340,6 +552,16 @@ fn wait_ready(path: &Path, child: &mut Child) -> SocketAddr {
         assert!(Instant::now() < deadline, "service readiness timed out");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(*byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(*byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn binary() -> PathBuf {
