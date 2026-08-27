@@ -553,7 +553,18 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
         }
         None => None,
     };
-    let mut node = quorumarc_service::node::ProductionNode::effect_closed();
+    let mut node = match quorumarc_service::node::ProductionNode::from_effect_adapter(
+        &quorumarc_service::adapters::ClosedOnlyEffectAdapter,
+    ) {
+        Ok(node) => node,
+        Err(_error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_EFFECT_ADAPTER_NOT_CLOSED voting=false effect_gate=closed"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
     let _report = node.run_until_shutdown(&shutdown);
     if let Some(worker) = status_worker {
         let _ = worker.join();

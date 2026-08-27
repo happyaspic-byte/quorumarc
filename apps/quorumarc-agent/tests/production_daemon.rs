@@ -222,6 +222,57 @@ fn production_daemon_pings_systemd_watchdog_without_ready_state() -> Result<(), 
     Ok(())
 }
 
+#[test]
+fn production_daemon_restarts_effect_closed_after_sigkill() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-sigkill-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, production_config_with_prerequisites(&directory)?)?;
+    let socket = directory.join("status.sock");
+
+    let mut first = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .args(["--status-socket"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_socket(&socket, &mut first)?;
+    let first_status = read_status(&socket)?;
+    assert!(first_status.contains("\"effect_gate\":\"closed\""));
+    assert!(first_status.contains("\"authority_enabled\":false"));
+    send_signal(first.id(), "-KILL")?;
+    let first_output = first.wait_with_output()?;
+    assert!(!first_output.status.success());
+    let _ = fs::remove_file(&socket);
+
+    let mut second = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .args(["--status-socket"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_socket(&socket, &mut second)?;
+    let second_status = read_status(&socket)?;
+    assert!(second_status.contains("\"effect_gate\":\"closed\""));
+    assert!(second_status.contains("\"authority_enabled\":false"));
+    assert!(!second_status.contains("READY=1"));
+    send_signal(second.id(), "-TERM")?;
+    let output = second.wait_with_output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(output.status.success());
+    assert!(stdout.contains("DAEMON_STOPPED_EFFECT_CLOSED"));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
 fn production_config_with_prerequisites(
     directory: &std::path::Path,
 ) -> Result<String, Box<dyn Error>> {

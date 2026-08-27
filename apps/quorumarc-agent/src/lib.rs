@@ -736,7 +736,19 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     None,
                 ),
             );
-            let mut node = quorumarc_service::node::ProductionNode::effect_closed();
+            let mut node = match quorumarc_service::node::ProductionNode::from_effect_adapter(
+                &quorumarc_service::adapters::ClosedOnlyEffectAdapter,
+            ) {
+                Ok(node) => node,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "EFFECT_ADAPTER_NOT_CLOSED",
+                        "production effect adapter did not verify closed",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
             let shutdown = quorumarc_service::signal::ShutdownToken::new();
             let reload = shutdown.reload_token();
             let _signal_guard = match shutdown.register_process_signals() {

@@ -8,6 +8,7 @@ pub enum AdapterError {
     ReceiptRequired,
     AlreadyClosed,
     UnknownOutlet,
+    EffectNotClosed,
 }
 
 /// Observed power state of one mapped outlet.
@@ -150,7 +151,7 @@ impl EffectAdapter for MockEffectAdapter {
         if self.closed && self.open_epoch.is_none() {
             Ok(())
         } else {
-            Err(AdapterError::AlreadyClosed)
+            Err(AdapterError::EffectNotClosed)
         }
     }
 
@@ -175,6 +176,33 @@ impl EffectAdapter for MockEffectAdapter {
     fn close(&mut self, _reason: CloseReason) -> Result<(), AdapterError> {
         self.closed = true;
         self.open_epoch = None;
+        Ok(())
+    }
+}
+
+/// Production default: effects stay closed regardless of receipts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClosedOnlyEffectAdapter;
+
+impl EffectAdapter for ClosedOnlyEffectAdapter {
+    fn verify_closed(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    fn open(&mut self, _workload: &str, _epoch: u64) -> Result<(), AdapterError> {
+        Err(AdapterError::ReceiptRequired)
+    }
+
+    fn open_with_receipt(
+        &mut self,
+        _workload: &str,
+        _epoch: u64,
+        _receipt_digest: [u8; 32],
+    ) -> Result<(), AdapterError> {
+        Err(AdapterError::ReceiptRequired)
+    }
+
+    fn close(&mut self, _reason: CloseReason) -> Result<(), AdapterError> {
         Ok(())
     }
 }

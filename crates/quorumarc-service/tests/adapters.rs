@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used)]
 
 use quorumarc_service::adapters::{
-    AdapterError, CloseReason, EffectAdapter, FenceAdapter, FenceRequest, MockEffectAdapter,
-    MockPduFence, NodePowerState,
+    AdapterError, CloseReason, ClosedOnlyEffectAdapter, EffectAdapter, FenceAdapter, FenceRequest,
+    MockEffectAdapter, MockPduFence, NodePowerState,
 };
 
 #[test]
@@ -57,4 +57,15 @@ fn effect_adapter_stays_closed_until_continuity_receipt_and_closes_on_expiry() {
         .expect("open with receipt");
     adapter.close(CloseReason::LeaseExpired).expect("close");
     adapter.verify_closed().expect("closed after expiry");
+}
+
+#[test]
+fn closed_only_effect_adapter_never_opens_even_with_a_receipt() {
+    let mut adapter = ClosedOnlyEffectAdapter;
+    adapter.verify_closed().expect("starts closed");
+    assert!(matches!(
+        adapter.open_with_receipt("orders-api", 2, [11; 32]),
+        Err(AdapterError::ReceiptRequired)
+    ));
+    adapter.verify_closed().expect("still closed");
 }

@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use quorumarc_service::adapters::{
+    AdapterError, ClosedOnlyEffectAdapter, EffectAdapter, MockEffectAdapter,
+};
 use quorumarc_service::config::ProductionConfig;
 use quorumarc_service::node::{DaemonReadiness, ProductionNode};
 use quorumarc_service::operations::{NodeStatusReport, StatusHandle};
@@ -219,6 +222,23 @@ fn watchdog_detects_half_interval_from_systemd_environment() {
             .is_ok_and(|watchdog| watchdog.is_none())
     );
     let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_node_refuses_open_effect_adapter() {
+    let mut adapter = MockEffectAdapter::closed();
+    adapter
+        .open_with_receipt("orders-api", 2, [11; 32])
+        .expect("open");
+    assert!(matches!(
+        ProductionNode::from_effect_adapter(&adapter),
+        Err(AdapterError::EffectNotClosed)
+    ));
+    ClosedOnlyEffectAdapter
+        .verify_closed()
+        .expect("production default remains closed");
+    ProductionNode::from_effect_adapter(&ClosedOnlyEffectAdapter)
+        .expect("closed-only adapter may start");
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use crate::adapters::{AdapterError, EffectAdapter};
 use crate::signal::ShutdownToken;
 
 /// Production node daemon that cannot open effects until later milestones.
@@ -28,6 +29,12 @@ impl ProductionNode {
         Self {
             readiness: DaemonReadiness::EffectClosed,
         }
+    }
+
+    /// Starts only when the bound adapter is independently verified closed.
+    pub fn from_effect_adapter(adapter: &impl EffectAdapter) -> Result<Self, AdapterError> {
+        adapter.verify_closed()?;
+        Ok(Self::effect_closed())
     }
 
     /// Current readiness.
