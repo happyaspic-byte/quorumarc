@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -66,6 +66,10 @@ pub enum ConfigError {
     FenceReadBackRequired,
     FailureDomainNotIndependent,
     WitnessFailureDomainNotIndependent,
+    ReservedWitnessHost,
+    InvalidTopology,
+    LocalIdentityMismatch,
+    WitnessEndpointMismatch,
     InvalidValue(String),
     MissingField(String),
     TomlError(String),
@@ -85,6 +89,10 @@ impl ConfigError {
             Self::FenceReadBackRequired => "FENCE_READ_BACK_REQUIRED",
             Self::FailureDomainNotIndependent => "FAILURE_DOMAIN_NOT_INDEPENDENT",
             Self::WitnessFailureDomainNotIndependent => "WITNESS_FAILURE_DOMAIN_NOT_INDEPENDENT",
+            Self::ReservedWitnessHost => "RESERVED_WITNESS_HOST",
+            Self::InvalidTopology => "CONFIG_INVALID_TOPOLOGY",
+            Self::LocalIdentityMismatch => "CONFIG_LOCAL_IDENTITY_MISMATCH",
+            Self::WitnessEndpointMismatch => "CONFIG_WITNESS_ENDPOINT_MISMATCH",
             Self::InvalidValue(_) => "CONFIG_INVALID_VALUE",
             Self::MissingField(_) => "CONFIG_MISSING_FIELD",
             Self::TomlError(_) => "CONFIG_TOML_INVALID",
@@ -122,6 +130,60 @@ impl ProductionConfig {
                 "cluster must declare exactly 3 members".to_owned(),
             ));
         }
+        if config.role != "data" && config.role != "witness" {
+            return Err(ConfigError::InvalidTopology);
+        }
+        let data_count = config
+            .members
+            .iter()
+            .filter(|member| member.role == "data")
+            .count();
+        let witness_count = config
+            .members
+            .iter()
+            .filter(|member| member.role == "witness")
+            .count();
+        if data_count != 2
+            || witness_count != 1
+            || config
+                .members
+                .iter()
+                .any(|member| member.role != "data" && member.role != "witness")
+        {
+            return Err(ConfigError::InvalidTopology);
+        }
+        let member_ids: BTreeSet<_> = config
+            .members
+            .iter()
+            .map(|member| member.id.as_str())
+            .collect();
+        let member_addresses: BTreeSet<_> =
+            config.members.iter().map(|member| member.address).collect();
+        if member_ids.len() != config.members.len()
+            || member_addresses.len() != config.members.len()
+        {
+            return Err(ConfigError::InvalidTopology);
+        }
+        let Some(local) = config
+            .members
+            .iter()
+            .find(|member| member.id == config.node_id)
+        else {
+            return Err(ConfigError::LocalIdentityMismatch);
+        };
+        if local.role != config.role || local.address != config.listen {
+            return Err(ConfigError::LocalIdentityMismatch);
+        }
+        let Some(witness_member) = config
+            .members
+            .iter()
+            .find(|member| member.role == "witness")
+        else {
+            return Err(ConfigError::InvalidTopology);
+        };
+        if witness_member.address != config.witness {
+            return Err(ConfigError::WitnessEndpointMismatch);
+        }
         if config.automatic_promotion
             && config.fence.mechanism != "hardware-power"
             && config.fence.mechanism != "storage-reservation"
@@ -144,10 +206,21 @@ impl ProductionConfig {
             .members
             .iter()
             .filter(|member| member.role == "data")
-            .map(|member| member.address.ip())
+            .map(|member| canonical_ip(member.address.ip()))
             .collect();
-        if data_hosts.contains(&config.witness.ip()) {
+        if data_hosts.len() != data_count {
+            return Err(ConfigError::InvalidTopology);
+        }
+        if data_hosts.contains(&canonical_ip(config.witness.ip())) {
             return Err(ConfigError::WitnessFailureDomainNotIndependent);
+        }
+        let reserved_witness = IpAddr::V4(Ipv4Addr::new(172, 30, 1, 84));
+        if canonical_ip(config.witness.ip()) == reserved_witness
+            || config.members.iter().any(|member| {
+                member.role == "witness" && canonical_ip(member.address.ip()) == reserved_witness
+            })
+        {
+            return Err(ConfigError::ReservedWitnessHost);
         }
 
         Ok(config)
@@ -157,6 +230,18 @@ impl ProductionConfig {
     #[must_use]
     pub fn cluster_id(&self) -> &str {
         &self.cluster_id
+    }
+
+    /// Local node identity.
+    #[must_use]
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    /// Local declared role.
+    #[must_use]
+    pub fn role(&self) -> &str {
+        &self.role
     }
 
     /// Static membership.
@@ -171,9 +256,34 @@ impl ProductionConfig {
         self.automatic_promotion
     }
 
+    /// Configured authoritative fence mechanism.
+    #[must_use]
+    pub fn fence_mechanism(&self) -> &str {
+        &self.fence.mechanism
+    }
+
+    /// Configured fence profile identity.
+    #[must_use]
+    pub fn fence_profile(&self) -> &str {
+        &self.fence.profile
+    }
+
+    /// Whether independent fence read-back is required.
+    #[must_use]
+    pub const fn fence_read_back(&self) -> bool {
+        self.fence.read_back
+    }
+
     /// External effects remain closed until later milestones.
     #[must_use]
     pub const fn effect_gate_state(&self) -> &'static str {
         "closed"
+    }
+}
+
+fn canonical_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
+        IpAddr::V4(_) => address,
     }
 }

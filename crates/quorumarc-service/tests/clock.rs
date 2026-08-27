@@ -3,7 +3,6 @@
 use std::fs;
 use std::time::Duration;
 
-use quorumarc_core::TrustedClock;
 use quorumarc_service::clock::{BootClock, BootClockError};
 
 #[test]

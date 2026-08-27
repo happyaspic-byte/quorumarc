@@ -232,6 +232,60 @@ fn missing_and_corrupt_store_inspection_are_closed_refusals() -> Result<(), Box<
 }
 
 #[test]
+fn export_support_bundle_is_read_only_and_redacts_private_key_path() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new("support-bundle")?;
+    let config = directory.path().join("production.toml");
+    fs::write(
+        &config,
+        r#"
+schema_version = "1"
+cluster_id = "prod-cluster"
+node_id = "node-a"
+workload_id = "orders-api"
+role = "data"
+listen = "172.30.1.22:7601"
+witness = "172.30.1.200:7602"
+store_dir = "/var/lib/quorumarc/authority"
+signing_key = "/etc/quorumarc/secrets/node-a.seed"
+automatic_promotion = true
+[fence]
+mechanism = "hardware-power"
+profile = "pdu-a"
+read_back = true
+[workload]
+unit = "orders-api.service"
+[effect]
+vip = "172.30.1.100/24"
+interface = "enp1s0"
+[[members]]
+id = "node-a"
+role = "data"
+address = "172.30.1.22:7601"
+failure_domain = "power-a"
+[[members]]
+id = "node-b"
+role = "data"
+address = "172.30.1.21:7601"
+failure_domain = "power-b"
+[[members]]
+id = "witness-a"
+role = "witness"
+address = "172.30.1.200:7602"
+failure_domain = "power-w"
+"#,
+    )?;
+
+    let report = with_path("export-support-bundle", "--config", &config);
+    let text = output(&report);
+    assert_eq!(report.exit_code(), 0);
+    assert!(text.contains("SUPPORT_BUNDLE_REDACTED"));
+    assert!(text.contains("<REDACTED_PRIVATE_KEY_PATH>"));
+    assert!(!text.contains("/etc/quorumarc/secrets/node-a.seed"));
+    assert_closed(&report);
+    Ok(())
+}
+
+#[test]
 fn valid_store_inspection_reports_identity_without_touching_staging() -> Result<(), Box<dyn Error>>
 {
     let directory = TestDirectory::new("identity-store")?;

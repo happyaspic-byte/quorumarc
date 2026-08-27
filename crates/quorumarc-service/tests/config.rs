@@ -88,6 +88,86 @@ fn automatic_promotion_requires_read_back_and_three_distinct_failure_domains() {
 }
 
 #[test]
+fn production_witness_refuses_reserved_controller_host() {
+    let controller_witness = VALID.replace("172.30.1.23:7602", "172.30.1.84:7602");
+    assert!(matches!(
+        ProductionConfig::parse(&controller_witness),
+        Err(ConfigError::ReservedWitnessHost)
+    ));
+
+    let mapped = VALID.replace("172.30.1.23:7602", "[::ffff:172.30.1.84]:7602");
+    assert!(matches!(
+        ProductionConfig::parse(&mapped),
+        Err(ConfigError::ReservedWitnessHost)
+    ));
+}
+
+#[test]
+fn production_config_requires_exact_roles_and_bound_local_identity() {
+    let all_data = VALID.replace("role = \"witness\"", "role = \"data\"");
+    assert!(matches!(
+        ProductionConfig::parse(&all_data),
+        Err(ConfigError::InvalidTopology)
+    ));
+
+    let unknown_role = VALID.replacen("role = \"data\"", "role = \"candidate\"", 1);
+    assert!(matches!(
+        ProductionConfig::parse(&unknown_role),
+        Err(ConfigError::InvalidTopology)
+    ));
+
+    let missing_local = VALID.replace("node_id = \"node-a\"", "node_id = \"node-c\"");
+    assert!(matches!(
+        ProductionConfig::parse(&missing_local),
+        Err(ConfigError::LocalIdentityMismatch)
+    ));
+
+    let wrong_listen = VALID.replacen(
+        "listen = \"172.30.1.22:7601\"",
+        "listen = \"172.30.1.22:7999\"",
+        1,
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&wrong_listen),
+        Err(ConfigError::LocalIdentityMismatch)
+    ));
+}
+
+#[test]
+fn production_config_requires_unique_member_ids_addresses_and_data_hosts() {
+    let duplicate_id = VALID.replace("id = \"node-b\"", "id = \"node-a\"");
+    assert!(matches!(
+        ProductionConfig::parse(&duplicate_id),
+        Err(ConfigError::InvalidTopology)
+    ));
+
+    let duplicate_address = VALID.replace("172.30.1.21:7601", "172.30.1.22:7601");
+    assert!(matches!(
+        ProductionConfig::parse(&duplicate_address),
+        Err(ConfigError::InvalidTopology)
+    ));
+
+    let shared_data_host = VALID.replace("172.30.1.21:7601", "172.30.1.22:7609");
+    assert!(matches!(
+        ProductionConfig::parse(&shared_data_host),
+        Err(ConfigError::InvalidTopology)
+    ));
+}
+
+#[test]
+fn production_config_requires_witness_endpoint_to_match_witness_member() {
+    let unbound = VALID.replacen(
+        "witness = \"172.30.1.23:7602\"",
+        "witness = \"172.30.1.99:7602\"",
+        1,
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&unbound),
+        Err(ConfigError::WitnessEndpointMismatch)
+    ));
+}
+
+#[test]
 fn unknown_duplicate_and_relative_paths_fail_closed() {
     assert!(matches!(
         ProductionConfig::parse(&format!("{VALID}surprise = \"unsafe\"\n")),

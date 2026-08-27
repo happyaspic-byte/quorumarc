@@ -55,6 +55,8 @@ pub enum Command {
     SimulateFailure,
     /// Direct voting is deliberately unavailable.
     Vote,
+    /// Closed-gate production daemon. It never votes.
+    Daemon,
     /// Print command help.
     Help,
 }
@@ -87,6 +89,7 @@ impl Command {
             Self::InspectStore => "inspect-store",
             Self::SimulateFailure => "simulate-failure",
             Self::Vote => "vote",
+            Self::Daemon => "daemon",
             Self::Help => "help",
         }
     }
@@ -108,6 +111,7 @@ where
         "inspect-store" => Command::InspectStore,
         "simulate-failure" => Command::SimulateFailure,
         "vote" | "certify" => Command::Vote,
+        "daemon" => Command::Daemon,
         "help" | "--help" | "-h" => Command::Help,
         unknown => return Err(CliError::UnknownCommand(unknown.to_owned())),
     };
@@ -146,7 +150,7 @@ where
 
 fn option_allowed(command: Command, option: &str) -> bool {
     match command {
-        Command::Status | Command::Run | Command::Health => {
+        Command::Status | Command::Run | Command::Health | Command::Daemon => {
             matches!(option, "--config" | "--key" | "--store")
         }
         Command::InspectProof => option == "--proof",
@@ -177,6 +181,7 @@ where
         Command::InspectProof => inspect_proof(&cli, stdout, stderr),
         Command::InspectStore => inspect_store(&cli, stdout, stderr),
         Command::SimulateFailure => simulate_failure(stdout, stderr),
+        Command::Daemon => daemon(&cli, stdout, stderr),
         Command::Vote => {
             let result = writeln!(
                 stderr,
@@ -356,6 +361,84 @@ fn inspect_store<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) 
     write_exit(result, stderr)
 }
 
+fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
+    let Some(config_path) = cli.config.as_deref() else {
+        let result = writeln!(
+            stderr,
+            "refused=true reason=WITNESS_DAEMON_CONFIG_REQUIRED voting=false effect_gate=closed"
+        );
+        return write_error_exit(result, EXIT_UNAVAILABLE);
+    };
+    let bytes = match read_bounded(config_path, 65_536) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_DAEMON_CONFIG_READ_FAILED voting=false effect_gate=closed detail={}",
+                read_error_detail(&error)
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_DAEMON_CONFIG_INVALID_UTF8 voting=false effect_gate=closed detail={error}"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
+    let config = match quorumarc_service::config::ProductionConfig::parse(&text) {
+        Ok(config) => config,
+        Err(error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason={} voting=false effect_gate=closed detail={error:?}",
+                error.reason_code()
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
+    if config.role() != "witness" {
+        let result = writeln!(
+            stderr,
+            "refused=true reason=WITNESS_ROLE_MISMATCH voting=false effect_gate=closed"
+        );
+        return write_error_exit(result, EXIT_UNAVAILABLE);
+    }
+    let shutdown = quorumarc_service::signal::ShutdownToken::new();
+    let _guard = match shutdown.register_process_signals() {
+        Ok(guard) => guard,
+        Err(_error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_SIGNAL_HANDLER_REGISTRATION_FAILED voting=false effect_gate=closed"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
+    let mut node = quorumarc_service::node::ProductionNode::effect_closed();
+    let _report = node.run_until_shutdown(&shutdown);
+    let result = writeln!(
+        stdout,
+        "status=stopped reason=WITNESS_DAEMON_STOPPED_NONVOTING voting=false effect_gate=closed"
+    );
+    write_exit(result, stderr)
+}
+
+fn read_error_detail(error: &ReadBoundedError) -> String {
+    match error {
+        ReadBoundedError::TooLarge { actual, maximum } => {
+            format!("too-large-actual-{actual}-maximum-{maximum}")
+        }
+        ReadBoundedError::InvalidType => "invalid-type".to_owned(),
+        ReadBoundedError::Missing => "missing".to_owned(),
+        ReadBoundedError::Io(error) => error.to_string(),
+    }
+}
+
 fn simulate_failure<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
     let codec = match FrameCodec::new(64) {
         Ok(codec) => codec,
@@ -398,8 +481,8 @@ fn simulate_failure<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
 fn help<O: Write, E: Write>(stdout: &mut O, stderr: &mut E) -> u8 {
     let result = writeln!(
         stdout,
-        "Usage: quorumarc-witness <status|run|health|inspect-proof|inspect-store|simulate-failure> [--config PATH] [--key PATH] [--store DIR] [--proof FILE]\n\
-         Gate 1A lab diagnostics are available; run and direct voting fail closed."
+        "Usage: quorumarc-witness <status|run|health|inspect-proof|inspect-store|simulate-failure|daemon> [--config PATH] [--key PATH] [--store DIR] [--proof FILE]\n\
+         Gate 1A lab diagnostics are available; run, daemon, and direct voting fail closed."
     );
     write_exit(result, stderr)
 }

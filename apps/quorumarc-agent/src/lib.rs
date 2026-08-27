@@ -102,7 +102,8 @@ enum Command {
     Run(RunOptions),
     Health { config: Option<PathBuf> },
     ValidateConfig { config: Option<PathBuf> },
-    Daemon { config: Option<PathBuf> },
+    Daemon(DaemonOptions),
+    ExportSupportBundle { config: Option<PathBuf> },
     InspectProof(ProofOptions),
     InspectStore { store: PathBuf },
     SimulateFailure { scenario: Scenario, seed: u64 },
@@ -112,6 +113,12 @@ enum Command {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RunOptions {
     config: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct DaemonOptions {
+    config: Option<PathBuf>,
+    status_socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -251,7 +258,8 @@ where
         Command::Run(options) => run(options),
         Command::Health { config } => health(config.as_deref()),
         Command::ValidateConfig { config } => validate_config(config.as_deref()),
-        Command::Daemon { config } => daemon(config.as_deref()),
+        Command::Daemon(options) => daemon(options),
+        Command::ExportSupportBundle { config } => export_support_bundle(config.as_deref()),
         Command::InspectProof(options) => inspect_proof(options),
         Command::InspectStore { store } => inspect_store(&store),
         Command::SimulateFailure { scenario, seed } => simulate_failure(scenario, seed),
@@ -276,7 +284,8 @@ fn parse_command(arguments: &[OsString]) -> Result<Command, Failure> {
         "validate-config" => Ok(Command::ValidateConfig {
             config: parse_single_path_option(options, "--config")?,
         }),
-        "daemon" => Ok(Command::Daemon {
+        "daemon" => parse_daemon_options(options).map(Command::Daemon),
+        "export-support-bundle" => Ok(Command::ExportSupportBundle {
             config: parse_single_path_option(options, "--config")?,
         }),
         "inspect-proof" => parse_proof_options(options).map(Command::InspectProof),
@@ -351,6 +360,35 @@ fn parse_run_options(options: &[OsString]) -> Result<RunOptions, Failure> {
                 return Err(Failure::new(
                     "UNEXPECTED_ARGUMENT",
                     format!("unknown run option: {option}"),
+                    EXIT_USAGE,
+                ));
+            }
+        }
+        index = index.saturating_add(1);
+    }
+    Ok(parsed)
+}
+
+fn parse_daemon_options(options: &[OsString]) -> Result<DaemonOptions, Failure> {
+    let mut parsed = DaemonOptions::default();
+    let mut index = 0;
+    while index < options.len() {
+        let option = utf8_argument(&options[index], "daemon option")?;
+        index = index.saturating_add(1);
+        let value = options.get(index).ok_or_else(|| {
+            Failure::new(
+                "OPTION_VALUE_MISSING",
+                format!("{option} requires a value"),
+                EXIT_USAGE,
+            )
+        })?;
+        match option {
+            "--config" => set_path_once(&mut parsed.config, value, option)?,
+            "--status-socket" => set_path_once(&mut parsed.status_socket, value, option)?,
+            _ => {
+                return Err(Failure::new(
+                    "UNEXPECTED_ARGUMENT",
+                    format!("unknown daemon option: {option}"),
                     EXIT_USAGE,
                 ));
             }
@@ -634,8 +672,8 @@ fn validate_config(config_path: Option<&Path>) -> CliReport {
     }
 }
 
-fn daemon(config_path: Option<&Path>) -> CliReport {
-    let Some(path) = config_path else {
+fn daemon(options: DaemonOptions) -> CliReport {
+    let Some(path) = options.config.as_deref() else {
         return CliReport::refusal(
             "daemon",
             "CONFIG_REQUIRED",
@@ -661,20 +699,154 @@ fn daemon(config_path: Option<&Path>) -> CliReport {
         }
     };
     match quorumarc_service::config::ProductionConfig::parse(&text) {
-        Ok(_config) => {
-            let node = quorumarc_service::node::ProductionNode::effect_closed();
-            CliReport::refusal(
-                "daemon",
-                "PRODUCTION_ACTIVATION_NOT_IMPLEMENTED",
-                format!(
-                    "production daemon remains {} until independent Witness, fence, and EffectGate adapters are complete",
-                    node.effect_gate_state()
-                ),
-                EXIT_CONFIG,
-            )
+        Ok(config) => {
+            if config.role() != "data" {
+                return CliReport::refusal(
+                    "daemon",
+                    "AGENT_ROLE_MISMATCH",
+                    "agent daemon requires local role=data",
+                    EXIT_CONFIG,
+                );
+            }
+            let clock = match quorumarc_service::clock::BootClock::open_system() {
+                Ok(clock) => clock,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "BOOT_CLOCK_UNAVAILABLE",
+                        "cannot bind CLOCK_BOOTTIME to kernel boot identity",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
+            let status = quorumarc_service::operations::NodeStatusReport::new(
+                &config,
+                clock.boot_id(),
+                clock.now_ms(),
+                None,
+            );
+            let mut node = quorumarc_service::node::ProductionNode::effect_closed();
+            let shutdown = quorumarc_service::signal::ShutdownToken::new();
+            let _signal_guard = match shutdown.register_process_signals() {
+                Ok(guard) => guard,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "SIGNAL_HANDLER_REGISTRATION_FAILED",
+                        "cannot install SIGTERM/SIGINT drain handlers",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
+            let status_worker = match options.status_socket.as_deref() {
+                Some(socket) => {
+                    let server = match quorumarc_service::operations::LocalStatusServer::bind(
+                        socket, status,
+                    ) {
+                        Ok(server) => server,
+                        Err(_error) => {
+                            return CliReport::refusal(
+                                "daemon",
+                                "STATUS_SOCKET_BIND_FAILED",
+                                "cannot bind a new read-only status socket",
+                                EXIT_CONFIG,
+                            );
+                        }
+                    };
+                    let worker_shutdown = shutdown.clone();
+                    Some(std::thread::spawn(move || {
+                        server.serve_until(&worker_shutdown)
+                    }))
+                }
+                None => None,
+            };
+            let report = node.run_until_shutdown(&shutdown);
+            if let Some(worker) = status_worker {
+                let _ = worker.join();
+            }
+            let fields = [
+                ("event", "daemon".to_owned()),
+                ("status", "stopped-effect-closed".to_owned()),
+                ("reason_code", "DAEMON_STOPPED_EFFECT_CLOSED".to_owned()),
+                ("initial", format!("{:?}", report.initial)),
+                ("final_state", format!("{:?}", report.final_state)),
+                ("ever_authority_ready", report.ever_ready.to_string()),
+                ("effect_gate", node.effect_gate_state().to_owned()),
+                ("authority", "denied".to_owned()),
+            ];
+            CliReport::output(json_record(&fields))
         }
         Err(error) => CliReport::refusal(
             "daemon",
+            error.reason_code(),
+            format!("{error:?}"),
+            EXIT_CONFIG,
+        ),
+    }
+}
+
+fn export_support_bundle(config_path: Option<&Path>) -> CliReport {
+    let Some(path) = config_path else {
+        return CliReport::refusal(
+            "export-support-bundle",
+            "CONFIG_REQUIRED",
+            "export-support-bundle requires an explicit --config file",
+            EXIT_CONFIG,
+        );
+    };
+    let bytes = match read_bounded(path, MAX_CONFIG_SIZE, "CONFIG") {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            return CliReport::refusal(
+                "export-support-bundle",
+                failure.reason,
+                failure.detail,
+                failure.exit_code,
+            );
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            return CliReport::refusal(
+                "export-support-bundle",
+                "CONFIG_INVALID_UTF8",
+                error.to_string(),
+                EXIT_CONFIG,
+            );
+        }
+    };
+    match quorumarc_service::config::ProductionConfig::parse(&text) {
+        Ok(config) => {
+            let (boot_id, uptime_ms) = match quorumarc_service::clock::BootClock::open_system() {
+                Ok(clock) => (clock.boot_id().to_owned(), clock.now_ms()),
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "export-support-bundle",
+                        "BOOT_CLOCK_UNAVAILABLE",
+                        "cannot bind CLOCK_BOOTTIME to kernel boot identity",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
+            let bundle = quorumarc_service::operations::export_support_bundle(
+                &config, boot_id, uptime_ms, None,
+            );
+            let fields = [
+                ("event", "export-support-bundle".to_owned()),
+                ("status", "exported-redacted".to_owned()),
+                ("reason_code", "SUPPORT_BUNDLE_REDACTED".to_owned()),
+                ("cluster_id", bundle.cluster_id().to_owned()),
+                ("members", bundle.members_count().to_string()),
+                ("manifest", bundle.manifest_json().to_owned()),
+                ("digest", hex_encode(&bundle.bundle_digest())),
+                ("effect_gate", "closed".to_owned()),
+                ("authority", "denied".to_owned()),
+            ];
+            CliReport::output(json_record(&fields))
+        }
+        Err(error) => CliReport::refusal(
+            "export-support-bundle",
             error.reason_code(),
             format!("{error:?}"),
             EXIT_CONFIG,
@@ -872,7 +1044,7 @@ fn help() -> CliReport {
         ("status", "ok".to_owned()),
         (
             "usage",
-            "quorumarc-agent <status|run|health|validate-config|daemon|inspect-proof|inspect-store|simulate-failure> [options]"
+            "quorumarc-agent <status|run|health|validate-config|daemon|export-support-bundle|inspect-proof|inspect-store|simulate-failure> [--config PATH] [--status-socket PATH] [options]"
                 .to_owned(),
         ),
         ("effect_gate", "closed".to_owned()),

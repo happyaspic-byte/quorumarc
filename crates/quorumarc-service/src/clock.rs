@@ -57,6 +57,12 @@ impl BootClock {
         &self.boot_id
     }
 
+    /// Monotonic milliseconds from the bound boot identity.
+    #[must_use]
+    pub fn now_ms(&self) -> u64 {
+        TrustedClock::now_ms(self)
+    }
+
     /// Refuses if the kernel boot identity no longer matches the bound value.
     pub fn verify_boot(&self) -> Result<(), BootClockError> {
         let current = read_boot_id(&self.boot_id_path)?;

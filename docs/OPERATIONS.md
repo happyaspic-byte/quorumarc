@@ -21,11 +21,11 @@ the [quick start](QUICKSTART.md).
 
 | Class | Current repository state |
 |---|---|
-| **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; durable Witness actor; long-running localhost Node A/B/Witness lab services; bounded automatic-controller process; core logical EffectGate; in-memory test sink; status/refusal command shells; bounded strict agent configuration subset |
+| **IMPLEMENTED** | Canonical signed-envelope library; local authority store; bounded frame codec; durable Witness actor; long-running localhost Node A/B/Witness lab services; bounded automatic-controller process; core logical EffectGate; in-memory test sink; status/refusal command shells; bounded strict agent configuration subset; fail-closed production TOML parser; closed-gate agent/Witness `daemon` loops; redacted support-bundle export; sandboxed systemd unit templates |
 | **CI-VERIFIED** | Nothing is asserted here without a linked successful run for the exact commit |
 | **SIMULATED** | Deterministic model, injected storage faults, in-process clock/effect fixtures, and future hosted-runner fault analogues |
 | **PHYSICAL-REQUIRED** | Independent failure domains, power/NIC/switch faults, real clock bounds, endpoint movement, actual BMC/PDU/storage/eBPF/device fencing and negative tests |
-| **NOT-IMPLEMENTED** | Production agent/Witness/controller daemons, continuous live replication protocol, trusted automatic promotion, general TOML configuration and schema migration, admin/status API, real EffectGate/fence adapters, key-management commands, membership changes, backup/restore tooling |
+| **NOT-IMPLEMENTED** | Independent Witness transport, continuous live replication protocol, trusted automatic promotion, general TOML schema migration, privileged admin mutation API, real EffectGate/fence/VIP adapters, key-management commands, membership changes, backup/restore tooling |
 
 `quorumarc-agent` always reports `effect_gate=closed` and refuses promotion or
 activation. `quorumarc-witness` reports voting disabled and refuses vote or
@@ -107,39 +107,35 @@ and a private key readable only by that service account (`0600`). Private keys
 must not be stored in Git, logs, traces, backups without encryption, or shared
 between roles.
 
-## Illustrative systemd units
+## Fail-closed production daemon templates
 
-Because no daemon exists, the only honest units are one-shot safe-default
-checks. The following is an **EXAMPLE**, not installed by the repository:
+Closed-gate `daemon` commands exist. They stay `effect_gate=closed`,
+`authority=denied`, drain on `SIGTERM`/`SIGINT`, and never send systemd
+`READY=1`. Process liveness is not production activation.
 
-```ini
-# /etc/systemd/system/quorumarc-agent-check.service
-# EXAMPLE ONLY — runs the current closed-gate status command and exits.
-[Unit]
-Description=QuorumArc agent safe-default status check
-After=local-fs.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/quorumarc-agent status --config /etc/quorumarc/agent.conf
-User=quorumarc
-Group=quorumarc
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/quorumarc
-
-[Install]
-WantedBy=multi-user.target
+```bash
+quorumarc-agent validate-config --config /etc/quorumarc-agent/agent.toml
+quorumarc-agent export-support-bundle --config /etc/quorumarc-agent/agent.toml
+quorumarc-agent daemon --config /etc/quorumarc-agent/agent.toml --status-socket /run/quorumarc/status.sock
+quorumarc-witness daemon --config /etc/quorumarc-witness/witness.toml
 ```
 
-Create a separate witness check unit with
-`ExecStart=/usr/local/bin/quorumarc-witness status` and a distinct
-`quorumarc-witness` user/state path. Do not use `Restart=always` around a
-one-shot command and do not add `promote`, `activate`, `vote`, or `certify` to
-`ExecStart`. A future daemon unit needs its own reviewed sandbox, readiness,
-shutdown, watchdog, and state-directory behavior.
+Production TOML requires exactly two data members and one independent Witness,
+unique IDs/addresses/data hosts, local `node_id`/`role`/`listen` binding, and
+a Witness endpoint that matches the Witness member. Shared-host Witness and
+IPv4-mapped aliases of `172.30.1.84` are refused. Support bundles redact
+private-key paths and serialize an unknown management commit as JSON `null`.
+Unix status sockets refuse `PROMOTE`/`ACTIVATE`, survive peer close, serve
+repeated polls, and unlink only the inode they created.
+
+Unit templates live in `packaging/systemd/`. They use dedicated
+`quorumarc` / `quorumarc-witness` users, empty `CapabilityBoundingSet`,
+`ProtectSystem=strict`, `Type=simple`, and `NotifyAccess=none`. Do not add
+`--allow-*-lab` flags. Do not enable these units as a certified failover
+service. Witness state is `/var/lib/quorumarc-witness`, never the data-node
+authority directory. Config directories are
+`/etc/quorumarc-agent` (`0750 root:quorumarc`) and
+`/etc/quorumarc-witness` (`0750 root:quorumarc-witness`).
 
 ## Logs and refusal codes
 
@@ -190,11 +186,11 @@ frames and activation receipts are state, not log files; never rotate them.
 
 ## Start, stop, and promotion safety
 
-For the present binaries, start means running a status check or a fail-closed
-`run --config PATH` material inspection; stop means no QuorumArc process is
-active. `run` always refuses activation after inspection. There is no automatic
-promotion path to operate. For any future lab integration, enforce this
-sequence:
+For the present binaries, start means running a status check, a fail-closed
+`run --config PATH` material inspection, or a closed-gate `daemon` loop; stop
+means SIGTERM drain with effects remaining closed. `run` always refuses
+activation after inspection. The production `daemon` loop does not authorize
+promotion. For any future lab integration, enforce this sequence:
 
 1. Begin with `automatic_promotion = false` and every EffectGate closed.
 2. Validate unique identities, store directories, keys, policy hash,

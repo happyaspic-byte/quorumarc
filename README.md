@@ -65,8 +65,9 @@ enforced end-to-end failover remains unproven. See the
 | `quorumarc-rpo0` | Two-replica WAL-backed monotonic-counter demonstration | Demonstration workload, not a general database |
 | `quorumarc-lab` | Real localhost TCP Witness process and deterministic fault cases | No complete Node A/Node B active-writer lifecycle |
 | `quorumarc-cluster` | Same-binary genesis, long-running Node A/B/Witness lifecycle, automatic-controller process, and bounded fault-proxy modes | Authenticated shared-host lab with deterministic logical time; no trusted production authority claim |
-| `quorumarc-agent` | Safe-default inspection/refusal CLI | Automatic promotion deliberately disabled |
-| `quorumarc-witness` | Safe-default Witness inspection/refusal CLI | No production network voting service |
+| `quorumarc-service` | Strict production TOML, boot clock, closed daemon loop, redacted support bundle, mock fence/effect adapters | No production activation, VIP, PDU, or independent Witness transport |
+| `quorumarc-agent` | Safe-default inspection/refusal CLI plus closed-gate `daemon` | Automatic promotion deliberately disabled |
+| `quorumarc-witness` | Safe-default Witness inspection/refusal CLI plus non-voting `daemon` | No production network voting service |
 
 ## Implementation and validation status
 

@@ -10,12 +10,15 @@ configuration parser for `status --config`, `health --config`, and
 `run --config`; this is inspection input, not an activation path. Installing
 these binaries does not install an HA service.
 
-An offline installer, Debian package, signed release bundle, SBOM/provenance
-pipeline, general TOML/production service configuration, configuration
-migration, dedicated validation command, and long-running agent/witness daemon
-are **NOT-IMPLEMENTED**. No offline procedure is **CI-VERIFIED** by this
-document. Host independence, real fencing, storage durability, and I/O-bound
-effect enforcement are **PHYSICAL-REQUIRED**.
+A fail-closed production TOML parser, `validate-config`, redacted support
+bundle export, and long-running agent/Witness daemon loops are **IMPLEMENTED**
+and remain effect-closed / non-voting. They never send systemd `READY=1`.
+Sandboxed unit templates exist under `packaging/`; they are not a certified
+install. An offline installer, Debian package, signed release bundle,
+SBOM/provenance pipeline, and configuration migration are **NOT-IMPLEMENTED**.
+No offline procedure is **CI-VERIFIED** by this document. Host independence,
+real fencing, storage durability, and I/O-bound effect enforcement are
+**PHYSICAL-REQUIRED**.
 
 This repository does not vendor crates or the Rust toolchain. Before an offline
 transfer, a connected preparation machine must produce and verify a complete
@@ -131,8 +134,10 @@ subset in [operations](OPERATIONS.md) is consumed by the current agent; tables,
 arrays, general TOML syntax, unknown fields, duplicate singleton fields,
 non-UTF-8 input, and files larger than 65,536 bytes are refused. Even
 `automatic_promotion = true` changes only status/refusal context and cannot
-open the EffectGate. The systemd material remains illustrative because no
-long-running daemon or automatic activation path consumes it.
+open the EffectGate. Closed-gate `daemon` commands exist for agent and
+Witness; they drain on SIGTERM and never send systemd `READY=1`. Unit
+templates under `packaging/` are fail-closed illustrations, not a certified
+HA install. There is no automatic activation path.
 
 For an offline inspection of a prepared configuration, use the exact subset
 documented in the operations guide and review the structured result:

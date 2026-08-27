@@ -1,6 +1,3 @@
-use std::thread;
-use std::time::Duration;
-
 use crate::signal::ShutdownToken;
 
 /// Production node daemon that cannot open effects until later milestones.
@@ -40,14 +37,10 @@ impl ProductionNode {
     }
 
     /// Runs the closed-gate daemon loop until shutdown.
-    pub fn run_until_shutdown(
-        &mut self,
-        shutdown: &ShutdownToken,
-        poll_interval: Duration,
-    ) -> DaemonReport {
+    pub fn run_until_shutdown(&mut self, shutdown: &ShutdownToken) -> DaemonReport {
         let initial = self.readiness;
-        while !shutdown.is_requested() {
-            thread::sleep(poll_interval);
+        if !shutdown.is_requested() {
+            shutdown.wait();
         }
         self.readiness = DaemonReadiness::Stopped;
         DaemonReport {
