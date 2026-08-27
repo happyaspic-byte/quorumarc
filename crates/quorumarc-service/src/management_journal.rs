@@ -22,6 +22,7 @@ pub struct ManagementJournal {
     path: PathBuf,
     identity: [u8; IDENTITY_LEN],
     operations: Vec<ManagementOperation>,
+    poisoned: bool,
     _owner: File,
 }
 
@@ -95,6 +96,7 @@ impl ManagementJournal {
                     path,
                     identity,
                     operations: Vec::new(),
+                    poisoned: false,
                     _owner: file,
                 })
             }
@@ -117,6 +119,7 @@ impl ManagementJournal {
                     path,
                     identity,
                     operations,
+                    poisoned: false,
                     _owner: owner,
                 })
             }
@@ -137,6 +140,9 @@ impl ManagementJournal {
         &mut self,
         operation: ManagementOperation,
     ) -> Result<ManagementOutcome, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Io);
+        }
         if let Some(existing) = self
             .operations
             .iter()
@@ -177,14 +183,25 @@ impl ManagementJournal {
         }
 
         let encoded = encode_record(self.identity, operation);
-        let mut file = OpenOptions::new()
+        let mut file = match OpenOptions::new()
             .append(true)
             .custom_flags(OFlags::NOFOLLOW.bits() as i32)
             .open(&self.path)
-            .map_err(|_error| JournalError::Io)?;
-        file.write_all(&encoded)
+        {
+            Ok(file) => file,
+            Err(_error) => {
+                self.poisoned = true;
+                return Err(JournalError::Io);
+            }
+        };
+        if file
+            .write_all(&encoded)
             .and_then(|()| file.sync_all())
-            .map_err(|_error| JournalError::Io)?;
+            .is_err()
+        {
+            self.poisoned = true;
+            return Err(JournalError::Io);
+        }
         self.operations.push(operation);
         Ok(ManagementOutcome::Committed)
     }

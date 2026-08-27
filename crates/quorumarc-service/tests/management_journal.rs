@@ -52,6 +52,33 @@ fn management_journal_persists_exact_retry_and_refuses_conflicts() {
 }
 
 #[test]
+fn management_journal_io_failure_poison_refuses_same_process_retry() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-management-poison-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create journal fixture");
+    let identity = [13_u8; 16];
+    let mut journal = ManagementJournal::open(&directory, identity).expect("open journal");
+    let committed = directory.join("management.journal");
+    let displaced = directory.join("management.journal.displaced");
+    fs::rename(&committed, &displaced).expect("displace journal");
+    fs::create_dir(&committed).expect("block journal path");
+    let operation = ManagementOperation::new(1, [31; 16], [41; 32]).expect("operation");
+
+    assert_eq!(journal.record(operation), Err(JournalError::Io));
+    fs::remove_dir(&committed).expect("remove blocker");
+    fs::rename(&displaced, &committed).expect("restore journal");
+    assert_eq!(journal.record(operation), Err(JournalError::Io));
+    drop(journal);
+
+    let mut reopened = ManagementJournal::open(&directory, identity).expect("reopen journal");
+    assert_eq!(reopened.highest_sequence(), 0);
+    assert_eq!(reopened.record(operation), Ok(ManagementOutcome::Committed));
+    fs::remove_dir_all(directory).expect("remove journal fixture");
+}
+
+#[test]
 fn management_journal_refuses_capacity_before_ack_and_remains_recoverable() {
     let directory = std::env::temp_dir().join(format!(
         "quorumarc-management-capacity-{}",
