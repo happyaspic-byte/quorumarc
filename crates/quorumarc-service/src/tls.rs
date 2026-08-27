@@ -1,5 +1,10 @@
+use std::fs::OpenOptions;
+use std::io::{BufReader, Read};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::sync::Arc;
 
+use rustix::fs::OFlags;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -11,6 +16,18 @@ pub enum TlsConfigError {
     InvalidCertificateChain,
     InvalidPrivateKey,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TlsMaterialError {
+    InvalidFile,
+    UnsafePrivateKey,
+    MaterialTooLarge,
+    InvalidCertificate,
+    InvalidPrivateKey,
+    InvalidConfig,
+}
+
+const MAX_TLS_MATERIAL_SIZE: u64 = 1_048_576;
 
 /// rustls server configuration that always requires a client certificate.
 #[derive(Debug)]
@@ -28,6 +45,87 @@ impl MtlsServerConfig {
     pub fn into_arc(self) -> Arc<ServerConfig> {
         Arc::new(self.config)
     }
+}
+
+pub fn load_mtls_server_config(
+    certificate_chain: &Path,
+    private_key: &Path,
+    trusted_roots: &Path,
+) -> Result<MtlsServerConfig, TlsMaterialError> {
+    let certificates = load_certificates(certificate_chain)?;
+    let key = load_private_key(private_key)?;
+    let roots = load_certificates(trusted_roots)?;
+    server_mtls_config(certificates, key, roots).map_err(|_error| TlsMaterialError::InvalidConfig)
+}
+
+pub fn load_mtls_client_config(
+    certificate_chain: &Path,
+    private_key: &Path,
+    trusted_roots: &Path,
+) -> Result<ClientConfig, TlsMaterialError> {
+    let certificates = load_certificates(certificate_chain)?;
+    let key = load_private_key(private_key)?;
+    let roots = load_certificates(trusted_roots)?;
+    client_mtls_config(certificates, key, roots).map_err(|_error| TlsMaterialError::InvalidConfig)
+}
+
+fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
+    let bytes = read_material(path, false)?;
+    let mut reader = BufReader::new(bytes.as_slice());
+    let certificates = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_error| TlsMaterialError::InvalidCertificate)?;
+    if certificates.is_empty() {
+        return Err(TlsMaterialError::InvalidCertificate);
+    }
+    Ok(certificates)
+}
+
+fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsMaterialError> {
+    let bytes = read_material(path, true)?;
+    let mut reader = BufReader::new(bytes.as_slice());
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|_error| TlsMaterialError::InvalidPrivateKey)?
+        .ok_or(TlsMaterialError::InvalidPrivateKey)
+}
+
+fn read_material(path: &Path, private: bool) -> Result<Vec<u8>, TlsMaterialError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_error| {
+            if private {
+                TlsMaterialError::UnsafePrivateKey
+            } else {
+                TlsMaterialError::InvalidFile
+            }
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_error| TlsMaterialError::InvalidFile)?;
+    if !metadata.is_file() {
+        return Err(if private {
+            TlsMaterialError::UnsafePrivateKey
+        } else {
+            TlsMaterialError::InvalidFile
+        });
+    }
+    if private && metadata.permissions().mode() & 0o077 != 0 {
+        return Err(TlsMaterialError::UnsafePrivateKey);
+    }
+    if metadata.len() > MAX_TLS_MATERIAL_SIZE {
+        return Err(TlsMaterialError::MaterialTooLarge);
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_TLS_MATERIAL_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_error| TlsMaterialError::InvalidFile)?;
+    if bytes.len() as u64 > MAX_TLS_MATERIAL_SIZE {
+        return Err(TlsMaterialError::MaterialTooLarge);
+    }
+    Ok(bytes)
 }
 
 /// Builds an mTLS server configuration requiring client certificates signed by trusted roots.
