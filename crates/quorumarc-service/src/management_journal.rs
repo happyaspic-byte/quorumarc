@@ -1,7 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use rustix::fs::OFlags;
 use sha2::{Digest, Sha256};
 
 const MAGIC: &[u8; 8] = b"QARCMJ02";
@@ -71,7 +73,13 @@ impl ManagementJournal {
     pub fn open(directory: &Path, identity: [u8; IDENTITY_LEN]) -> Result<Self, JournalError> {
         fs::create_dir_all(directory).map_err(|_error| JournalError::Io)?;
         let path = directory.join("management.journal");
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(&header(identity))
                     .and_then(|()| file.sync_all())
@@ -86,10 +94,6 @@ impl ManagementJournal {
                 })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = fs::symlink_metadata(&path).map_err(|_error| JournalError::Io)?;
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    return Err(JournalError::Corrupt);
-                }
                 let (recovered_identity, operations) = recover(&path)?;
                 if recovered_identity != identity {
                     return Err(JournalError::IdentityMismatch);
@@ -147,6 +151,7 @@ impl ManagementJournal {
         let encoded = encode_record(self.identity, operation);
         let mut file = OpenOptions::new()
             .append(true)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
             .open(&self.path)
             .map_err(|_error| JournalError::Io)?;
         file.write_all(&encoded)
@@ -164,11 +169,32 @@ fn header(identity: [u8; IDENTITY_LEN]) -> [u8; HEADER_LEN] {
     bytes
 }
 
+const MAX_JOURNAL_SIZE: u64 = 1_048_576;
+
 fn recover(path: &Path) -> Result<([u8; IDENTITY_LEN], Vec<ManagementOperation>), JournalError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_error| match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => JournalError::Corrupt,
+            Ok(_) | Err(_) => JournalError::Io,
+        })?;
+    let metadata = file.metadata().map_err(|_error| JournalError::Io)?;
+    if !metadata.is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > MAX_JOURNAL_SIZE
+    {
+        return Err(JournalError::Corrupt);
+    }
     let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
+    (&mut file)
+        .take(MAX_JOURNAL_SIZE + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_error| JournalError::Io)?;
+    if bytes.len() > MAX_JOURNAL_SIZE as usize {
+        return Err(JournalError::Corrupt);
+    }
     if bytes.len() < HEADER_LEN
         || &bytes[..MAGIC.len()] != MAGIC
         || (bytes.len() - HEADER_LEN) % RECORD_LEN != 0

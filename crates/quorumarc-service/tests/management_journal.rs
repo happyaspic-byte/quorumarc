@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 use quorumarc_service::management_journal::{
     JournalError, ManagementJournal, ManagementOperation, ManagementOutcome,
@@ -64,4 +65,31 @@ fn copied_management_journal_refuses_another_identity() {
         Err(JournalError::IdentityMismatch)
     ));
     fs::remove_dir_all(directory).expect("remove journal fixture");
+}
+
+#[test]
+fn management_journal_refuses_symlink_and_group_accessible_files() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-management-security-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create journal fixture");
+    let outside = directory.join("outside.journal");
+    fs::write(&outside, b"dummy").expect("write");
+    let link = directory.join("management.journal");
+    symlink(&outside, &link).expect("symlink");
+    assert!(matches!(
+        ManagementJournal::open(&directory, [7; 16]),
+        Err(JournalError::Corrupt)
+    ));
+    let _ = fs::remove_file(&link);
+
+    let journal = ManagementJournal::open(&directory, [7; 16]).expect("create");
+    drop(journal);
+    fs::set_permissions(&link, fs::Permissions::from_mode(0o644)).expect("chmod");
+    assert!(matches!(
+        ManagementJournal::open(&directory, [7; 16]),
+        Err(JournalError::Corrupt)
+    ));
+    let _ = fs::remove_dir_all(directory);
 }
