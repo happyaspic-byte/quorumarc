@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use rustix::fs::{FlockOperation, flock};
 use serde::Deserialize;
 
 /// Strict production cluster configuration.
@@ -75,6 +78,7 @@ pub enum ConfigError {
     WitnessEndpointMismatch,
     StoreUnavailable,
     SigningKeyUnavailable,
+    OwnerLockRefused,
     UnsafeReload,
     InvalidValue(String),
     MissingField(String),
@@ -101,6 +105,7 @@ impl ConfigError {
             Self::WitnessEndpointMismatch => "CONFIG_WITNESS_ENDPOINT_MISMATCH",
             Self::StoreUnavailable => "CONFIG_STORE_UNAVAILABLE",
             Self::SigningKeyUnavailable => "CONFIG_SIGNING_KEY_UNAVAILABLE",
+            Self::OwnerLockRefused => "OWNER_LOCK_REFUSED",
             Self::UnsafeReload => "CONFIG_UNSAFE_RELOAD",
             Self::InvalidValue(_) => "CONFIG_INVALID_VALUE",
             Self::MissingField(_) => "CONFIG_MISSING_FIELD",
@@ -264,6 +269,32 @@ impl ProductionConfig {
         Ok(())
     }
 
+    /// Acquires an exclusive process lock on the local store directory.
+    pub fn acquire_store_lock(&self) -> Result<StoreLock, ConfigError> {
+        self.verify_local_prerequisites()?;
+        let path = self.store_dir.join(".quorumarc.owner");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|_error| ConfigError::OwnerLockRefused)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_error| ConfigError::OwnerLockRefused)?;
+        if !metadata.is_file() {
+            return Err(ConfigError::OwnerLockRefused);
+        }
+        flock(&file, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_error| ConfigError::OwnerLockRefused)?;
+        file.set_len(0)
+            .and_then(|()| write!(file, "role={} pid={}", self.role, std::process::id()))
+            .and_then(|()| file.sync_all())
+            .map_err(|_error| ConfigError::OwnerLockRefused)?;
+        Ok(StoreLock { _file: file })
+    }
+
     /// Reloads only non-safety fields after a complete re-parse.
     pub fn reload(&self, text: &str) -> Result<Self, ConfigError> {
         let candidate = Self::parse(text)?;
@@ -334,6 +365,12 @@ impl ProductionConfig {
     pub const fn effect_gate_state(&self) -> &'static str {
         "closed"
     }
+}
+
+/// Exclusive store ownership released when dropped.
+#[derive(Debug)]
+pub struct StoreLock {
+    _file: File,
 }
 
 fn default_log_level() -> String {

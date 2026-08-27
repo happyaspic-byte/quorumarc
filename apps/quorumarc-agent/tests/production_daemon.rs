@@ -273,6 +273,47 @@ fn production_daemon_restarts_effect_closed_after_sigkill() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn production_daemon_refuses_second_process_on_the_same_store() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-owner-lock-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, production_config_with_prerequisites(&directory)?)?;
+    let socket = directory.join("status.sock");
+
+    let mut first = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .args(["--status-socket"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_socket(&socket, &mut first)?;
+
+    let second = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8(second.stderr)?;
+    assert!(!second.status.success());
+    assert!(stderr.contains("OWNER_LOCK_REFUSED"));
+    assert!(stderr.contains("\"effect_gate\":\"closed\""));
+    assert!(first.try_wait()?.is_none());
+
+    send_signal(first.id(), "-TERM")?;
+    let output = first.wait_with_output()?;
+    assert!(output.status.success());
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
 fn production_config_with_prerequisites(
     directory: &std::path::Path,
 ) -> Result<String, Box<dyn Error>> {

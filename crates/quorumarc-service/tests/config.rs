@@ -279,6 +279,26 @@ fn production_prerequisites_refuse_group_readable_key_and_symlink_store() {
     let _ = fs::remove_dir_all(directory);
 }
 
+#[test]
+fn production_store_lock_refuses_second_holder_until_release() {
+    let (directory, config_text) = isolated_production_config();
+    let store = directory.join("store");
+    let key = directory.join("node.seed");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    fs::write(&key, [7_u8; 32]).expect("key");
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("key mode");
+    let config = ProductionConfig::parse(&config_text).expect("parse");
+    let first = config.acquire_store_lock().expect("first lock");
+    assert!(matches!(
+        config.acquire_store_lock(),
+        Err(ConfigError::OwnerLockRefused)
+    ));
+    drop(first);
+    let _second = config.acquire_store_lock().expect("released lock");
+    let _ = fs::remove_dir_all(directory);
+}
+
 fn isolated_production_config() -> (std::path::PathBuf, String) {
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(

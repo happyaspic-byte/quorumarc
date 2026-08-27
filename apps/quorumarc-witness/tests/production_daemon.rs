@@ -168,6 +168,51 @@ fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
     Ok(())
 }
 
+#[test]
+fn production_witness_daemon_refuses_second_process_on_the_same_store() -> Result<(), Box<dyn Error>>
+{
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-owner-lock-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("witness.toml");
+    fs::write(&config, witness_config_with_prerequisites(&directory)?)?;
+
+    let mut first = Command::new(env!("CARGO_BIN_EXE_quorumarc-witness"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    thread::sleep(Duration::from_millis(100));
+    assert!(first.try_wait()?.is_none());
+
+    let second = Command::new(env!("CARGO_BIN_EXE_quorumarc-witness"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8(second.stderr)?;
+    assert!(!second.status.success());
+    assert!(stderr.contains("OWNER_LOCK_REFUSED"));
+    assert!(stderr.contains("effect_gate=closed"));
+    assert!(first.try_wait()?.is_none());
+
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &first.id().to_string()])
+            .status()?
+            .success()
+    );
+    let output = first.wait_with_output()?;
+    assert!(output.status.success());
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
 fn witness_config_with_prerequisites(
     directory: &std::path::Path,
 ) -> Result<String, Box<dyn Error>> {
