@@ -719,29 +719,34 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
-            let status = quorumarc_service::operations::NodeStatusReport::new(
-                &config,
-                clock.boot_id(),
-                clock.now_ms(),
-                None,
+            let boot_id = clock.boot_id().to_owned();
+            let status = quorumarc_service::operations::StatusHandle::new(
+                quorumarc_service::operations::NodeStatusReport::new(
+                    &config,
+                    &boot_id,
+                    clock.now_ms(),
+                    None,
+                ),
             );
             let mut node = quorumarc_service::node::ProductionNode::effect_closed();
             let shutdown = quorumarc_service::signal::ShutdownToken::new();
+            let reload = shutdown.reload_token();
             let _signal_guard = match shutdown.register_process_signals() {
                 Ok(guard) => guard,
                 Err(_error) => {
                     return CliReport::refusal(
                         "daemon",
                         "SIGNAL_HANDLER_REGISTRATION_FAILED",
-                        "cannot install SIGTERM/SIGINT drain handlers",
+                        "cannot install SIGHUP/SIGTERM/SIGINT handlers",
                         EXIT_CONFIG,
                     );
                 }
             };
             let status_worker = match options.status_socket.as_deref() {
                 Some(socket) => {
-                    let server = match quorumarc_service::operations::LocalStatusServer::bind(
-                        socket, status,
+                    let server = match quorumarc_service::operations::LocalStatusServer::bind_shared(
+                        socket,
+                        status.clone(),
                     ) {
                         Ok(server) => server,
                         Err(_error) => {
@@ -760,10 +765,24 @@ fn daemon(options: DaemonOptions) -> CliReport {
                 }
                 None => None,
             };
+            let config_path = path.to_path_buf();
+            let reload_status = status.clone();
+            let reload_worker = std::thread::spawn(move || {
+                quorumarc_service::reload::run_reload_loop(
+                    &config_path,
+                    config,
+                    "data",
+                    &reload_status,
+                    &boot_id,
+                    || clock.now_ms(),
+                    &reload,
+                );
+            });
             let report = node.run_until_shutdown(&shutdown);
             if let Some(worker) = status_worker {
                 let _ = worker.join();
             }
+            let _ = reload_worker.join();
             let fields = [
                 ("event", "daemon".to_owned()),
                 ("status", "stopped-effect-closed".to_owned()),

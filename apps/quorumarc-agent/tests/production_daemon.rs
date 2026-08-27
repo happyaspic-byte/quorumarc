@@ -94,6 +94,95 @@ fn production_daemon_stays_effect_closed_until_sigterm_drain() -> Result<(), Box
     Ok(())
 }
 
+#[test]
+fn production_daemon_reloads_log_level_and_refuses_unsafe_sighup() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-reload-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, PRODUCTION_CONFIG)?;
+    let socket = directory.join("status.sock");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .args(["--status-socket"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_socket(&socket, &mut child)?;
+    let initial = read_status(&socket)?;
+    assert!(initial.contains("\"log_level\":\"info\""));
+    assert!(initial.contains("\"cluster_id\":\"prod-cluster\""));
+    assert!(initial.contains("\"effect_gate\":\"closed\""));
+
+    fs::write(
+        &config,
+        PRODUCTION_CONFIG.replace(
+            "automatic_promotion = true",
+            "automatic_promotion = true\nlog_level = \"debug\"",
+        ),
+    )?;
+    send_signal(child.id(), "-HUP")?;
+    let reloaded = wait_for_status(&socket, "\"log_level\":\"debug\"")?;
+    assert!(reloaded.contains("\"cluster_id\":\"prod-cluster\""));
+    assert!(reloaded.contains("\"effect_gate\":\"closed\""));
+    assert!(child.try_wait()?.is_none());
+
+    fs::write(
+        &config,
+        PRODUCTION_CONFIG.replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\""),
+    )?;
+    send_signal(child.id(), "-HUP")?;
+    thread::sleep(Duration::from_millis(200));
+    let refused = read_status(&socket)?;
+    assert!(refused.contains("\"log_level\":\"debug\""));
+    assert!(refused.contains("\"cluster_id\":\"prod-cluster\""));
+    assert!(refused.contains("\"effect_gate\":\"closed\""));
+    assert!(child.try_wait()?.is_none());
+
+    send_signal(child.id(), "-TERM")?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(output.status.success());
+    assert!(stdout.contains("DAEMON_STOPPED_EFFECT_CLOSED"));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
+fn send_signal(pid: u32, signal: &str) -> Result<(), Box<dyn Error>> {
+    let status = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("signal failed".into())
+    }
+}
+
+fn read_status(socket: &std::path::Path) -> Result<String, Box<dyn Error>> {
+    let mut client = UnixStream::connect(socket)?;
+    let mut body = String::new();
+    client.read_to_string(&mut body)?;
+    Ok(body)
+}
+
+fn wait_for_status(socket: &std::path::Path, needle: &str) -> Result<String, Box<dyn Error>> {
+    for _ in 0..50 {
+        if let Ok(body) = read_status(socket) {
+            if body.contains(needle) {
+                return Ok(body);
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err("status never matched".into())
+}
+
 fn wait_for_socket(path: &std::path::Path, child: &mut Child) -> Result<(), Box<dyn Error>> {
     for _ in 0..50 {
         if child.try_wait()?.is_some() {

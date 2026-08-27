@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crate::signal::ShutdownToken;
@@ -22,6 +23,7 @@ pub struct NodeStatusReport {
     boot_id: String,
     uptime_ms: u64,
     last_committed_index: Option<u64>,
+    log_level: String,
 }
 
 impl NodeStatusReport {
@@ -41,6 +43,7 @@ impl NodeStatusReport {
             boot_id: boot_id.into(),
             uptime_ms,
             last_committed_index,
+            log_level: config.log_level().to_owned(),
         }
     }
 
@@ -77,6 +80,42 @@ impl NodeStatusReport {
     #[must_use]
     pub const fn last_committed_index(&self) -> Option<u64> {
         self.last_committed_index
+    }
+
+    #[must_use]
+    pub fn log_level(&self) -> &str {
+        &self.log_level
+    }
+}
+
+/// Shared read-only status snapshot updated only after validated reloads.
+#[derive(Clone, Debug)]
+pub struct StatusHandle {
+    status: Arc<RwLock<NodeStatusReport>>,
+}
+
+impl StatusHandle {
+    #[must_use]
+    pub fn new(status: NodeStatusReport) -> Self {
+        Self {
+            status: Arc::new(RwLock::new(status)),
+        }
+    }
+
+    pub fn replace(&self, status: NodeStatusReport) -> Result<(), OperationsError> {
+        let mut current = self
+            .status
+            .write()
+            .map_err(|_error| OperationsError::StatusUnavailable)?;
+        *current = status;
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<NodeStatusReport, OperationsError> {
+        self.status
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|_error| OperationsError::StatusUnavailable)
     }
 }
 
@@ -134,6 +173,7 @@ impl SupportBundle {
 pub enum OperationsError {
     SocketBindFailed,
     SocketServeFailed,
+    StatusUnavailable,
 }
 
 /// Local Unix-socket status server. It never accepts mutation commands.
@@ -142,12 +182,16 @@ pub struct LocalStatusServer {
     listener: UnixListener,
     path: PathBuf,
     inode: (u64, u64),
-    status: NodeStatusReport,
+    status: StatusHandle,
 }
 
 impl LocalStatusServer {
     /// Binds a read-only status socket at `path`.
     pub fn bind(path: &Path, status: NodeStatusReport) -> Result<Self, OperationsError> {
+        Self::bind_shared(path, StatusHandle::new(status))
+    }
+
+    pub fn bind_shared(path: &Path, status: StatusHandle) -> Result<Self, OperationsError> {
         let listener =
             UnixListener::bind(path).map_err(|_error| OperationsError::SocketBindFailed)?;
         let metadata =
@@ -166,7 +210,7 @@ impl LocalStatusServer {
             .listener
             .accept()
             .map_err(|_error| OperationsError::SocketServeFailed)?;
-        write_status(stream, &self.status)
+        write_shared_status(stream, &self.status)
     }
 
     /// Serves clients until shutdown, then returns.
@@ -177,7 +221,7 @@ impl LocalStatusServer {
         while !shutdown.is_requested() {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    let _ = write_status(stream, &self.status);
+                    let _ = write_shared_status(stream, &self.status);
                 }
                 Err(error)
                     if matches!(
@@ -200,6 +244,18 @@ impl Drop for LocalStatusServer {
     }
 }
 
+fn write_shared_status(
+    stream: std::os::unix::net::UnixStream,
+    status: &StatusHandle,
+) -> Result<(), OperationsError> {
+    let snapshot = status
+        .status
+        .read()
+        .map_err(|_error| OperationsError::StatusUnavailable)?
+        .clone();
+    write_status(stream, &snapshot)
+}
+
 fn write_status(
     mut stream: std::os::unix::net::UnixStream,
     status: &NodeStatusReport,
@@ -216,14 +272,15 @@ fn write_status(
         Err(_error) => return Err(OperationsError::SocketServeFailed),
     }
     let payload = format!(
-        "{{\"cluster_id\":\"{}\",\"node_id\":\"{}\",\"effect_gate\":\"{}\",\"authority_enabled\":{},\"boot_id\":\"{}\",\"uptime_ms\":{},\"last_committed_index\":{}}}",
+        "{{\"cluster_id\":\"{}\",\"node_id\":\"{}\",\"effect_gate\":\"{}\",\"authority_enabled\":{},\"boot_id\":\"{}\",\"uptime_ms\":{},\"last_committed_index\":{},\"log_level\":\"{}\"}}",
         json_escape(status.cluster_id()),
         json_escape(status.node_id()),
         status.effect_gate(),
         status.authority_enabled(),
         json_escape(status.boot_id()),
         status.uptime_ms(),
-        optional_u64(status.last_committed_index())
+        optional_u64(status.last_committed_index()),
+        json_escape(status.log_level())
     );
     stream
         .write_all(payload.as_bytes())

@@ -14,5 +14,6 @@ pub mod controller;
 pub mod management_journal;
 pub mod node;
 pub mod operations;
+pub mod reload;
 pub mod signal;
 pub mod witness;

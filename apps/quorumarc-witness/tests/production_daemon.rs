@@ -82,3 +82,67 @@ fn production_witness_daemon_stays_nonvoting_until_sigterm_drain() -> Result<(),
     let _ = fs::remove_dir_all(directory);
     Ok(())
 }
+
+#[test]
+fn production_witness_daemon_handles_sighup_reload_and_stops_on_sigterm()
+-> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-reload-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("witness.toml");
+    fs::write(&config, WITNESS_CONFIG)?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_quorumarc-witness"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    thread::sleep(Duration::from_millis(100));
+    assert!(child.try_wait()?.is_none());
+
+    fs::write(
+        &config,
+        WITNESS_CONFIG.replace(
+            "automatic_promotion = false",
+            "automatic_promotion = false\nlog_level = \"debug\"",
+        ),
+    )?;
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &child.id().to_string()])
+            .status()?
+            .success()
+    );
+    thread::sleep(Duration::from_millis(100));
+    assert!(child.try_wait()?.is_none());
+
+    fs::write(
+        &config,
+        WITNESS_CONFIG.replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\""),
+    )?;
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &child.id().to_string()])
+            .status()?
+            .success()
+    );
+    thread::sleep(Duration::from_millis(100));
+    assert!(child.try_wait()?.is_none());
+
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()?
+            .success()
+    );
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(output.status.success());
+    assert!(stdout.contains("WITNESS_DAEMON_STOPPED_NONVOTING"));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}

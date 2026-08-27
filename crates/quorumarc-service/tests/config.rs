@@ -191,3 +191,31 @@ fn unknown_duplicate_and_relative_paths_fail_closed() {
         Err(ConfigError::PathMustBeAbsolute(_))
     ));
 }
+
+#[test]
+fn production_reload_swaps_log_level_and_refuses_safety_changes() {
+    let current = ProductionConfig::parse(VALID).expect("valid production config");
+    assert_eq!(current.log_level(), "info");
+
+    let debug = VALID.replace(
+        "automatic_promotion = true",
+        "automatic_promotion = true\nlog_level = \"debug\"",
+    );
+    let reloaded = current.reload(&debug).expect("safe log-level reload");
+    assert_eq!(reloaded.log_level(), "debug");
+    assert_eq!(reloaded.cluster_id(), current.cluster_id());
+    assert_eq!(reloaded.node_id(), current.node_id());
+    assert_eq!(reloaded.effect_gate_state(), "closed");
+
+    let cluster = VALID.replace("cluster_id = \"prod-cluster\"", "cluster_id = \"other\"");
+    assert!(matches!(
+        current.reload(&cluster),
+        Err(ConfigError::UnsafeReload)
+    ));
+
+    let fence = VALID.replace("hardware-power", "storage-reservation");
+    assert!(matches!(
+        current.reload(&fence),
+        Err(ConfigError::UnsafeReload)
+    ));
+}

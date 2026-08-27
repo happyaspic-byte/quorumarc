@@ -1,18 +1,30 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle, Signals};
 
 #[derive(Debug, Default)]
+struct ProcessState {
+    shutdown_requested: bool,
+    reload_generation: u64,
+}
+
+#[derive(Debug, Default)]
 struct ShutdownState {
-    requested: Mutex<bool>,
+    process: Mutex<ProcessState>,
     changed: Condvar,
 }
 
 /// Process-local shutdown request shared by daemon loops.
 #[derive(Clone, Debug, Default)]
 pub struct ShutdownToken {
+    state: Arc<ShutdownState>,
+}
+
+/// Event-driven configuration-reload requests paired with process shutdown.
+#[derive(Clone, Debug)]
+pub struct ReloadToken {
     state: Arc<ShutdownState>,
 }
 
@@ -38,8 +50,8 @@ impl ShutdownToken {
 
     /// Requests idempotent shutdown and wakes blocked daemon loops.
     pub fn request(&self) {
-        if let Ok(mut requested) = self.state.requested.lock() {
-            *requested = true;
+        if let Ok(mut process) = self.state.process.lock() {
+            process.shutdown_requested = true;
             self.state.changed.notify_all();
         }
     }
@@ -48,47 +60,61 @@ impl ShutdownToken {
     #[must_use]
     pub fn is_requested(&self) -> bool {
         self.state
-            .requested
+            .process
             .lock()
-            .map_or(true, |requested| *requested)
+            .map_or(true, |process| process.shutdown_requested)
     }
 
     /// Blocks until shutdown is requested.
     pub fn wait(&self) {
-        let Ok(requested) = self.state.requested.lock() else {
+        let Ok(process) = self.state.process.lock() else {
             return;
         };
         let _guard = self
             .state
             .changed
-            .wait_while(requested, |requested| !*requested);
+            .wait_while(process, |process| !process.shutdown_requested);
     }
 
     /// Waits up to `timeout` for a shutdown request.
     pub fn wait_timeout(&self, timeout: std::time::Duration) {
-        let Ok(requested) = self.state.requested.lock() else {
+        let Ok(process) = self.state.process.lock() else {
             return;
         };
-        if *requested {
+        if process.shutdown_requested {
             return;
         }
         let _ = self
             .state
             .changed
-            .wait_timeout_while(requested, timeout, |requested| !*requested);
+            .wait_timeout_while(process, timeout, |process| !process.shutdown_requested);
     }
 
-    /// Registers SIGTERM and SIGINT as event-driven shutdown requests.
+    /// Returns a reload token cancelled by this shutdown token.
+    #[must_use]
+    pub fn reload_token(&self) -> ReloadToken {
+        ReloadToken {
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    /// Registers SIGHUP reload and SIGTERM/SIGINT shutdown requests.
     pub fn register_process_signals(&self) -> Result<SignalGuard, SignalError> {
-        let mut signals =
-            Signals::new([SIGTERM, SIGINT]).map_err(|_error| SignalError::RegistrationFailed)?;
+        let mut signals = Signals::new([SIGHUP, SIGTERM, SIGINT])
+            .map_err(|_error| SignalError::RegistrationFailed)?;
         let handle = signals.handle();
         let shutdown = self.clone();
+        let reload = self.reload_token();
         let worker = std::thread::Builder::new()
             .name("quorumarc-signal".to_owned())
             .spawn(move || {
-                if signals.forever().next().is_some() {
-                    shutdown.request();
+                for signal in signals.forever() {
+                    if signal == SIGHUP {
+                        reload.request();
+                    } else {
+                        shutdown.request();
+                        break;
+                    }
                 }
             })
             .map_err(|_error| SignalError::RegistrationFailed)?;
@@ -96,6 +122,34 @@ impl ShutdownToken {
             handle,
             worker: Some(worker),
         })
+    }
+}
+
+impl ReloadToken {
+    /// Requests one reload generation and wakes reload waiters.
+    pub fn request(&self) {
+        if let Ok(mut process) = self.state.process.lock() {
+            process.reload_generation = process.reload_generation.saturating_add(1);
+            self.state.changed.notify_all();
+        }
+    }
+
+    /// Blocks until a newer reload generation or process shutdown.
+    #[must_use]
+    pub fn wait_after(&self, observed_generation: u64) -> Option<u64> {
+        let Ok(process) = self.state.process.lock() else {
+            return None;
+        };
+        let Ok(process) = self.state.changed.wait_while(process, |process| {
+            !process.shutdown_requested && process.reload_generation <= observed_generation
+        }) else {
+            return None;
+        };
+        if process.shutdown_requested {
+            None
+        } else {
+            Some(process.reload_generation)
+        }
     }
 }
 

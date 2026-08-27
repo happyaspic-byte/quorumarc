@@ -19,6 +19,8 @@ pub struct ProductionConfig {
     signing_key: PathBuf,
     #[serde(default)]
     automatic_promotion: bool,
+    #[serde(default = "default_log_level")]
+    log_level: String,
     fence: FenceConfig,
     workload: WorkloadConfig,
     effect: EffectConfig,
@@ -70,6 +72,7 @@ pub enum ConfigError {
     InvalidTopology,
     LocalIdentityMismatch,
     WitnessEndpointMismatch,
+    UnsafeReload,
     InvalidValue(String),
     MissingField(String),
     TomlError(String),
@@ -93,6 +96,7 @@ impl ConfigError {
             Self::InvalidTopology => "CONFIG_INVALID_TOPOLOGY",
             Self::LocalIdentityMismatch => "CONFIG_LOCAL_IDENTITY_MISMATCH",
             Self::WitnessEndpointMismatch => "CONFIG_WITNESS_ENDPOINT_MISMATCH",
+            Self::UnsafeReload => "CONFIG_UNSAFE_RELOAD",
             Self::InvalidValue(_) => "CONFIG_INVALID_VALUE",
             Self::MissingField(_) => "CONFIG_MISSING_FIELD",
             Self::TomlError(_) => "CONFIG_TOML_INVALID",
@@ -118,6 +122,12 @@ impl ProductionConfig {
 
         if config.schema_version != "1" {
             return Err(ConfigError::InvalidValue("schema_version".to_owned()));
+        }
+        if !matches!(
+            config.log_level.as_str(),
+            "error" | "warn" | "info" | "debug"
+        ) {
+            return Err(ConfigError::InvalidValue("log_level".to_owned()));
         }
         if !config.store_dir.is_absolute() {
             return Err(ConfigError::PathMustBeAbsolute("store_dir".to_owned()));
@@ -226,6 +236,17 @@ impl ProductionConfig {
         Ok(config)
     }
 
+    /// Reloads only non-safety fields after a complete re-parse.
+    pub fn reload(&self, text: &str) -> Result<Self, ConfigError> {
+        let candidate = Self::parse(text)?;
+        let mut comparable = candidate.clone();
+        comparable.log_level = self.log_level.clone();
+        if comparable != *self {
+            return Err(ConfigError::UnsafeReload);
+        }
+        Ok(candidate)
+    }
+
     /// Cluster identity.
     #[must_use]
     pub fn cluster_id(&self) -> &str {
@@ -256,6 +277,12 @@ impl ProductionConfig {
         self.automatic_promotion
     }
 
+    /// Operational log verbosity. Changing this never opens effects.
+    #[must_use]
+    pub fn log_level(&self) -> &str {
+        &self.log_level
+    }
+
     /// Configured authoritative fence mechanism.
     #[must_use]
     pub fn fence_mechanism(&self) -> &str {
@@ -279,6 +306,10 @@ impl ProductionConfig {
     pub const fn effect_gate_state(&self) -> &'static str {
         "closed"
     }
+}
+
+fn default_log_level() -> String {
+    "info".to_owned()
 }
 
 fn canonical_ip(address: IpAddr) -> IpAddr {

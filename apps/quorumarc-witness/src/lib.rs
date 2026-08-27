@@ -408,7 +408,27 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
         );
         return write_error_exit(result, EXIT_UNAVAILABLE);
     }
+    let clock = match quorumarc_service::clock::BootClock::open_system() {
+        Ok(clock) => clock,
+        Err(_error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_BOOT_CLOCK_UNAVAILABLE voting=false effect_gate=closed"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
+    let boot_id = clock.boot_id().to_owned();
+    let status = quorumarc_service::operations::StatusHandle::new(
+        quorumarc_service::operations::NodeStatusReport::new(
+            &config,
+            &boot_id,
+            clock.now_ms(),
+            None,
+        ),
+    );
     let shutdown = quorumarc_service::signal::ShutdownToken::new();
+    let reload = shutdown.reload_token();
     let _guard = match shutdown.register_process_signals() {
         Ok(guard) => guard,
         Err(_error) => {
@@ -419,8 +439,22 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
             return write_error_exit(result, EXIT_UNAVAILABLE);
         }
     };
+    let config_path = config_path.to_path_buf();
+    let reload_status = status;
+    let reload_worker = std::thread::spawn(move || {
+        quorumarc_service::reload::run_reload_loop(
+            &config_path,
+            config,
+            "witness",
+            &reload_status,
+            &boot_id,
+            || clock.now_ms(),
+            &reload,
+        );
+    });
     let mut node = quorumarc_service::node::ProductionNode::effect_closed();
     let _report = node.run_until_shutdown(&shutdown);
+    let _ = reload_worker.join();
     let result = writeln!(
         stdout,
         "status=stopped reason=WITNESS_DAEMON_STOPPED_NONVOTING voting=false effect_gate=closed"

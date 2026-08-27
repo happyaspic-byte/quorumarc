@@ -67,6 +67,7 @@ fn node_status_report_reflects_closed_effect_gate_and_boot_identity() {
     assert_eq!(status.boot_id(), "mock-boot-id-001");
     assert_eq!(status.uptime_ms(), 123_456);
     assert_eq!(status.last_committed_index(), Some(42));
+    assert_eq!(status.log_level(), "info");
 }
 
 #[test]
