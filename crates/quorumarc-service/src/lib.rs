@@ -9,6 +9,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod management_journal;
 pub mod node;
 pub mod signal;
 pub mod witness;
