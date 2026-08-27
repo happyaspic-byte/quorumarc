@@ -1051,10 +1051,10 @@ impl ProductionWitnessServer {
         self.listener
             .set_nonblocking(true)
             .map_err(|_error| WitnessServerError::SocketServeFailed)?;
-        let mut workers = Vec::new();
+        let mut workers = WorkerPool::default();
         let io_timeout = self.io_timeout;
         while !shutdown.is_requested() {
-            reap_finished_workers(&mut workers);
+            workers.reap_finished();
             match self.listener.accept() {
                 Ok((stream, _addr)) if workers.len() < MAX_WITNESS_CONNECTIONS => {
                     let control = stream
@@ -1073,25 +1073,29 @@ impl ProductionWitnessServer {
                 Ok((stream, _addr)) => {
                     let _ = stream.shutdown(Shutdown::Both);
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
+                Err(error) if retryable_accept_error(error.kind()) => {
                     shutdown.wait_timeout(Duration::from_millis(20));
                 }
                 Err(_error) => return Err(WitnessServerError::SocketServeFailed),
             }
         }
-        for worker in &workers {
-            let _ = worker.control.shutdown(Shutdown::Both);
-        }
-        for worker in workers {
-            let _ = worker.handle.join();
-        }
+        drop(workers);
         Ok(())
     }
+}
+
+fn retryable_accept_error(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NetworkDown
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::TimedOut
+    )
 }
 
 struct ConnectionWorker {
@@ -1099,14 +1103,40 @@ struct ConnectionWorker {
     handle: JoinHandle<()>,
 }
 
-fn reap_finished_workers(workers: &mut Vec<ConnectionWorker>) {
-    let mut index = 0;
-    while index < workers.len() {
-        if workers[index].handle.is_finished() {
-            let worker = workers.swap_remove(index);
+#[derive(Default)]
+struct WorkerPool {
+    workers: Vec<ConnectionWorker>,
+}
+
+impl WorkerPool {
+    fn len(&self) -> usize {
+        self.workers.len()
+    }
+
+    fn push(&mut self, worker: ConnectionWorker) {
+        self.workers.push(worker);
+    }
+
+    fn reap_finished(&mut self) {
+        let mut index = 0;
+        while index < self.workers.len() {
+            if self.workers[index].handle.is_finished() {
+                let worker = self.workers.swap_remove(index);
+                let _ = worker.handle.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            let _ = worker.control.shutdown(Shutdown::Both);
+        }
+        for worker in self.workers.drain(..) {
             let _ = worker.handle.join();
-        } else {
-            index += 1;
         }
     }
 }
@@ -1169,4 +1199,52 @@ fn write_witness_response(
         .and_then(|()| stream.write_all(response))
         .and_then(|()| stream.flush())
         .map_err(|_error| WitnessServerError::SocketServeFailed)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::{ConnectionWorker, WorkerPool, retryable_accept_error};
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn accept_retries_pending_network_errors() {
+        for kind in [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::NetworkDown,
+            std::io::ErrorKind::NetworkUnreachable,
+            std::io::ErrorKind::HostUnreachable,
+        ] {
+            assert!(retryable_accept_error(kind));
+        }
+        assert!(!retryable_accept_error(std::io::ErrorKind::InvalidInput));
+    }
+
+    #[test]
+    fn worker_pool_drop_closes_and_joins_active_workers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let client = TcpStream::connect(address).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        let control = server.try_clone().expect("control");
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut stream = server;
+            let mut byte = [0_u8; 1];
+            let _ = stream.read(&mut byte);
+            let _ = done_tx.send(());
+        });
+        let mut pool = WorkerPool::default();
+        pool.push(ConnectionWorker { control, handle });
+
+        drop(pool);
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_ok());
+        drop(client);
+    }
 }
