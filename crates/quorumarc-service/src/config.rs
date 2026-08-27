@@ -21,6 +21,7 @@ pub struct ProductionConfig {
     listen: SocketAddr,
     witness: SocketAddr,
     store_dir: PathBuf,
+    store_id: String,
     signing_key: PathBuf,
     key_id: String,
     policy_hash: String,
@@ -43,6 +44,7 @@ pub struct TlsConfig {
     private_key: PathBuf,
     trusted_roots: PathBuf,
     server_name: String,
+    io_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -158,6 +160,9 @@ impl ProductionConfig {
         if !config.store_dir.is_absolute() {
             return Err(ConfigError::PathMustBeAbsolute("store_dir".to_owned()));
         }
+        if decode_hex::<16>(&config.store_id).is_none() {
+            return Err(ConfigError::InvalidValue("store_id".to_owned()));
+        }
         if !config.signing_key.is_absolute() {
             return Err(ConfigError::PathMustBeAbsolute("signing_key".to_owned()));
         }
@@ -186,6 +191,9 @@ impl ProductionConfig {
             return Err(ConfigError::PathMustBeAbsolute(
                 "tls.trusted_roots".to_owned(),
             ));
+        }
+        if !(1_000..=120_000).contains(&config.tls.io_timeout_ms) {
+            return Err(ConfigError::InvalidValue("tls.io_timeout_ms".to_owned()));
         }
         if ServerName::try_from(config.tls.server_name.as_str()).is_err()
             || config.tls.server_name.parse::<IpAddr>().is_ok()
@@ -435,6 +443,11 @@ impl ProductionConfig {
         &self.store_dir
     }
 
+    #[must_use]
+    pub fn store_id(&self) -> [u8; 16] {
+        decode_hex::<16>(&self.store_id).unwrap_or([0; 16])
+    }
+
     /// Static membership.
     #[must_use]
     pub fn members(&self) -> &[MemberConfig] {
@@ -463,6 +476,11 @@ impl ProductionConfig {
     #[must_use]
     pub fn tls_server_name(&self) -> &str {
         &self.tls.server_name
+    }
+
+    #[must_use]
+    pub const fn tls_io_timeout_ms(&self) -> u64 {
+        self.tls.io_timeout_ms
     }
 
     /// Whether automatic promotion is requested after fence eligibility.
@@ -528,10 +546,14 @@ fn valid_identifier(value: &str) -> bool {
 }
 
 fn decode_policy_hash(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 || value.bytes().any(|byte| !byte.is_ascii_hexdigit()) {
+    decode_hex(value)
+}
+
+fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N.saturating_mul(2) || value.bytes().any(|byte| !byte.is_ascii_hexdigit()) {
         return None;
     }
-    let mut decoded = [0_u8; 32];
+    let mut decoded = [0_u8; N];
     for (index, slot) in decoded.iter_mut().enumerate() {
         let high = hex_nibble(value.as_bytes()[index * 2])?;
         let low = hex_nibble(value.as_bytes()[index * 2 + 1])?;

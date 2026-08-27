@@ -17,6 +17,7 @@ role = "data"
 listen = "172.30.1.22:7601"
 witness = "172.30.1.23:7602"
 store_dir = "/var/lib/quorumarc/authority"
+store_id = "07070707070707070707070707070707"
 signing_key = "/etc/quorumarc/node-a.seed"
 key_id = "node-a-2026-01"
 policy_hash = "1717171717171717171717171717171717171717171717171717171717171717"
@@ -28,6 +29,7 @@ certificate_chain = "/etc/quorumarc/tls/node-a.crt"
 private_key = "/etc/quorumarc/tls/node-a.key"
 trusted_roots = "/etc/quorumarc/tls/ca.crt"
 server_name = "witness.example.internal"
+io_timeout_ms = 5000
 
 [fence]
 mechanism = "hardware-power"
@@ -75,6 +77,8 @@ fn production_config_accepts_exact_three_member_hardware_fenced_profile() {
     assert_eq!(config.key_id(), "node-a-2026-01");
     assert_eq!(config.policy_hash(), [23; 32]);
     assert_eq!(config.max_lease_duration_ms(), 5_000);
+    assert_eq!(config.store_id(), [7; 16]);
+    assert_eq!(config.tls_io_timeout_ms(), 5_000);
     let node_b = config
         .members()
         .iter()
