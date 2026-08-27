@@ -390,6 +390,8 @@ dependencies = [
  "quorumarc-service",
  "quorumarc-store",
  "quorumarc-wire",
+ "rcgen",
+ "rustls",
 ]
 
 [[package]]

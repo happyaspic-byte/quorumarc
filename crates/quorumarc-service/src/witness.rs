@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use quorumarc_runtime::{VoteReasonCode, WitnessOpenError, WitnessPolicy, WitnessVoteActor};
-use quorumarc_store::{FileBackend, StoreIdentity};
+use quorumarc_store::{FileBackend, StoreIdentity, StoreRole};
 use quorumarc_wire::{
     CanonicalId, MessageId, PROTOCOL_VERSION, ProductionSignedVote, QuorumBinding,
 };
@@ -18,13 +18,14 @@ use rustix::fs::{FlockOperation, OFlags, flock};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use sha2::{Digest, Sha256};
 
+use crate::config::ProductionConfig;
 use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
 use crate::protocol::{
     AdmissionError, AuthenticatedRequestJournal, ProductionFrame, ProductionFrameError,
     ProductionFrameKind, ProductionVotePayload,
 };
 use crate::signal::ShutdownToken;
-use crate::tls::MtlsServerConfig;
+use crate::tls::{MtlsServerConfig, load_mtls_server_config};
 
 /// Static three-member Witness membership.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -438,6 +439,9 @@ pub enum ProductionVoteError {
 
 #[derive(Debug)]
 pub enum ProductionWitnessOpenError {
+    InvalidConfiguration,
+    KeyMaterial,
+    TlsMaterial,
     OwnerLockRefused,
     SignerIdentityMismatch,
     CredentialKeyConflict,
@@ -1020,6 +1024,99 @@ pub struct ProductionWitnessServer {
 }
 
 impl ProductionWitnessServer {
+    pub fn from_config(config: &ProductionConfig) -> Result<Self, ProductionWitnessOpenError> {
+        config
+            .verify_local_prerequisites()
+            .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?;
+        if config.role() != "witness" {
+            return Err(ProductionWitnessOpenError::InvalidConfiguration);
+        }
+        let data_members = config
+            .members()
+            .iter()
+            .filter(|member| member.role == "data")
+            .collect::<Vec<_>>();
+        let witness_member = config
+            .members()
+            .iter()
+            .find(|member| member.role == "witness")
+            .ok_or(ProductionWitnessOpenError::InvalidConfiguration)?;
+        let [node_a, node_b] = data_members.as_slice() else {
+            return Err(ProductionWitnessOpenError::InvalidConfiguration);
+        };
+        let membership = WitnessMembership::new(
+            &node_a.id,
+            node_a.address,
+            &node_a.failure_domain,
+            &node_b.id,
+            node_b.address,
+            &node_b.failure_domain,
+            &witness_member.id,
+            witness_member.address,
+            &witness_member.failure_domain,
+        )
+        .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?;
+        let witness_seed = read_private_seed(config.signing_key())?;
+        let witness_signing_key = SigningKey::from_bytes(&witness_seed);
+        let witness_public_key = read_public_key(&witness_member.public_key)?;
+        if witness_signing_key.verifying_key() != witness_public_key {
+            return Err(ProductionWitnessOpenError::KeyMaterial);
+        }
+        let node_a_key = read_public_key(&node_a.public_key)?;
+        let node_b_key = read_public_key(&node_b.public_key)?;
+        let credentials = [
+            CandidateCredential::new(&node_a.id, &node_a.key_id, node_a_key)
+                .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+            CandidateCredential::new(&node_b.id, &node_b.key_id, node_b_key)
+                .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+        ];
+        let policy = WitnessPolicy::new(
+            CanonicalId::new(config.node_id())
+                .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+            CanonicalId::new(config.key_id())
+                .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+            CanonicalId::new(config.workload_id())
+                .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+            config.policy_hash(),
+            [
+                CanonicalId::new(&node_a.id)
+                    .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+                CanonicalId::new(&node_b.id)
+                    .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?,
+            ],
+            config.max_lease_duration_ms(),
+        )
+        .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?;
+        let store_identity = StoreIdentity::new(
+            config.cluster_id(),
+            config.workload_id(),
+            config.node_id(),
+            StoreRole::Witness,
+            config.store_id(),
+        )
+        .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)?;
+        let runtime = ProductionWitnessRuntime::open_vote_actor(
+            config.store_dir(),
+            store_identity,
+            policy,
+            witness_signing_key,
+            credentials,
+        )?;
+        let tls = load_mtls_server_config(
+            config.tls_certificate_chain(),
+            config.tls_private_key(),
+            config.tls_trusted_roots(),
+        )
+        .map_err(|_error| ProductionWitnessOpenError::TlsMaterial)?;
+        Self::bind(
+            membership,
+            tls,
+            runtime,
+            Duration::from_millis(config.tls_io_timeout_ms()),
+        )
+        .map_err(|_error| ProductionWitnessOpenError::InvalidConfiguration)
+    }
+
     pub fn bind(
         membership: WitnessMembership,
         tls_config: MtlsServerConfig,
@@ -1082,6 +1179,45 @@ impl ProductionWitnessServer {
         drop(workers);
         Ok(())
     }
+}
+
+fn read_private_seed(path: &Path) -> Result<[u8; 32], ProductionWitnessOpenError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_error| ProductionWitnessOpenError::KeyMaterial)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_error| ProductionWitnessOpenError::KeyMaterial)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 || metadata.len() != 32 {
+        return Err(ProductionWitnessOpenError::KeyMaterial);
+    }
+    let mut seed = [0_u8; 32];
+    file.read_exact(&mut seed)
+        .map_err(|_error| ProductionWitnessOpenError::KeyMaterial)?;
+    if seed.iter().all(|byte| *byte == 0) {
+        return Err(ProductionWitnessOpenError::KeyMaterial);
+    }
+    Ok(seed)
+}
+
+fn read_public_key(path: &Path) -> Result<VerifyingKey, ProductionWitnessOpenError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_error| ProductionWitnessOpenError::KeyMaterial)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_error| ProductionWitnessOpenError::KeyMaterial)?;
+    if !metadata.is_file() || metadata.len() != 32 {
+        return Err(ProductionWitnessOpenError::KeyMaterial);
+    }
+    let mut key = [0_u8; 32];
+    file.read_exact(&mut key)
+        .map_err(|_error| ProductionWitnessOpenError::KeyMaterial)?;
+    VerifyingKey::from_bytes(&key).map_err(|_error| ProductionWitnessOpenError::KeyMaterial)
 }
 
 fn retryable_accept_error(kind: std::io::ErrorKind) -> bool {

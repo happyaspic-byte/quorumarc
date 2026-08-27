@@ -121,6 +121,19 @@ pub enum ProductionFrameError {
     AuthenticationFailed,
 }
 
+impl std::fmt::Display for ProductionFrameError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed => formatter.write_str("production frame is malformed"),
+            Self::AuthenticationFailed => {
+                formatter.write_str("production frame authentication failed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProductionFrameError {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionError {
     Malformed,

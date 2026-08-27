@@ -416,6 +416,18 @@ impl ProductionConfig {
         &self.node_id
     }
 
+    /// Protected workload identity.
+    #[must_use]
+    pub fn workload_id(&self) -> &str {
+        &self.workload_id
+    }
+
+    /// Local application signing seed path.
+    #[must_use]
+    pub fn signing_key(&self) -> &std::path::Path {
+        &self.signing_key
+    }
+
     /// Local declared role.
     #[must_use]
     pub fn role(&self) -> &str {

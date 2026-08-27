@@ -15,5 +15,9 @@ quorumarc-runtime = { version = "=0.1.0", path = "../../crates/quorumarc-runtime
 quorumarc-store = { version = "=0.1.0", path = "../../crates/quorumarc-store" }
 quorumarc-wire = { version = "=0.1.0", path = "../../crates/quorumarc-wire" }
 
+[dev-dependencies]
+rcgen = "=0.13.2"
+rustls = { version = "=0.23.37", default-features = false, features = ["ring", "std"] }
+
 [lints]
 workspace = true

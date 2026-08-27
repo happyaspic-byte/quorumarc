@@ -448,6 +448,18 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
         );
         return write_error_exit(result, EXIT_UNAVAILABLE);
     }
+    let witness_server = match quorumarc_service::witness::ProductionWitnessServer::from_config(
+        &config,
+    ) {
+        Ok(server) => server,
+        Err(_error) => {
+            let result = writeln!(
+                stderr,
+                "refused=true reason=WITNESS_RUNTIME_INITIALIZATION_FAILED voting=false effect_gate=closed"
+            );
+            return write_error_exit(result, EXIT_UNAVAILABLE);
+        }
+    };
     let boot_id = clock.boot_id().to_owned();
     let status = quorumarc_service::operations::StatusHandle::new(
         quorumarc_service::operations::NodeStatusReport::new(
@@ -569,19 +581,8 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
         }
         None => None,
     };
-    let mut node = match quorumarc_service::node::ProductionNode::from_effect_adapter(
-        &quorumarc_service::adapters::ClosedOnlyEffectAdapter,
-    ) {
-        Ok(node) => node,
-        Err(_error) => {
-            let result = writeln!(
-                stderr,
-                "refused=true reason=WITNESS_EFFECT_ADAPTER_NOT_CLOSED voting=false effect_gate=closed"
-            );
-            return write_error_exit(result, EXIT_UNAVAILABLE);
-        }
-    };
-    let _report = node.run_until_shutdown(&shutdown);
+    let serve_result = witness_server.serve_until(&shutdown);
+    shutdown.request();
     if let Some(worker) = status_worker {
         let _ = worker.join();
     }
@@ -589,9 +590,16 @@ fn daemon<O: Write, E: Write>(cli: &Cli, stdout: &mut O, stderr: &mut E) -> u8 {
         let _ = worker.join();
     }
     let _ = reload_worker.join();
+    if serve_result.is_err() {
+        let result = writeln!(
+            stderr,
+            "refused=true reason=WITNESS_SERVER_STOPPED voting=false effect_gate=closed"
+        );
+        return write_error_exit(result, EXIT_UNAVAILABLE);
+    }
     let result = writeln!(
         stdout,
-        "status=stopped reason=WITNESS_DAEMON_STOPPED_NONVOTING voting=false effect_gate=closed"
+        "status=stopped reason=WITNESS_DAEMON_STOPPED_VOTING voting=true effect_gate=closed"
     );
     write_exit(result, stderr)
 }
