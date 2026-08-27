@@ -10,7 +10,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-quorumarc-core = { path = "../quorumarc-core" }
+quorumarc-core = { version = "=0.1.0", path = "../quorumarc-core" }
 
 [lints]
 workspace = true

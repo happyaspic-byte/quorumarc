@@ -709,4 +709,214 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn recovery_epoch_blocks_replayed_authority_before_persistence() {
+        let clock = ManualClock::new(NOW);
+        let mut recovered = EffectGate::recover(
+            node("node-a"),
+            workload(),
+            policy_hash(),
+            GateRecoveryState::new(Epoch(1), Incarnation(1), NOW - 1),
+            clock,
+        );
+
+        assert_eq!(
+            recovered.stage(authorization()),
+            Err(GateError::StaleAuthorization)
+        );
+        assert_eq!(
+            recovered.state(),
+            &GateState::Closed {
+                last_epoch: Epoch(1)
+            }
+        );
+    }
+
+    #[test]
+    fn stage_rejects_every_local_binding_mismatch() {
+        let clock = ManualClock::new(NOW);
+        let recovery = GateRecoveryState::new(Epoch(0), Incarnation(1), NOW - 1);
+        let Ok(other_workload) = WorkloadId::new("another-workload") else {
+            std::process::abort();
+        };
+        let mut wrong_workload = EffectGate::recover(
+            node("node-a"),
+            other_workload,
+            policy_hash(),
+            recovery,
+            clock.clone(),
+        );
+        assert_eq!(
+            wrong_workload.stage(authorization()),
+            Err(GateError::GateBindingMismatch)
+        );
+
+        let mut wrong_policy = EffectGate::recover(
+            node("node-a"),
+            workload(),
+            PolicyHash::new([4; 32]),
+            recovery,
+            clock.clone(),
+        );
+        assert_eq!(
+            wrong_policy.stage(authorization()),
+            Err(GateError::GateBindingMismatch)
+        );
+
+        let mut wrong_node =
+            EffectGate::recover(node("node-b"), workload(), policy_hash(), recovery, clock);
+        assert_eq!(
+            wrong_node.stage(authorization()),
+            Err(GateError::WrongCandidate)
+        );
+    }
+
+    #[test]
+    fn persistence_record_binds_authority_and_mismatch_keeps_gate_staged() {
+        let (mut gate, _) = gate();
+        let record = gate.stage(authorization());
+        let Ok(record) = record else {
+            std::process::abort();
+        };
+        assert_eq!(record.node(), &node("node-a"));
+        assert_eq!(record.workload(), &workload());
+        assert_eq!(record.policy_hash(), policy_hash());
+        assert_eq!(record.accepted_epoch(), Epoch(1));
+        assert_eq!(record.incarnation(), Incarnation(1));
+        assert_eq!(record.last_observed_ms(), NOW);
+
+        let mut mismatched = record.clone();
+        mismatched.accepted_epoch = Epoch(2);
+        assert_eq!(
+            gate.confirm_persisted(&mismatched),
+            Err(GateError::PersistenceMismatch)
+        );
+        assert!(matches!(gate.state(), GateState::Staged { .. }));
+        assert!(gate.confirm_persisted(&record).is_ok());
+        assert!(matches!(gate.state(), GateState::Prepared { .. }));
+    }
+
+    #[test]
+    fn identical_stage_is_idempotent_but_open_gate_refuses_restaging() {
+        let (mut gate, _) = gate();
+        let first = gate.stage(authorization());
+        let Ok(first) = first else {
+            std::process::abort();
+        };
+        assert_eq!(gate.stage(authorization()), Ok(first.clone()));
+        assert!(gate.confirm_persisted(&first).is_ok());
+        assert_eq!(gate.stage(authorization()), Ok(first));
+        assert!(gate.activate().is_ok());
+        assert_eq!(gate.stage(authorization()), Err(GateError::AlreadyOpen));
+    }
+
+    #[test]
+    fn persistence_and_activation_require_the_preceding_transition() {
+        let (mut gate, _) = gate();
+        let unrelated = GatePersistenceRecord {
+            node: node("node-a"),
+            workload: workload(),
+            policy_hash: policy_hash(),
+            accepted_epoch: Epoch(1),
+            incarnation: Incarnation(1),
+            last_observed_ms: NOW,
+        };
+        assert_eq!(
+            gate.confirm_persisted(&unrelated),
+            Err(GateError::NotStaged)
+        );
+        assert_eq!(gate.activate(), Err(GateError::NotPrepared));
+    }
+
+    #[test]
+    fn activation_honors_both_exclusive_lease_boundaries() {
+        let early_clock = ManualClock::new(NOW - 1);
+        let mut early = EffectGate::recover(
+            node("node-a"),
+            workload(),
+            policy_hash(),
+            GateRecoveryState::new(Epoch(0), Incarnation(1), NOW - 2),
+            early_clock,
+        );
+        persist_staged(&mut early, authorization());
+        assert_eq!(early.activate(), Err(GateError::LeaseNotStarted));
+        assert!(matches!(early.state(), GateState::Prepared { .. }));
+
+        let (mut expired, clock) = gate();
+        persist_staged(&mut expired, authorization());
+        clock.set(NOW + 100);
+        assert_eq!(expired.activate(), Err(GateError::LeaseExpired));
+        assert_eq!(
+            expired.state(),
+            &GateState::SelfFenced {
+                last_epoch: Epoch(1),
+                reason: SelfFenceReason::LeaseExpired
+            }
+        );
+    }
+
+    #[test]
+    fn tick_is_inclusive_at_expiry_and_retains_epoch() {
+        let (mut gate, clock) = gate();
+        persist_staged(&mut gate, authorization());
+        assert!(gate.activate().is_ok());
+        clock.set(NOW + 99);
+        assert_eq!(gate.tick(), Ok(false));
+        clock.set(NOW + 100);
+        assert_eq!(gate.tick(), Ok(true));
+        assert_eq!(
+            gate.state(),
+            &GateState::SelfFenced {
+                last_epoch: Epoch(1),
+                reason: SelfFenceReason::LeaseExpired
+            }
+        );
+        assert_eq!(gate.tick(), Ok(false));
+    }
+
+    #[test]
+    fn rollback_during_staging_self_fences_recovered_epoch() {
+        let clock = ManualClock::new(NOW - 2);
+        let mut gate = EffectGate::recover(
+            node("node-a"),
+            workload(),
+            policy_hash(),
+            GateRecoveryState::new(Epoch(7), Incarnation(1), NOW - 1),
+            clock,
+        );
+        assert_eq!(gate.stage(authorization()), Err(GateError::ClockRollback));
+        assert_eq!(
+            gate.state(),
+            &GateState::SelfFenced {
+                last_epoch: Epoch(7),
+                reason: SelfFenceReason::SafetyFault
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_and_safety_closures_preserve_accepted_epoch() {
+        let (mut explicit, _) = gate();
+        persist_staged(&mut explicit, authorization());
+        explicit.close();
+        assert_eq!(
+            explicit.state(),
+            &GateState::SelfFenced {
+                last_epoch: Epoch(1),
+                reason: SelfFenceReason::ExplicitClose
+            }
+        );
+
+        let (mut faulted, _) = gate();
+        persist_staged(&mut faulted, authorization());
+        faulted.safety_fault();
+        assert_eq!(
+            faulted.state(),
+            &GateState::SelfFenced {
+                last_epoch: Epoch(1),
+                reason: SelfFenceReason::SafetyFault
+            }
+        );
+    }
 }

@@ -1,0 +1,15 @@
+event=controller_started failure_threshold=2 max_promotions=2 logical_step_ms=10 observation_timeout_ms=250 authority_timeout_ms=3000 emit_test_effect=true
+event=controller_observation node=node-a now_ms=1000 status=AVAILABLE
+event=controller_observation node=node-b now_ms=1000 status=AVAILABLE
+event=controller_decision now_ms=1000 decision=PROMOTE:node-a:1
+event=controller_promotion node=node-a epoch=1 now_ms=1000 code=LIFECYCLE_PROMOTED promotions=1 elapsed_ms=34 failure_detection_ms=0 lease_wait_ms=0 promotion_readiness_ms=0 promotion_ms=24
+event=controller_effect node=node-a epoch=1 code=LIFECYCLE_EFFECT_RECORDED effects=1 elapsed_ms=38 effect_ms=1
+event=controller_decision now_ms=1060 decision=STABLE:node-a:1
+event=controller_observation node=node-a now_ms=1240 status=MISSING code=LIFECYCLE_NODE_UNAVAILABLE
+event=controller_decision now_ms=1240 decision=WAITING_FOR_FAILURE_THRESHOLD
+event=controller_decision now_ms=1270 decision=WAITING_FOR_LEASE_GUARD
+event=controller_decision now_ms=2260 decision=PROMOTE:node-b:2
+event=controller_promotion node=node-b epoch=2 now_ms=2260 code=LIFECYCLE_PROMOTED promotions=2 elapsed_ms=1301 failure_detection_ms=30 lease_wait_ms=989 promotion_readiness_ms=3 promotion_ms=32
+event=controller_effect node=node-b epoch=2 code=LIFECYCLE_EFFECT_RECORDED effects=1 elapsed_ms=1306 effect_ms=1
+event=controller_successor_retry node=node-b epoch=2 code=LIFECYCLE_WORKLOAD_RETRY_CONFIRMED commit=2
+event=controller_complete node=node-b epoch=2 effects=1 promotions=2 elapsed_ms=1312

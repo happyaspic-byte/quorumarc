@@ -3,8 +3,14 @@ resolver = "3"
 members = [
     "apps/quorumarc-agent",
     "apps/quorumarc-witness",
+    "crates/quorumarc-cluster",
     "crates/quorumarc-core",
+    "crates/quorumarc-lab",
+    "crates/quorumarc-rpo0",
     "crates/quorumarc-sim",
+    "crates/quorumarc-runtime",
+    "crates/quorumarc-store",
+    "crates/quorumarc-wire",
 ]
 
 [workspace.package]

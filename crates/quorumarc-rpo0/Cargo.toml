@@ -1,0 +1,16 @@
+[package]
+name = "quorumarc-rpo0"
+description = "Safety-focused replicated counter used only by the QuorumArc Gate 1A lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2 = "=0.10.8"
+
+[lints]
+workspace = true

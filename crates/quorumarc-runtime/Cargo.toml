@@ -1,0 +1,18 @@
+[package]
+name = "quorumarc-runtime"
+description = "Fail-closed Gate 1A lab actors and bounded transport helpers for QuorumArc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+quorumarc-core = { version = "=0.1.0", path = "../quorumarc-core" }
+quorumarc-store = { version = "=0.1.0", path = "../quorumarc-store" }
+quorumarc-wire = { version = "=0.1.0", path = "../quorumarc-wire" }
+
+[lints]
+workspace = true
