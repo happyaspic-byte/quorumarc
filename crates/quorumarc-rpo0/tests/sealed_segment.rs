@@ -36,6 +36,23 @@ fn sealed_segment_seals_exact_bytes_and_manifest_matches_checksum() {
 }
 
 #[test]
+fn chained_sealed_segments_bind_previous_state_root() {
+    let op1 = GenericOperation::new([1; 16], 0, b"entry-1").expect("op1");
+    let first = SealedSegment::seal(1, 1, 1, &[op1]).expect("first segment");
+    assert_eq!(first.start_commit(), 1);
+    assert_eq!(first.end_commit(), 1);
+
+    let op2 = GenericOperation::new([2; 16], 1, b"entry-2").expect("op2");
+    let second = SealedSegment::seal_chained(2, 2, 2, first.final_state_root(), &[op2])
+        .expect("second segment");
+    assert_eq!(second.segment_id(), 2);
+    assert_eq!(second.start_commit(), 2);
+    assert_eq!(second.end_commit(), 2);
+    assert_eq!(second.base_root(), first.final_state_root());
+    assert_ne!(second.final_state_root(), first.final_state_root());
+}
+
+#[test]
 fn sealed_segment_refuses_unordered_or_empty_commits() {
     assert!(matches!(
         SealedSegment::seal(1, 2, 1, &[]),

@@ -16,8 +16,6 @@ const MAX_WAL_BYTES: usize = crate::MAX_WAL_RECORDS as usize * MAX_RECORD_LEN;
 const ROOT_DOMAIN: &[u8] = b"quorumarc/generic-journal/state-root/v1\0";
 const RECORD_DOMAIN: &[u8] = b"quorumarc/generic-journal/record/v1\0";
 const SEGMENT_DOMAIN: &[u8] = b"quorumarc/generic-journal/sealed-segment/v1\0";
-const MANIFEST_MAGIC: &[u8; 8] = b"QGSMAN01";
-const MANIFEST_LEN: usize = MANIFEST_MAGIC.len() + 8 + 8 + 8 + 8 + 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenericOperation {
@@ -838,6 +836,8 @@ pub struct SealedSegment {
     segment_id: u64,
     start_commit: u64,
     end_commit: u64,
+    base_root: [u8; 32],
+    final_state_root: [u8; 32],
     records: Vec<u8>,
     checksum: [u8; 32],
 }
@@ -849,15 +849,28 @@ pub struct GenericSegmentManifest {
     pub start_commit: u64,
     pub end_commit: u64,
     pub record_count: u64,
+    pub base_root: [u8; 32],
+    pub final_state_root: [u8; 32],
     pub checksum: [u8; 32],
 }
 
 impl SealedSegment {
-    /// Seals operations into an immutable segment.
+    /// Seals operations starting from commit 1 and empty base root.
     pub fn seal(
         segment_id: u64,
         start_commit: u64,
         end_commit: u64,
+        operations: &[GenericOperation],
+    ) -> Result<Self, GenericJournalError> {
+        Self::seal_chained(segment_id, start_commit, end_commit, [0; 32], operations)
+    }
+
+    /// Seals operations extending a known durable state root.
+    pub fn seal_chained(
+        segment_id: u64,
+        start_commit: u64,
+        end_commit: u64,
+        base_root: [u8; 32],
         operations: &[GenericOperation],
     ) -> Result<Self, GenericJournalError> {
         if operations.is_empty()
@@ -867,23 +880,38 @@ impl SealedSegment {
         {
             return Err(GenericJournalError::Corrupt);
         }
-        let mut journal = GenericJournal::new();
-        for op in operations {
-            journal.apply(op.clone())?;
+        let mut records = Vec::new();
+        let mut current_root = base_root;
+        for (index, op) in operations.iter().enumerate() {
+            let commit_index = start_commit
+                .checked_add(index as u64)
+                .ok_or(GenericJournalError::CapacityExceeded)?;
+            let encoded = encode_record(
+                commit_index,
+                op.operation_id,
+                op.expected_commit,
+                current_root,
+                &op.payload,
+            );
+            current_root = next_root(current_root, commit_index, op.operation_id, &op.payload);
+            records.extend_from_slice(&encoded);
         }
-        let records = journal.bytes;
         let mut hasher = Sha256::new();
         hasher.update(SEGMENT_DOMAIN);
         hasher.update(segment_id.to_be_bytes());
         hasher.update(start_commit.to_be_bytes());
         hasher.update(end_commit.to_be_bytes());
         hasher.update((operations.len() as u64).to_be_bytes());
+        hasher.update(base_root);
+        hasher.update(current_root);
         hasher.update(&records);
         let checksum: [u8; 32] = hasher.finalize().into();
         Ok(Self {
             segment_id,
             start_commit,
             end_commit,
+            base_root,
+            final_state_root: current_root,
             records,
             checksum,
         })
@@ -905,6 +933,16 @@ impl SealedSegment {
     }
 
     #[must_use]
+    pub const fn base_root(&self) -> [u8; 32] {
+        self.base_root
+    }
+
+    #[must_use]
+    pub const fn final_state_root(&self) -> [u8; 32] {
+        self.final_state_root
+    }
+
+    #[must_use]
     pub const fn checksum(&self) -> [u8; 32] {
         self.checksum
     }
@@ -916,25 +954,36 @@ impl SealedSegment {
             start_commit: self.start_commit,
             end_commit: self.end_commit,
             record_count: (self.end_commit - self.start_commit).saturating_add(1),
+            base_root: self.base_root,
+            final_state_root: self.final_state_root,
             checksum: self.checksum,
         }
     }
 }
 
+const MANIFEST_MAGIC: &[u8; 8] = b"QGSMAN02";
+const MANIFEST_LEN: usize = MANIFEST_MAGIC.len() + 8 + 8 + 8 + 8 + 32 + 32 + 32;
+
 impl GenericSegmentManifest {
     #[must_use]
     pub fn encode(&self) -> [u8; MANIFEST_LEN] {
         let mut bytes = [0_u8; MANIFEST_LEN];
-        bytes[..MANIFEST_MAGIC.len()].copy_from_slice(MANIFEST_MAGIC);
-        bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 8]
-            .copy_from_slice(&self.segment_id.to_be_bytes());
-        bytes[MANIFEST_MAGIC.len() + 8..MANIFEST_MAGIC.len() + 16]
-            .copy_from_slice(&self.start_commit.to_be_bytes());
-        bytes[MANIFEST_MAGIC.len() + 16..MANIFEST_MAGIC.len() + 24]
-            .copy_from_slice(&self.end_commit.to_be_bytes());
-        bytes[MANIFEST_MAGIC.len() + 24..MANIFEST_MAGIC.len() + 32]
-            .copy_from_slice(&self.record_count.to_be_bytes());
-        bytes[MANIFEST_MAGIC.len() + 32..].copy_from_slice(&self.checksum);
+        let mut cursor = 0_usize;
+        bytes[cursor..cursor + MANIFEST_MAGIC.len()].copy_from_slice(MANIFEST_MAGIC);
+        cursor += MANIFEST_MAGIC.len();
+        bytes[cursor..cursor + 8].copy_from_slice(&self.segment_id.to_be_bytes());
+        cursor += 8;
+        bytes[cursor..cursor + 8].copy_from_slice(&self.start_commit.to_be_bytes());
+        cursor += 8;
+        bytes[cursor..cursor + 8].copy_from_slice(&self.end_commit.to_be_bytes());
+        cursor += 8;
+        bytes[cursor..cursor + 8].copy_from_slice(&self.record_count.to_be_bytes());
+        cursor += 8;
+        bytes[cursor..cursor + 32].copy_from_slice(&self.base_root);
+        cursor += 32;
+        bytes[cursor..cursor + 32].copy_from_slice(&self.final_state_root);
+        cursor += 32;
+        bytes[cursor..].copy_from_slice(&self.checksum);
         bytes
     }
 
@@ -942,39 +991,52 @@ impl GenericSegmentManifest {
         if bytes.len() != MANIFEST_LEN || &bytes[..MANIFEST_MAGIC.len()] != MANIFEST_MAGIC {
             return Err(GenericJournalError::Corrupt);
         }
+        let mut cursor = MANIFEST_MAGIC.len();
         let segment_id = u64::from_be_bytes(
-            bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 8]
+            bytes[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_error| GenericJournalError::Corrupt)?,
         );
+        cursor += 8;
         let start_commit = u64::from_be_bytes(
-            bytes[MANIFEST_MAGIC.len() + 8..MANIFEST_MAGIC.len() + 16]
+            bytes[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_error| GenericJournalError::Corrupt)?,
         );
+        cursor += 8;
         let end_commit = u64::from_be_bytes(
-            bytes[MANIFEST_MAGIC.len() + 16..MANIFEST_MAGIC.len() + 24]
+            bytes[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_error| GenericJournalError::Corrupt)?,
         );
+        cursor += 8;
         let record_count = u64::from_be_bytes(
-            bytes[MANIFEST_MAGIC.len() + 24..MANIFEST_MAGIC.len() + 32]
+            bytes[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_error| GenericJournalError::Corrupt)?,
         );
+        cursor += 8;
         if start_commit == 0
             || end_commit < start_commit
             || (end_commit - start_commit).saturating_add(1) != record_count
         {
             return Err(GenericJournalError::Corrupt);
         }
+        let mut base_root = [0_u8; 32];
+        base_root.copy_from_slice(&bytes[cursor..cursor + 32]);
+        cursor += 32;
+        let mut final_state_root = [0_u8; 32];
+        final_state_root.copy_from_slice(&bytes[cursor..cursor + 32]);
+        cursor += 32;
         let mut checksum = [0_u8; 32];
-        checksum.copy_from_slice(&bytes[MANIFEST_MAGIC.len() + 32..]);
+        checksum.copy_from_slice(&bytes[cursor..]);
         Ok(Self {
             segment_id,
             start_commit,
             end_commit,
             record_count,
+            base_root,
+            final_state_root,
             checksum,
         })
     }
