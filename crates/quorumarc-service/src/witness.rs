@@ -95,3 +95,45 @@ fn canonical_ip(address: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
     }
 }
+
+use std::path::Path;
+
+use ed25519_dalek::VerifyingKey;
+
+use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
+use crate::protocol::{AdmissionError, AuthenticatedRequestJournal};
+
+/// Independent Witness that records authenticated votes without opening effects.
+#[derive(Debug)]
+pub struct ProductionWitnessRuntime {
+    admission: AuthenticatedRequestJournal,
+}
+
+impl ProductionWitnessRuntime {
+    pub fn open(
+        directory: &Path,
+        identity: [u8; 16],
+        node_id: impl Into<String>,
+        key_id: impl Into<String>,
+        verifying_key: VerifyingKey,
+    ) -> Result<Self, JournalError> {
+        let journal = ManagementJournal::open(directory, identity)?;
+        Ok(Self {
+            admission: AuthenticatedRequestJournal::new(journal, node_id, key_id, verifying_key),
+        })
+    }
+
+    pub fn admit_vote(&mut self, bytes: &[u8]) -> Result<ManagementOutcome, AdmissionError> {
+        self.admission.admit(bytes)
+    }
+
+    #[must_use]
+    pub fn highest_sequence(&self) -> u64 {
+        self.admission.highest_sequence()
+    }
+
+    #[must_use]
+    pub const fn effects_open(&self) -> bool {
+        false
+    }
+}
