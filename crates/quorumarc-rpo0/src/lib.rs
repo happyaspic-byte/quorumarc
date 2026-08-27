@@ -26,8 +26,8 @@ pub use counter::{
 };
 pub use error::{ReplicaError, Rpo0Error, WalCorruption};
 pub use generic_journal::{
-    FileGenericReplica, GenericAcknowledgement, GenericJournal, GenericJournalError,
-    GenericOperation, GenericProgress, GenericReplicaSink, MemoryGenericReplica,
-    ReplicatedGenericJournal,
+    DurableLocation, FileGenericReplica, GenericAcknowledgement, GenericJournal,
+    GenericJournalError, GenericOperation, GenericProgress, GenericReplicaSink,
+    MemoryGenericReplica, ReplicatedGenericJournal,
 };
 pub use replica::{DurableReceipt, Fault, FileReplica, MemoryReplica, ReplicaSink};

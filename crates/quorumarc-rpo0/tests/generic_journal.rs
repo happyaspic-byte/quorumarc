@@ -142,5 +142,140 @@ fn file_generic_replicas_fsync_equal_wals_and_exact_retry_does_not_append() {
         fs::read(&right_path).expect("right second")
     );
     assert!(fs::metadata(&left_path).expect("left metadata").len() > left_bytes.len() as u64);
+
+    let recovered = ReplicatedGenericJournal::recover_from_files(&left_path, &right_path)
+        .expect("recover equal files");
+    assert_eq!(recovered.progress().commit_index, 2);
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn file_generic_replicas_refuse_same_file_and_hard_link_alias() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-generic-alias-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let wal = directory.join("wal.qgwl");
+    let alias = directory.join("alias.qgwl");
+    fs::write(&wal, b"").expect("create wal");
+    fs::hard_link(&wal, &alias).expect("hard link");
+
+    let mut journal = ReplicatedGenericJournal::new();
+    let mut left = FileGenericReplica::new("left", &wal);
+    let mut right = FileGenericReplica::new("right", &wal);
+    assert!(matches!(
+        journal.apply(
+            GenericOperation::new([12; 16], 0, b"same-path").expect("operation"),
+            &mut left,
+            &mut right
+        ),
+        Err(GenericJournalError::ReplicaIdentityCollision)
+    ));
+
+    let mut journal = ReplicatedGenericJournal::new();
+    let mut left = FileGenericReplica::new("left", &wal);
+    let mut right = FileGenericReplica::new("right", &alias);
+    assert!(matches!(
+        journal.apply(
+            GenericOperation::new([13; 16], 0, b"hard-link").expect("operation"),
+            &mut left,
+            &mut right
+        ),
+        Err(GenericJournalError::ReplicaIdentityCollision)
+    ));
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&wal, &wal),
+        Err(GenericJournalError::ReplicaIdentityCollision)
+    ));
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&wal, &alias),
+        Err(GenericJournalError::ReplicaIdentityCollision)
+    ));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn file_generic_replicas_refuse_absent_lexical_alias() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-generic-absent-alias-{}-{sequence}",
+        std::process::id()
+    ));
+    let child = directory.join("child");
+    fs::create_dir_all(&child).expect("directory");
+    let direct = directory.join("wal.qgwl");
+    let lexical_alias = child.join("..").join("wal.qgwl");
+    let mut journal = ReplicatedGenericJournal::new();
+    let mut left = FileGenericReplica::new("left", &direct);
+    let mut right = FileGenericReplica::new("right", &lexical_alias);
+
+    assert!(matches!(
+        journal.apply(
+            GenericOperation::new([15; 16], 0, b"absent-alias").expect("operation"),
+            &mut left,
+            &mut right
+        ),
+        Err(GenericJournalError::ReplicaIdentityCollision)
+    ));
+    assert!(!direct.exists());
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn recovered_generic_journal_exact_retry_does_not_append() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-generic-recover-retry-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let left_path = directory.join("left.qgwl");
+    let right_path = directory.join("right.qgwl");
+    let mut journal = ReplicatedGenericJournal::new();
+    let mut left = FileGenericReplica::new("left", &left_path);
+    let mut right = FileGenericReplica::new("right", &right_path);
+    let operation = GenericOperation::new([14; 16], 0, b"recover-retry").expect("operation");
+    let ack = journal
+        .apply(operation.clone(), &mut left, &mut right)
+        .expect("dual fsync");
+    let left_bytes = fs::read(&left_path).expect("left bytes");
+    let right_bytes = fs::read(&right_path).expect("right bytes");
+
+    let mut recovered = ReplicatedGenericJournal::recover_from_files(&left_path, &right_path)
+        .expect("recover equal files");
+    assert_eq!(recovered.progress().commit_index, 1);
+    assert_eq!(recovered.apply(operation, &mut left, &mut right), Ok(ack));
+    assert_eq!(fs::read(&left_path).expect("left retry"), left_bytes);
+    assert_eq!(fs::read(&right_path).expect("right retry"), right_bytes);
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn generic_recovery_refuses_one_copy_divergence_and_corruption() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-generic-recovery-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let left = directory.join("left.qgwl");
+    let right = directory.join("right.qgwl");
+    fs::write(&left, b"one-copy").expect("one copy");
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&left, &right),
+        Err(GenericJournalError::ReplicaUnavailable)
+    ));
+    fs::write(&right, b"different").expect("different copy");
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&left, &right),
+        Err(GenericJournalError::RecoveryMismatch)
+    ));
+    fs::write(&right, b"one-copy").expect("same corrupt copy");
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&left, &right),
+        Err(GenericJournalError::Corrupt)
+    ));
     let _ = fs::remove_dir_all(directory);
 }

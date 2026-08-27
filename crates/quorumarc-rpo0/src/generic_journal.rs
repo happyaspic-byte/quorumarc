@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -46,6 +47,7 @@ pub enum GenericJournalError {
     ReplicaUnavailable,
     InvalidDurabilityReceipt,
     UncertainDurability,
+    RecoveryMismatch,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -208,6 +210,10 @@ impl GenericReplicaSink for MemoryGenericReplica {
         &self.replica_id
     }
 
+    fn durable_location(&self) -> Result<DurableLocation, GenericJournalError> {
+        Ok(DurableLocation::ProcessLocal(self.replica_id.clone()))
+    }
+
     fn append_and_flush(
         &mut self,
         encoded: &[u8],
@@ -236,6 +242,10 @@ impl FileGenericReplica {
 impl GenericReplicaSink for FileGenericReplica {
     fn replica_id(&self) -> &str {
         &self.replica_id
+    }
+
+    fn durable_location(&self) -> Result<DurableLocation, GenericJournalError> {
+        file_location(&self.path)
     }
 
     fn append_and_flush(
@@ -295,52 +305,77 @@ struct ParsedRecord {
     expected_commit: u64,
     previous_root: [u8; 32],
     state_root: [u8; 32],
+    payload: Vec<u8>,
+    acknowledgement: GenericAcknowledgement,
+    record_end: usize,
 }
 
 fn parse_one_record(bytes: &[u8]) -> Result<ParsedRecord, GenericJournalError> {
-    if bytes.len() < HEADER_LEN + CHECKSUM_LEN || &bytes[..4] != MAGIC || bytes[4] != VERSION {
+    let parsed = parse_one_record_at(bytes, 0)?;
+    if parsed.record_end != bytes.len() {
+        return Err(GenericJournalError::Corrupt);
+    }
+    Ok(parsed)
+}
+
+fn parse_one_record_at(bytes: &[u8], cursor: usize) -> Result<ParsedRecord, GenericJournalError> {
+    let header_end = cursor
+        .checked_add(HEADER_LEN)
+        .ok_or(GenericJournalError::Corrupt)?;
+    if header_end > bytes.len()
+        || &bytes[cursor..cursor + 4] != MAGIC
+        || bytes[cursor + 4] != VERSION
+    {
         return Err(GenericJournalError::Corrupt);
     }
     let payload_len = u32::from_be_bytes(
-        bytes[5..9]
+        bytes[cursor + 5..cursor + 9]
             .try_into()
             .map_err(|_error| GenericJournalError::Corrupt)?,
     ) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(GenericJournalError::Corrupt);
     }
-    let record_end = HEADER_LEN
+    let record_end = header_end
         .checked_add(payload_len)
         .and_then(|value| value.checked_add(CHECKSUM_LEN))
         .ok_or(GenericJournalError::Corrupt)?;
-    if record_end != bytes.len() {
+    if record_end > bytes.len() {
         return Err(GenericJournalError::Corrupt);
     }
     let checksum_start = record_end - CHECKSUM_LEN;
-    if bytes[checksum_start..record_end] != record_checksum(&bytes[..checksum_start]) {
+    if bytes[checksum_start..record_end] != record_checksum(&bytes[cursor..checksum_start]) {
         return Err(GenericJournalError::Corrupt);
     }
     let commit_index = u64::from_be_bytes(
-        bytes[9..17]
+        bytes[cursor + 9..cursor + 17]
             .try_into()
             .map_err(|_error| GenericJournalError::Corrupt)?,
     );
     let mut operation_id = [0; 16];
-    operation_id.copy_from_slice(&bytes[17..33]);
+    operation_id.copy_from_slice(&bytes[cursor + 17..cursor + 33]);
     let expected_commit = u64::from_be_bytes(
-        bytes[33..41]
+        bytes[cursor + 33..cursor + 41]
             .try_into()
             .map_err(|_error| GenericJournalError::Corrupt)?,
     );
     let mut previous_root = [0; 32];
-    previous_root.copy_from_slice(&bytes[41..HEADER_LEN]);
-    let payload = &bytes[HEADER_LEN..checksum_start];
+    previous_root.copy_from_slice(&bytes[cursor + 41..header_end]);
+    let payload = &bytes[header_end..checksum_start];
+    let state_root = next_root(previous_root, commit_index, operation_id, payload);
     Ok(ParsedRecord {
         operation_id,
         commit_index,
         expected_commit,
         previous_root,
-        state_root: next_root(previous_root, commit_index, operation_id, payload),
+        state_root,
+        payload: payload.to_vec(),
+        acknowledgement: GenericAcknowledgement {
+            operation_id,
+            commit_index,
+            state_root,
+        },
+        record_end,
     })
 }
 
@@ -362,10 +397,19 @@ fn receipt_from_encoded(
 /// Dual-receipt sink for generic chained records.
 pub trait GenericReplicaSink {
     fn replica_id(&self) -> &str;
+    fn durable_location(&self) -> Result<DurableLocation, GenericJournalError>;
     fn append_and_flush(
         &mut self,
         encoded: &[u8],
     ) -> Result<GenericAcknowledgement, GenericJournalError>;
+}
+
+/// Physical replica identity used to refuse one-copy aliases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DurableLocation {
+    ProcessLocal(String),
+    Inode { device: u64, inode: u64 },
+    AbsentPath(PathBuf),
 }
 
 /// Dual-receipt coordinator for generic journal records.
@@ -395,7 +439,9 @@ impl ReplicatedGenericJournal {
         if self.uncertain {
             return Err(GenericJournalError::UncertainDurability);
         }
-        if left.replica_id() == right.replica_id() {
+        if left.replica_id() == right.replica_id()
+            || left.durable_location()? == right.durable_location()?
+        {
             return Err(GenericJournalError::ReplicaIdentityCollision);
         }
         if let Some((payload, acknowledged)) = self.journal.operations.get(&operation.operation_id)
@@ -433,6 +479,143 @@ impl ReplicatedGenericJournal {
         }
         Ok(acknowledgement)
     }
+
+    /// Recovers only when both files contain identical valid chained records.
+    pub fn recover_from_files(
+        left: impl AsRef<Path>,
+        right: impl AsRef<Path>,
+    ) -> Result<Self, GenericJournalError> {
+        if file_location(left.as_ref())? == file_location(right.as_ref())? {
+            return Err(GenericJournalError::ReplicaIdentityCollision);
+        }
+        let left_bytes = match File::open(left.as_ref()) {
+            Ok(mut file) => {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+                bytes
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(GenericJournalError::ReplicaUnavailable);
+            }
+            Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
+        };
+        let right_bytes = match File::open(right.as_ref()) {
+            Ok(mut file) => {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+                bytes
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(GenericJournalError::ReplicaUnavailable);
+            }
+            Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
+        };
+        if left_bytes != right_bytes {
+            return Err(GenericJournalError::RecoveryMismatch);
+        }
+        let progress = recover_bytes(&left_bytes)?;
+        let mut journal = GenericJournal {
+            bytes: left_bytes,
+            operations: BTreeMap::new(),
+            progress: if progress.commit_index == 0 {
+                None
+            } else {
+                Some(progress)
+            },
+        };
+        replay_operations(&mut journal)?;
+        Ok(Self {
+            journal,
+            uncertain: false,
+        })
+    }
+
+    #[must_use]
+    pub fn progress(&self) -> GenericProgress {
+        self.journal.progress.unwrap_or(GenericProgress {
+            commit_index: 0,
+            state_root: [0; 32],
+        })
+    }
+}
+
+fn file_location(path: &Path) -> Result<DurableLocation, GenericJournalError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(GenericJournalError::ReplicaUnavailable);
+            }
+            Ok(DurableLocation::Inode {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(DurableLocation::AbsentPath(normalized_absent_path(path)?))
+        }
+        Err(_error) => Err(GenericJournalError::ReplicaUnavailable),
+    }
+}
+
+fn normalized_absent_path(path: &Path) -> Result<PathBuf, GenericJournalError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?
+    };
+    let file_name = absolute
+        .file_name()
+        .ok_or(GenericJournalError::ReplicaUnavailable)?;
+    let parent = match absolute.parent() {
+        Some(directory) if !directory.as_os_str().is_empty() => directory,
+        Some(_) | None => Path::new("/"),
+    };
+    let canonical_parent = match std::fs::canonicalize(parent) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => lexical_normalize(parent),
+        Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
+    };
+    Ok(canonical_parent.join(file_name))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn replay_operations(journal: &mut GenericJournal) -> Result<(), GenericJournalError> {
+    let bytes = journal.bytes.clone();
+    let mut cursor = 0_usize;
+    let mut operations = BTreeMap::new();
+    while cursor < bytes.len() {
+        let parsed = parse_one_record_at(&bytes, cursor)?;
+        operations.insert(
+            parsed.operation_id,
+            (parsed.payload, parsed.acknowledgement),
+        );
+        cursor = parsed.record_end;
+    }
+    journal.operations = operations;
+    Ok(())
 }
 
 fn encode_pending(
