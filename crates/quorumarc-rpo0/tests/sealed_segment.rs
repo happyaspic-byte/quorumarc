@@ -53,6 +53,32 @@ fn chained_sealed_segments_bind_previous_state_root() {
 }
 
 #[test]
+fn sealed_segment_catch_up_installs_contiguous_tail_and_refuses_divergence() {
+    let op1 = GenericOperation::new([1; 16], 0, b"entry-1").expect("op1");
+    let first = SealedSegment::seal(1, 1, 1, &[op1]).expect("first");
+
+    let op2 = GenericOperation::new([2; 16], 1, b"entry-2").expect("op2");
+    let second =
+        SealedSegment::seal_chained(2, 2, 2, first.final_state_root(), &[op2]).expect("second");
+
+    let mut follower = quorumarc_rpo0::GenericJournal::new();
+    follower.install_sealed_segment(&first).expect("catchup 1");
+    assert_eq!(follower.len(), 1);
+    assert_eq!(follower.recover().expect("progress").commit_index, 1);
+
+    follower.install_sealed_segment(&second).expect("catchup 2");
+    assert_eq!(follower.len(), 2);
+    assert_eq!(follower.recover().expect("progress").commit_index, 2);
+
+    let op3 = GenericOperation::new([3; 16], 2, b"entry-3").expect("op3");
+    let wrong_base = SealedSegment::seal_chained(3, 3, 3, [99; 32], &[op3]).expect("wrong base");
+    assert!(matches!(
+        follower.install_sealed_segment(&wrong_base),
+        Err(GenericJournalError::RecoveryMismatch)
+    ));
+}
+
+#[test]
 fn sealed_segment_refuses_unordered_or_empty_commits() {
     assert!(matches!(
         SealedSegment::seal(1, 2, 1, &[]),

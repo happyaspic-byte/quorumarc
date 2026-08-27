@@ -260,7 +260,7 @@ fn wait_for_socket(
         if child.try_wait()?.is_some() {
             return Err("daemon exited before status socket".into());
         }
-        if path.exists() {
+        if UnixStream::connect(path).is_ok() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(20));

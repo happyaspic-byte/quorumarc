@@ -166,6 +166,43 @@ impl GenericJournal {
         recover_bytes(&self.bytes)
     }
 
+    /// Installs a sealed segment into the local journal as part of catch-up.
+    pub fn install_sealed_segment(
+        &mut self,
+        segment: &SealedSegment,
+    ) -> Result<GenericProgress, GenericJournalError> {
+        let current_commit = self.progress.map_or(0, |progress| progress.commit_index);
+        let current_root = self
+            .progress
+            .map_or([0; 32], |progress| progress.state_root);
+        if segment.start_commit != current_commit.saturating_add(1) {
+            return Err(GenericJournalError::RecoveryMismatch);
+        }
+        if segment.base_root != current_root {
+            return Err(GenericJournalError::RecoveryMismatch);
+        }
+        let progress = recover_bytes_with_base(&segment.records, current_commit, current_root)?;
+        if progress.commit_index != segment.end_commit
+            || progress.state_root != segment.final_state_root
+        {
+            return Err(GenericJournalError::Corrupt);
+        }
+        let mut candidate_journal = GenericJournal {
+            bytes: segment.records.clone(),
+            operations: BTreeMap::new(),
+            progress: Some(progress),
+        };
+        replay_operations(&mut candidate_journal)?;
+        for (op_id, (payload, ack)) in candidate_journal.operations {
+            if self.operations.insert(op_id, (payload, ack)).is_some() {
+                return Err(GenericJournalError::Corrupt);
+            }
+        }
+        self.bytes.extend_from_slice(&segment.records);
+        self.progress = Some(progress);
+        Ok(progress)
+    }
+
     pub fn corrupt_byte(&mut self, offset: usize) -> bool {
         if let Some(byte) = self.bytes.get_mut(offset) {
             *byte ^= 0x80;
@@ -736,10 +773,18 @@ fn encode_record(
 }
 
 fn recover_bytes(bytes: &[u8]) -> Result<GenericProgress, GenericJournalError> {
+    recover_bytes_with_base(bytes, 0, [0; 32])
+}
+
+fn recover_bytes_with_base(
+    bytes: &[u8],
+    base_commit: u64,
+    base_root: [u8; 32],
+) -> Result<GenericProgress, GenericJournalError> {
     let mut cursor = 0_usize;
     let mut progress = GenericProgress {
-        commit_index: 0,
-        state_root: [0; 32],
+        commit_index: base_commit,
+        state_root: base_root,
     };
     let mut operations = BTreeMap::new();
     while cursor < bytes.len() {
