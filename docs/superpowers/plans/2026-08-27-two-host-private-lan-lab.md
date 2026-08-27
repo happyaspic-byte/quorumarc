@@ -54,4 +54,4 @@
 - [x] Node A=.22, Node B=.21, Witness=.22
 - [x] Active-loss promotion with zero dual writers and zero ACK loss
 - [x] Docs + commit
-- [ ] Push + exact-head CI
+- [x] Push + exact-head CI
