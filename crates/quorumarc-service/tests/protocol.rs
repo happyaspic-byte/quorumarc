@@ -21,6 +21,7 @@ fn request() -> ProductionRequest {
         node_id: NODE.to_owned(),
         key_id: KEY.to_owned(),
         request_id: [11; 16],
+        sequence: 1,
         incarnation: 1,
         epoch: 4,
         progress_commit: 12,

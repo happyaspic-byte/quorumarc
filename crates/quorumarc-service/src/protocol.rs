@@ -1,4 +1,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use sha2::{Digest, Sha256};
+
+use crate::management_journal::{
+    JournalError, ManagementJournal, ManagementOperation, ManagementOutcome,
+};
 
 const MAGIC: &[u8; 8] = b"QARCPR02";
 const VERSION: u16 = 2;
@@ -20,6 +25,7 @@ pub struct ProductionRequest {
     pub node_id: String,
     pub key_id: String,
     pub request_id: [u8; 16],
+    pub sequence: u64,
     pub incarnation: u64,
     pub epoch: u64,
     pub progress_commit: u64,
@@ -38,6 +44,105 @@ pub struct ProductionFrame {
 pub enum ProductionFrameError {
     Malformed,
     AuthenticationFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionError {
+    Malformed,
+    AuthenticationFailed,
+    ReplayRefused,
+}
+
+impl AdmissionError {
+    #[must_use]
+    pub const fn is_node_failure_suspicion(self) -> bool {
+        false
+    }
+}
+
+/// Verifies application signatures, then records exact request identity durably.
+#[derive(Debug)]
+pub struct AuthenticatedRequestJournal {
+    journal: ManagementJournal,
+    node_id: String,
+    key_id: String,
+    verifying_key: VerifyingKey,
+}
+
+impl AuthenticatedRequestJournal {
+    #[must_use]
+    pub fn new(
+        journal: ManagementJournal,
+        node_id: impl Into<String>,
+        key_id: impl Into<String>,
+        verifying_key: VerifyingKey,
+    ) -> Self {
+        Self {
+            journal,
+            node_id: node_id.into(),
+            key_id: key_id.into(),
+            verifying_key,
+        }
+    }
+
+    pub fn admit(&mut self, bytes: &[u8]) -> Result<ManagementOutcome, AdmissionError> {
+        let frame = ProductionFrame::decode(bytes).map_err(|error| match error {
+            ProductionFrameError::Malformed => AdmissionError::Malformed,
+            ProductionFrameError::AuthenticationFailed => AdmissionError::AuthenticationFailed,
+        })?;
+        if frame.kind() != ProductionFrameKind::Request {
+            return Err(AdmissionError::Malformed);
+        }
+        frame
+            .verify(&self.verifying_key)
+            .map_err(|error| match error {
+                ProductionFrameError::Malformed => AdmissionError::Malformed,
+                ProductionFrameError::AuthenticationFailed => AdmissionError::AuthenticationFailed,
+            })?;
+        let request = frame.request();
+        if request.node_id != self.node_id || request.key_id != self.key_id {
+            return Err(AdmissionError::AuthenticationFailed);
+        }
+        let digest = request_digest(request);
+        let operation = ManagementOperation::new(request.sequence, request.request_id, digest)
+            .map_err(|_error| AdmissionError::Malformed)?;
+        self.journal.record(operation).map_err(|error| match error {
+            JournalError::ConflictingOperation | JournalError::StaleSequence => {
+                AdmissionError::ReplayRefused
+            }
+            JournalError::InvalidOperation
+            | JournalError::Corrupt
+            | JournalError::IdentityMismatch => AdmissionError::Malformed,
+            JournalError::Io => AdmissionError::ReplayRefused,
+        })
+    }
+
+    #[must_use]
+    pub fn highest_sequence(&self) -> u64 {
+        self.journal.highest_sequence()
+    }
+}
+
+fn request_digest(request: &ProductionRequest) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(SIGNATURE_DOMAIN);
+    hasher.update(request.cluster_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.workload_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.node_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.key_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.request_id);
+    hasher.update(request.sequence.to_be_bytes());
+    hasher.update(request.incarnation.to_be_bytes());
+    hasher.update(request.epoch.to_be_bytes());
+    hasher.update(request.progress_commit.to_be_bytes());
+    hasher.update(request.policy_hash);
+    hasher.update((request.payload.len() as u32).to_be_bytes());
+    hasher.update(&request.payload);
+    hasher.finalize().into()
 }
 
 impl ProductionFrame {
@@ -91,6 +196,7 @@ impl ProductionFrame {
             node_id: read_id(statement, &mut cursor)?,
             key_id: read_id(statement, &mut cursor)?,
             request_id: read_array(statement, &mut cursor)?,
+            sequence: read_u64(statement, &mut cursor)?,
             incarnation: read_u64(statement, &mut cursor)?,
             epoch: read_u64(statement, &mut cursor)?,
             progress_commit: read_u64(statement, &mut cursor)?,
@@ -146,6 +252,7 @@ fn validate_request(request: &ProductionRequest) -> Result<(), ProductionFrameEr
         }
     }
     if request.request_id.iter().all(|byte| *byte == 0)
+        || request.sequence == 0
         || request.incarnation == 0
         || request.epoch == 0
         || request.policy_hash.iter().all(|byte| *byte == 0)
@@ -179,6 +286,7 @@ fn encode_statement(
         bytes.extend_from_slice(id.as_bytes());
     }
     bytes.extend_from_slice(&request.request_id);
+    bytes.extend_from_slice(&request.sequence.to_be_bytes());
     bytes.extend_from_slice(&request.incarnation.to_be_bytes());
     bytes.extend_from_slice(&request.epoch.to_be_bytes());
     bytes.extend_from_slice(&request.progress_commit.to_be_bytes());
