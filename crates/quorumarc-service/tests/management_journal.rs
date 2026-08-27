@@ -52,6 +52,40 @@ fn management_journal_persists_exact_retry_and_refuses_conflicts() {
 }
 
 #[test]
+fn management_journal_refuses_capacity_before_ack_and_remains_recoverable() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-management-capacity-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create journal fixture");
+    let identity = [17_u8; 16];
+    let mut journal = ManagementJournal::open(&directory, identity).expect("open journal");
+
+    for sequence in 1_u64..=11_915 {
+        let mut operation_id = [0_u8; 16];
+        operation_id[..8].copy_from_slice(&sequence.to_be_bytes());
+        assert_eq!(
+            journal.record(
+                ManagementOperation::new(sequence, operation_id, [23; 32]).expect("operation")
+            ),
+            Ok(ManagementOutcome::Committed)
+        );
+    }
+    let mut operation_id = [0_u8; 16];
+    operation_id[..8].copy_from_slice(&11_916_u64.to_be_bytes());
+    assert_eq!(
+        journal
+            .record(ManagementOperation::new(11_916, operation_id, [23; 32]).expect("operation")),
+        Err(JournalError::Capacity)
+    );
+    drop(journal);
+
+    let reopened = ManagementJournal::open(&directory, identity).expect("reopen journal");
+    assert_eq!(reopened.highest_sequence(), 11_915);
+    fs::remove_dir_all(directory).expect("remove journal fixture");
+}
+
+#[test]
 fn copied_management_journal_refuses_another_identity() {
     let directory = std::env::temp_dir().join(format!(
         "quorumarc-management-identity-{}",

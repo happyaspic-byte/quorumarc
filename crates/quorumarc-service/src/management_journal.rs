@@ -46,6 +46,7 @@ pub enum JournalError {
     ConflictingOperation,
     StaleSequence,
     InvalidOperation,
+    Capacity,
     Corrupt,
     Io,
 }
@@ -146,6 +147,18 @@ impl ManagementJournal {
         let expected = self.highest_sequence().saturating_add(1);
         if operation.sequence != expected {
             return Err(JournalError::StaleSequence);
+        }
+
+        let next_size = HEADER_LEN
+            .checked_add(
+                self.operations
+                    .len()
+                    .saturating_add(1)
+                    .saturating_mul(RECORD_LEN),
+            )
+            .ok_or(JournalError::Capacity)?;
+        if u64::try_from(next_size).map_err(|_error| JournalError::Capacity)? > MAX_JOURNAL_SIZE {
+            return Err(JournalError::Capacity);
         }
 
         let encoded = encode_record(self.identity, operation);

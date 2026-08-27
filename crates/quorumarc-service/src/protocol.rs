@@ -113,7 +113,7 @@ impl AuthenticatedRequestJournal {
             JournalError::InvalidOperation
             | JournalError::Corrupt
             | JournalError::IdentityMismatch => AdmissionError::Malformed,
-            JournalError::Io => AdmissionError::ReplayRefused,
+            JournalError::Capacity | JournalError::Io => AdmissionError::ReplayRefused,
         })
     }
 
