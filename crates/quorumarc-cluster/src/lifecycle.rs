@@ -33,6 +33,7 @@ use quorumarc_wire::{
 use sha2::{Digest, Sha256};
 
 use crate::keys::{load_private_seed, load_public_key, require_distinct_role_keys};
+use crate::lab_net::{LabBindPolicy, ensure_lab_bind, ensure_lab_peer};
 use crate::path_guard::{
     OwnerLock, prepare_file_parent, prepare_store_directory, require_disjoint_store_and_file,
     require_keys_disjoint, require_ready_disjoint, write_ready_file,
@@ -337,6 +338,8 @@ pub enum LifecycleStoreFault {
 #[derive(Clone, Debug)]
 pub struct LifecycleNodeConfig {
     pub node_id: LifecycleNodeId,
+    pub bind_policy: LabBindPolicy,
+    pub expected_peer_ips: Vec<std::net::IpAddr>,
     pub listen: SocketAddr,
     pub ready_file: PathBuf,
     pub wal_path: PathBuf,
@@ -355,6 +358,8 @@ pub struct LifecycleNodeConfig {
 /// Long-running independent lifecycle Witness settings.
 #[derive(Clone, Debug)]
 pub struct LifecycleWitnessConfig {
+    pub bind_policy: LabBindPolicy,
+    pub expected_peer_ips: Vec<std::net::IpAddr>,
     pub listen: SocketAddr,
     pub ready_file: PathBuf,
     pub store_directory: PathBuf,
@@ -1089,6 +1094,7 @@ impl SignedLifecycleResponse {
 /// Loopback-only client that authenticates every lifecycle node response.
 pub struct LifecycleClient {
     address: SocketAddr,
+    bind_policy: LabBindPolicy,
     node_id: LifecycleNodeId,
     public_key: VerifyingKey,
     controller_signing_key: SigningKey,
@@ -1106,8 +1112,28 @@ impl LifecycleClient {
         controller_signing_key: SigningKey,
         timeout: Duration,
     ) -> Self {
+        Self::new_with_policy(
+            address,
+            LabBindPolicy::LoopbackOnly,
+            node_id,
+            public_key,
+            controller_signing_key,
+            timeout,
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_policy(
+        address: SocketAddr,
+        bind_policy: LabBindPolicy,
+        node_id: LifecycleNodeId,
+        public_key: VerifyingKey,
+        controller_signing_key: SigningKey,
+        timeout: Duration,
+    ) -> Self {
         Self {
             address,
+            bind_policy,
             node_id,
             public_key,
             controller_signing_key,
@@ -1311,7 +1337,7 @@ impl LifecycleClient {
         signed: &SignedLifecycleCommand,
         timeout: Duration,
     ) -> Result<LifecycleReport, ClusterError> {
-        ensure_loopback(self.address)?;
+        ensure_lab_bind(self.bind_policy, self.address)?;
         if timeout.is_zero() {
             return Err(err("TIMEOUT_REFUSED", "lifecycle client timeout is zero"));
         }
@@ -1377,6 +1403,7 @@ struct LifecycleNodeRuntime {
     witness_key: VerifyingKey,
     controller_key: VerifyingKey,
     witness_address: SocketAddr,
+    bind_policy: LabBindPolicy,
     io_timeout: Duration,
     policy_hash: [u8; 32],
     progress_contract: LifecycleProgressContract,
@@ -1457,6 +1484,7 @@ impl LifecycleNodeRuntime {
             witness_key,
             controller_key,
             witness_address: config.witness_address,
+            bind_policy: config.bind_policy,
             io_timeout: config.io_timeout,
             policy_hash: config.policy_hash,
             progress_contract: config.progress_contract,
@@ -1648,6 +1676,7 @@ impl LifecycleNodeRuntime {
             .map_err(|error| LifecycleRefusal::durability(error.to_string()))?;
         let response = request_lifecycle_witness(
             self.witness_address,
+            self.bind_policy,
             self.io_timeout,
             &provisional,
             &self.witness_key,
@@ -1924,8 +1953,8 @@ pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterEr
         config.progress_contract.required_commit,
         config.progress_contract.state_root,
     )?;
-    ensure_loopback(config.listen)?;
-    ensure_loopback(config.witness_address)?;
+    ensure_lab_bind(config.bind_policy, config.listen)?;
+    ensure_lab_bind(config.bind_policy, config.witness_address)?;
     ensure_service_bounds(config.max_connections, config.io_timeout)?;
     require_keys_disjoint(
         &[
@@ -1961,7 +1990,7 @@ pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterEr
     let local = listener
         .local_addr()
         .map_err(|error| err("LIFECYCLE_NODE_BIND_FAILED", error.to_string()))?;
-    ensure_loopback(local)?;
+    ensure_lab_bind(config.bind_policy, local)?;
     let codec = FrameCodec::new(MAX_LIFECYCLE_FRAME)
         .map_err(|error| err("FRAME_CONFIG_FAILED", error.to_string()))?;
     write_ready_file(&config.ready_file, &local.to_string())?;
@@ -1973,7 +2002,8 @@ pub fn serve_lifecycle_node(config: LifecycleNodeConfig) -> Result<(), ClusterEr
 
     for _ in 0..config.max_connections {
         let (mut stream, remote) = accept(&listener, "LIFECYCLE_NODE_ACCEPT_FAILED")?;
-        if !remote.ip().is_loopback() {
+        if let Err(error) = ensure_lab_peer(config.bind_policy, remote, &config.expected_peer_ips) {
+            eprintln!("event=lifecycle_node_peer_refusal {error}");
             continue;
         }
         configure_stream(&stream, config.io_timeout)?;
@@ -2048,7 +2078,7 @@ pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), Clu
         config.progress_contract.required_commit,
         config.progress_contract.state_root,
     )?;
-    ensure_loopback(config.listen)?;
+    ensure_lab_bind(config.bind_policy, config.listen)?;
     ensure_service_bounds(config.max_connections, config.io_timeout)?;
     require_keys_disjoint(
         &[
@@ -2106,7 +2136,7 @@ pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), Clu
     let local = listener
         .local_addr()
         .map_err(|error| err("LIFECYCLE_WITNESS_BIND_FAILED", error.to_string()))?;
-    ensure_loopback(local)?;
+    ensure_lab_bind(config.bind_policy, local)?;
     let codec = FrameCodec::new(MAX_CLUSTER_FRAME)
         .map_err(|error| err("FRAME_CONFIG_FAILED", error.to_string()))?;
     write_ready_file(&config.ready_file, &local.to_string())?;
@@ -2117,7 +2147,8 @@ pub fn serve_lifecycle_witness(config: LifecycleWitnessConfig) -> Result<(), Clu
 
     for _ in 0..config.max_connections {
         let (mut stream, remote) = accept(&listener, "LIFECYCLE_WITNESS_ACCEPT_FAILED")?;
-        if !remote.ip().is_loopback() {
+        if let Err(error) = ensure_lab_peer(config.bind_policy, remote, &config.expected_peer_ips) {
+            eprintln!("event=lifecycle_witness_peer_refusal {error}");
             continue;
         }
         configure_stream(&stream, config.io_timeout)?;
@@ -2430,11 +2461,12 @@ fn provisional_envelope(
 
 fn request_lifecycle_witness(
     address: SocketAddr,
+    bind_policy: LabBindPolicy,
     timeout: Duration,
     request: &SignedPromotionEnvelope,
     witness_key: &VerifyingKey,
 ) -> Result<WitnessResponse, LifecycleRefusal> {
-    ensure_loopback(address).map_err(|error| {
+    ensure_lab_bind(bind_policy, address).map_err(|error| {
         LifecycleRefusal::new(
             LifecycleReasonCode::RefusedWitnessUnavailable,
             false,
@@ -2884,16 +2916,6 @@ fn core_node(value: &str) -> Result<NodeId, ClusterError> {
 fn core_workload() -> Result<WorkloadId, ClusterError> {
     WorkloadId::new(LIFECYCLE_WORKLOAD)
         .map_err(|error| err("LIFECYCLE_IDENTIFIER_INVALID", error.to_string()))
-}
-
-fn ensure_loopback(address: SocketAddr) -> Result<(), ClusterError> {
-    if !address.ip().is_loopback() {
-        return Err(err(
-            "NON_LOOPBACK_REFUSED",
-            format!("{address} is outside the bounded localhost lifecycle lab"),
-        ));
-    }
-    Ok(())
 }
 
 fn ensure_service_bounds(max_connections: u64, timeout: Duration) -> Result<(), ClusterError> {

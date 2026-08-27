@@ -103,8 +103,11 @@ deadline. Those timeouts do not change lease, proof, fence, or signature rules.
 ## Service modes
 
 All lifecycle, controller, and fault-proxy modes require explicit
-`--allow-lifecycle-lab`; they bind or connect only to loopback addresses and
-use bounded frames, connections, and I/O deadlines.
+`--allow-lifecycle-lab`. The default bind policy is loopback-only. An additional
+explicit `--allow-private-lan-lab` flag permits unicast `172.30.1.0/24` hosts
+and requires `--expected-peer-ip` source pinning. `0.0.0.0`, other RFC1918
+ranges, and public addresses remain refused. This is a bounded two-host
+laboratory, not a production listener.
 
 ```text
 quorumarc-cluster lifecycle-witness \

@@ -14,6 +14,7 @@ use super::protocol::{
     ReplicaRequest, ReplicaResponse,
 };
 use crate::keys::{load_private_seed, load_public_key, require_distinct_role_keys};
+use crate::lab_net::{LabBindPolicy, ensure_lab_bind, ensure_lab_peer};
 use crate::path_guard::{
     OwnerLock, prepare_file_parent, require_keys_disjoint, require_ready_disjoint, write_ready_file,
 };
@@ -21,6 +22,8 @@ use crate::{ClusterError, err};
 
 #[derive(Clone, Debug)]
 pub struct ContinuousPrimaryConfig {
+    pub bind_policy: LabBindPolicy,
+    pub expected_client_ips: Vec<std::net::IpAddr>,
     pub listen: SocketAddr,
     pub ready_file: PathBuf,
     pub wal_path: PathBuf,
@@ -67,6 +70,7 @@ pub fn serve_continuous_primary(config: ContinuousPrimaryConfig) -> Result<(), C
     let local = FileReplica::new("continuous-primary", &config.wal_path);
     let mut remote = RemoteContinuousReplica::new(
         config.replica_address,
+        config.bind_policy,
         config.io_timeout,
         signing_key.clone(),
         replica_key,
@@ -101,7 +105,7 @@ pub fn serve_continuous_primary(config: ContinuousPrimaryConfig) -> Result<(), C
     let address = listener
         .local_addr()
         .map_err(|error| err("CONTINUOUS_PRIMARY_BIND_FAILED", error.to_string()))?;
-    ensure_loopback(address)?;
+    ensure_lab_bind(config.bind_policy, address)?;
     let codec = FrameCodec::new(MAX_CONTINUOUS_FRAME)
         .map_err(|error| err("CONTINUOUS_FRAME_CONFIG_FAILED", error.to_string()))?;
     write_ready_file(&config.ready_file, &address.to_string())?;
@@ -110,7 +114,12 @@ pub fn serve_continuous_primary(config: ContinuousPrimaryConfig) -> Result<(), C
         let (mut stream, remote_address) = listener
             .accept()
             .map_err(|error| err("CONTINUOUS_PRIMARY_ACCEPT_FAILED", error.to_string()))?;
-        if !remote_address.ip().is_loopback() {
+        if let Err(error) = ensure_lab_peer(
+            config.bind_policy,
+            remote_address,
+            &config.expected_client_ips,
+        ) {
+            eprintln!("event=continuous_primary_peer_refusal {error}");
             continue;
         }
         configure_stream(&stream, config.io_timeout)?;
@@ -310,6 +319,7 @@ enum ContinuousApplyError {
 
 struct RemoteContinuousReplica {
     address: SocketAddr,
+    bind_policy: LabBindPolicy,
     timeout: Duration,
     signing_key: quorumarc_wire::SigningKey,
     replica_key: quorumarc_wire::VerifyingKey,
@@ -321,6 +331,7 @@ struct RemoteContinuousReplica {
 impl RemoteContinuousReplica {
     fn new(
         address: SocketAddr,
+        bind_policy: LabBindPolicy,
         timeout: Duration,
         signing_key: quorumarc_wire::SigningKey,
         replica_key: quorumarc_wire::VerifyingKey,
@@ -328,6 +339,7 @@ impl RemoteContinuousReplica {
     ) -> Self {
         Self {
             address,
+            bind_policy,
             timeout,
             signing_key,
             replica_key,
@@ -365,7 +377,7 @@ impl RemoteContinuousReplica {
 
     fn exchange(&mut self, request: &ReplicaRequest) -> Result<ReplicaResponse, ClusterError> {
         if self.session.is_none() {
-            ensure_loopback(self.address)?;
+            ensure_lab_bind(self.bind_policy, self.address)?;
             let stream =
                 TcpStream::connect_timeout(&self.address, self.timeout).map_err(|error| {
                     err(
@@ -458,8 +470,8 @@ fn replica_request_id(counter: u64) -> [u8; 16] {
 }
 
 fn ensure_config(config: &ContinuousPrimaryConfig) -> Result<(), ClusterError> {
-    ensure_loopback(config.listen)?;
-    ensure_loopback(config.replica_address)?;
+    ensure_lab_bind(config.bind_policy, config.listen)?;
+    ensure_lab_bind(config.bind_policy, config.replica_address)?;
     if config.max_connections == 0 || config.max_connections > 4_096 {
         return Err(err(
             "CONTINUOUS_PRIMARY_CONFIG_REFUSED",
@@ -476,16 +488,6 @@ fn ensure_config(config: &ContinuousPrimaryConfig) -> Result<(), ClusterError> {
         return Err(err(
             "CONTINUOUS_PRIMARY_CONFIG_REFUSED",
             "policy hash is zero",
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_loopback(address: SocketAddr) -> Result<(), ClusterError> {
-    if !address.ip().is_loopback() {
-        return Err(err(
-            "NON_LOOPBACK_REFUSED",
-            format!("{address} is outside the continuous localhost lab"),
         ));
     }
     Ok(())

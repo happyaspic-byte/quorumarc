@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::keys::{load_private_seed, load_public_key, require_distinct_role_keys};
+use crate::lab_net::{LabBindPolicy, ensure_lab_bind};
 use crate::lifecycle::{
     LifecycleAutoController, LifecycleAutoDecision, LifecycleAutoReason, LifecycleClient,
     LifecycleNodeId, LifecycleProgressContract, LifecycleReasonCode, lifecycle_lease,
@@ -22,6 +23,7 @@ const MAX_RUNTIME_MS: u128 = 60_000;
 /// Settings for the bounded, localhost-only automatic lifecycle controller.
 #[derive(Clone, Debug)]
 pub struct LifecycleControllerConfig {
+    pub bind_policy: LabBindPolicy,
     pub node_a_address: SocketAddr,
     pub node_b_address: SocketAddr,
     pub node_a_public_key_file: PathBuf,
@@ -37,6 +39,7 @@ pub struct LifecycleControllerConfig {
     pub max_runtime: Duration,
     pub progress_contract: LifecycleProgressContract,
     pub emit_test_effect: bool,
+    pub successor_retry: Option<quorumarc_rpo0::CounterOperation>,
 }
 
 /// Final bounded-controller outcome.
@@ -83,15 +86,17 @@ pub fn run_lifecycle_controller(
         config.authority_timeout.as_millis(),
         config.emit_test_effect
     ))?;
-    let mut node_a = LifecycleClient::new(
+    let mut node_a = LifecycleClient::new_with_policy(
         config.node_a_address,
+        config.bind_policy,
         LifecycleNodeId::NodeA,
         node_a_key,
         controller_key.clone(),
         config.authority_timeout,
     );
-    let mut node_b = LifecycleClient::new(
+    let mut node_b = LifecycleClient::new_with_policy(
         config.node_b_address,
+        config.bind_policy,
         LifecycleNodeId::NodeB,
         node_b_key,
         controller_key,
@@ -278,6 +283,23 @@ pub fn run_lifecycle_controller(
                         started.elapsed().as_millis()
                     ))?;
                 }
+                if let Some(operation) = config.successor_retry {
+                    if promotions == config.max_promotions {
+                        let retry = client.retry_workload(epoch, now_ms, operation)?;
+                        if retry.reason_code != LifecycleReasonCode::WorkloadRetryConfirmed {
+                            return Err(err(
+                                "LIFECYCLE_CONTROLLER_RETRY_REFUSED",
+                                format!("successor retry was {}", retry.reason_code.as_str()),
+                            ));
+                        }
+                        trace.record(&format!(
+                            "event=controller_successor_retry node={} epoch={epoch} code={} commit={}",
+                            candidate.as_str(),
+                            retry.reason_code.as_str(),
+                            retry.commit_index
+                        ))?;
+                    }
+                }
                 if promotions == config.max_promotions {
                     let elapsed_ms = started.elapsed().as_millis();
                     trace.record(&format!(
@@ -363,10 +385,16 @@ fn validate_config(config: &LifecycleControllerConfig) -> Result<(), ClusterErro
         ("node-a", config.node_a_address),
         ("node-b", config.node_b_address),
     ] {
-        if !address.ip().is_loopback() || address.port() == 0 {
+        ensure_lab_bind(config.bind_policy, address).map_err(|error| {
+            err(
+                "LIFECYCLE_CONTROLLER_ADDRESS_REFUSED",
+                format!("{name} {error}"),
+            )
+        })?;
+        if address.port() == 0 {
             return Err(err(
                 "LIFECYCLE_CONTROLLER_ADDRESS_REFUSED",
-                format!("{name} address must be a bound loopback endpoint"),
+                format!("{name} address must be a bound endpoint"),
             ));
         }
     }
@@ -387,6 +415,14 @@ fn validate_config(config: &LifecycleControllerConfig) -> Result<(), ClusterErro
             "LIFECYCLE_CONTROLLER_POLICY_REFUSED",
             "max promotions must be between 1 and 16",
         ));
+    }
+    if let Some(operation) = config.successor_retry {
+        if operation.id.into_bytes().iter().all(|byte| *byte == 0) || operation.increment == 0 {
+            return Err(err(
+                "LIFECYCLE_CONTROLLER_RETRY_REFUSED",
+                "successor retry requires a nonzero operation ID and increment",
+            ));
+        }
     }
     if config.logical_step_ms == 0 || config.logical_step_ms > MAX_LOGICAL_STEP_MS {
         return Err(err(
@@ -670,6 +706,7 @@ mod tests {
 
     fn config() -> LifecycleControllerConfig {
         LifecycleControllerConfig {
+            bind_policy: LabBindPolicy::LoopbackOnly,
             node_a_address: SocketAddr::from(([127, 0, 0, 1], 10_001)),
             node_b_address: SocketAddr::from(([127, 0, 0, 1], 10_002)),
             node_a_public_key_file: PathBuf::from("node-a.pub"),
@@ -686,6 +723,7 @@ mod tests {
             progress_contract: crate::lifecycle::default_progress_contract()
                 .expect("default progress contract"),
             emit_test_effect: false,
+            successor_retry: None,
         }
     }
 
@@ -866,6 +904,37 @@ mod tests {
                 lease_wait_ms: 80,
                 promotion_readiness_ms: 505,
             })
+        );
+    }
+
+    #[test]
+    fn configured_successor_retry_shape_is_exact_and_nonzero() {
+        let mut valid = config();
+        valid.successor_retry = Some(quorumarc_rpo0::CounterOperation {
+            id: quorumarc_rpo0::OperationId::new([83; 16]),
+            expected_commit_index: 1,
+            increment: 4,
+        });
+        assert_eq!(validate_config(&valid), Ok(()));
+
+        let mut invalid = valid.clone();
+        invalid.successor_retry = Some(quorumarc_rpo0::CounterOperation {
+            id: quorumarc_rpo0::OperationId::new([0; 16]),
+            expected_commit_index: 1,
+            increment: 4,
+        });
+        assert_eq!(
+            validate_config(&invalid).map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_CONTROLLER_RETRY_REFUSED")
+        );
+        invalid.successor_retry = Some(quorumarc_rpo0::CounterOperation {
+            id: quorumarc_rpo0::OperationId::new([83; 16]),
+            expected_commit_index: 1,
+            increment: 0,
+        });
+        assert_eq!(
+            validate_config(&invalid).map_err(|error| error.reason_code()),
+            Err("LIFECYCLE_CONTROLLER_RETRY_REFUSED")
         );
     }
 

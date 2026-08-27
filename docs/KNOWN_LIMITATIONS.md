@@ -35,7 +35,10 @@ bounded frames. It includes focused kill/restart, conflict, replay, concurrency,
 pause/resume, and bounded clean-exit behavior. These are Witness-path analogues,
 not Active/Standby scenarios. A separately closed test EffectGate proves those
 test paths do not themselves grant authority; it does not prove an integrated
-promotion lifecycle.
+promotion lifecycle. An explicit two-host private-LAN campaign can place Node A
+and Node B on `172.30.1.22` and `172.30.1.21` while the Witness remains on Node
+A's host. That class is `TWO-HOST-SHARED-WITNESS-LAB`; it is not independent
+three-domain physical evidence.
 
 The agent and witness CLIs are intentionally safe-default inspection and refusal
 shells. They report status and health, inspect selected artifacts, and simulate
@@ -64,7 +67,8 @@ failover and write-latency distributions do not exist.
 | Exact-head compact model | The Draft PR links the depth-12 report for its current head | Applies only to that exact model revision and assumptions |
 | Exact-head coverage | The Draft PR links the generated coverage report and digest | A workspace percentage does not establish 90% aggregate critical-path compliance |
 | GitHub-hosted process | Long-running Node A/B plus Witness, automatic controller/fault proxies, one-shot labs, and a sequential continuous-to-lifecycle bridge binding live commit/root through successor recovery | Shared host; continuous writes stop before lifecycle handoff, and no physical failure-domain or endpoint enforcement exists |
-| Physical lab | No completed run | No independent host, fence, switch, VIP, storage, or hardware-clock evidence |
+| Two-host private LAN | Node A on 172.30.1.22, Node B on 172.30.1.21, Witness co-located on Node A; live two-copy WAL then Active SIGKILL and successor exact retry | Shared Witness host; no BMC/PDU fence, no independent third failure domain, no VIP |
+| Physical lab | No completed independent three-host run | No independent Witness host, fence, switch, VIP, storage, or hardware-clock evidence |
 
 A source count, old workflow number, or green badge must not be substituted for
 the exact final commit's successful run and artifact. Static documentation does

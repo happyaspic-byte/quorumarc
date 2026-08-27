@@ -19,6 +19,7 @@ mod bootstrap;
 mod continuous;
 mod fault_proxy;
 mod keys;
+mod lab_net;
 mod lifecycle;
 mod path_guard;
 mod peer;
@@ -39,6 +40,7 @@ pub use continuous::{
 };
 pub use fault_proxy::{FaultProxyConfig, serve_fault_proxy};
 pub use keys::{load_private_seed, load_public_key};
+pub use lab_net::{LabBindPolicy, ensure_lab_bind, ensure_lab_peer};
 pub use lifecycle::{
     LifecycleAutoController, LifecycleAutoDecision, LifecycleAutoReason, LifecycleClient,
     LifecycleNodeConfig, LifecycleNodeId, LifecycleProgressContract, LifecycleReasonCode,

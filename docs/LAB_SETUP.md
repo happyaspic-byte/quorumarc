@@ -51,6 +51,10 @@ This arrangement can validate network protocol and local persistence behavior.
 It cannot validate host independence because every process shares the runner's
 kernel, clock, storage stack, hypervisor, and power.
 
+A later `--allow-private-lan-lab` campaign may bind Node A and Node B to
+separate `172.30.1.0/24` hosts. Until Witness occupies a third independent
+host, that campaign remains `TWO-HOST-SHARED-WITNESS-LAB`.
+
 It also cannot prove global uniqueness after a perfect clone. Copying a
 Witness credential and every durable directory into a second independent lab
 creates another trusted root that the first lab cannot observe. Local owner

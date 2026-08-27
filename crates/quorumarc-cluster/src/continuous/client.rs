@@ -6,6 +6,7 @@ use quorumarc_runtime::FrameCodec;
 use quorumarc_wire::{SigningKey, VerifyingKey};
 
 use super::protocol::{ClientDecision, ClientRequest, ClientResponse, MAX_CONTINUOUS_FRAME};
+use crate::lab_net::{LabBindPolicy, ensure_lab_bind};
 use crate::{ClusterError, err};
 
 #[derive(Debug)]
@@ -23,6 +24,7 @@ pub enum ContinuousSubmitOutcome {
 
 pub struct ContinuousClient {
     address: SocketAddr,
+    bind_policy: LabBindPolicy,
     primary_key: VerifyingKey,
     signing_key: SigningKey,
     timeout: Duration,
@@ -38,8 +40,28 @@ impl ContinuousClient {
         timeout: Duration,
         policy_hash: [u8; 32],
     ) -> Self {
+        Self::new_with_policy(
+            address,
+            LabBindPolicy::LoopbackOnly,
+            primary_key,
+            signing_key,
+            timeout,
+            policy_hash,
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_policy(
+        address: SocketAddr,
+        bind_policy: LabBindPolicy,
+        primary_key: VerifyingKey,
+        signing_key: SigningKey,
+        timeout: Duration,
+        policy_hash: [u8; 32],
+    ) -> Self {
         Self {
             address,
+            bind_policy,
             primary_key,
             signing_key,
             timeout,
@@ -49,13 +71,13 @@ impl ContinuousClient {
     }
 
     pub fn apply(&mut self, operation: CounterOperation) -> ContinuousSubmitOutcome {
-        if !self.address.ip().is_loopback()
+        if ensure_lab_bind(self.bind_policy, self.address).is_err()
             || self.timeout.is_zero()
             || self.policy_hash.iter().all(|byte| *byte == 0)
         {
             return ContinuousSubmitOutcome::NotSubmitted(err(
                 "CONTINUOUS_CLIENT_CONFIG_REFUSED",
-                "client requires loopback, nonzero timeout, and nonzero policy",
+                "client requires an allowed lab address, nonzero timeout, and nonzero policy",
             ));
         }
         let request = match ClientRequest::sign(

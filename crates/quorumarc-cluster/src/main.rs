@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use quorumarc_cluster::{
     BootstrapConfig, ClusterError, ContinuousClient, ContinuousPrimaryConfig,
-    ContinuousReplicaConfig, ContinuousSubmitOutcome, FaultProxyConfig, LifecycleControllerConfig,
-    LifecycleNodeConfig, LifecycleNodeId, LifecycleProgressContract, LifecycleStoreFault,
-    LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig, default_progress_contract,
-    lifecycle_policy_hash, load_private_seed, load_public_key, run_bootstrap,
-    run_lifecycle_controller, run_self_test, serve_continuous_primary, serve_continuous_replica,
-    serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness, serve_peer, serve_witness,
+    ContinuousReplicaConfig, ContinuousSubmitOutcome, FaultProxyConfig, LabBindPolicy,
+    LifecycleControllerConfig, LifecycleNodeConfig, LifecycleNodeId, LifecycleProgressContract,
+    LifecycleStoreFault, LifecycleWitnessConfig, PeerConfig, SelfTestConfig, WitnessConfig,
+    default_progress_contract, lifecycle_policy_hash, load_private_seed, load_public_key,
+    run_bootstrap, run_lifecycle_controller, run_self_test, serve_continuous_primary,
+    serve_continuous_replica, serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness,
+    serve_peer, serve_witness,
 };
 use quorumarc_rpo0::{CounterOperation, OperationId};
 
@@ -116,13 +117,16 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--store-fault",
                     "--required-commit",
                     "--state-root-hex",
+                    "--expected-peer-ip",
                 ],
-                &["--allow-lifecycle-lab"],
+                &["--allow-lifecycle-lab", "--allow-private-lan-lab"],
             )?;
             require_lifecycle_opt_in(&options)?;
             let policy_hash = [options.u8_or("--policy-byte", lifecycle_policy_hash()[0])?; 32];
             serve_lifecycle_node(LifecycleNodeConfig {
                 node_id: LifecycleNodeId::parse(options.value("--node")?)?,
+                bind_policy: lifecycle_bind_policy(&options)?,
+                expected_peer_ips: expected_peer_ips(&options)?,
                 listen: options.socket("--listen")?,
                 ready_file: options.path("--ready-file")?,
                 wal_path: options.path("--wal")?,
@@ -153,12 +157,15 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--policy-byte",
                     "--required-commit",
                     "--state-root-hex",
+                    "--expected-peer-ip",
                 ],
-                &["--allow-lifecycle-lab"],
+                &["--allow-lifecycle-lab", "--allow-private-lan-lab"],
             )?;
             require_lifecycle_opt_in(&options)?;
             let policy_hash = [options.u8_or("--policy-byte", lifecycle_policy_hash()[0])?; 32];
             serve_lifecycle_witness(LifecycleWitnessConfig {
+                bind_policy: lifecycle_bind_policy(&options)?,
+                expected_peer_ips: expected_peer_ips(&options)?,
                 listen: options.socket("--listen")?,
                 ready_file: options.path("--ready-file")?,
                 store_directory: options.path("--store")?,
@@ -190,11 +197,19 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--max-runtime-ms",
                     "--required-commit",
                     "--state-root-hex",
+                    "--retry-operation-byte",
+                    "--retry-expected-commit",
+                    "--retry-increment",
                 ],
-                &["--allow-lifecycle-lab", "--emit-test-effect"],
+                &[
+                    "--allow-lifecycle-lab",
+                    "--allow-private-lan-lab",
+                    "--emit-test-effect",
+                ],
             )?;
             require_lifecycle_opt_in(&options)?;
             let report = run_lifecycle_controller(LifecycleControllerConfig {
+                bind_policy: lifecycle_bind_policy(&options)?,
                 node_a_address: options.socket("--node-a")?,
                 node_b_address: options.socket("--node-b")?,
                 node_a_public_key_file: options.path("--node-a-public-key")?,
@@ -212,6 +227,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 max_runtime: Duration::from_millis(options.u64("--max-runtime-ms")?),
                 progress_contract: progress_contract(&options)?,
                 emit_test_effect: options.flag("--emit-test-effect"),
+                successor_retry: successor_retry(&options)?,
             })?;
             println!(
                 "code=LIFECYCLE_CONTROLLER_COMPLETE promotions={} final_active={} final_epoch={} effects={} elapsed_ms={} final_failure_detection_ms={} final_lease_wait_ms={} final_promotion_ms={} final_effect_ms={}",
@@ -238,7 +254,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--max-connections",
                     "--timeout-ms",
                 ],
-                &["--allow-lifecycle-lab"],
+                &["--allow-lifecycle-lab", "--allow-private-lan-lab"],
             )?;
             require_lifecycle_opt_in(&options)?;
             serve_fault_proxy(FaultProxyConfig {
@@ -341,8 +357,9 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--max-connections",
                     "--timeout-ms",
                     "--policy-byte",
+                    "--expected-peer-ip",
                 ],
-                &["--allow-continuous-rpo0-lab"],
+                &["--allow-continuous-rpo0-lab", "--allow-private-lan-lab"],
             )?;
             if !options.flag("--allow-continuous-rpo0-lab") {
                 return Err(cli_error(
@@ -350,6 +367,8 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 ));
             }
             serve_continuous_replica(ContinuousReplicaConfig {
+                bind_policy: continuous_bind_policy(&options)?,
+                expected_primary_ips: expected_peer_ips(&options)?,
                 listen: options.socket("--listen")?,
                 ready_file: options.path("--ready-file")?,
                 wal_path: options.path("--wal")?,
@@ -374,8 +393,9 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--max-connections",
                     "--timeout-ms",
                     "--policy-byte",
+                    "--expected-peer-ip",
                 ],
-                &["--allow-continuous-rpo0-lab"],
+                &["--allow-continuous-rpo0-lab", "--allow-private-lan-lab"],
             )?;
             if !options.flag("--allow-continuous-rpo0-lab") {
                 return Err(cli_error(
@@ -383,6 +403,8 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 ));
             }
             serve_continuous_primary(ContinuousPrimaryConfig {
+                bind_policy: continuous_bind_policy(&options)?,
+                expected_client_ips: expected_peer_ips(&options)?,
                 listen: options.socket("--listen")?,
                 ready_file: options.path("--ready-file")?,
                 wal_path: options.path("--wal")?,
@@ -408,7 +430,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--timeout-ms",
                     "--policy-byte",
                 ],
-                &["--allow-continuous-rpo0-lab"],
+                &["--allow-continuous-rpo0-lab", "--allow-private-lan-lab"],
             )?;
             if !options.flag("--allow-continuous-rpo0-lab") {
                 println!("code=CONTINUOUS_LAB_DISABLED");
@@ -416,8 +438,9 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "continuous submit requires --allow-continuous-rpo0-lab",
                 ));
             }
-            let mut client = ContinuousClient::new(
+            let mut client = ContinuousClient::new_with_policy(
                 options.socket("--primary")?,
+                continuous_bind_policy(&options)?,
                 load_public_key(&options.path("--primary-public-key")?)?,
                 load_private_seed(&options.path("--client-signing-key")?)?,
                 Duration::from_millis(options.u64("--timeout-ms")?),
@@ -433,10 +456,11 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     operation_id,
                     commit_index,
                     value,
-                    state_root: _,
+                    state_root,
                 } => {
                     println!(
-                        "code=CONTINUOUS_ACKNOWLEDGED operation_id={operation_id} commit_index={commit_index} value={value}"
+                        "code=CONTINUOUS_ACKNOWLEDGED operation_id={operation_id} commit_index={commit_index} value={value} state_root={}",
+                        encode_hex(&state_root)
                     );
                     Ok(())
                 }
@@ -483,6 +507,7 @@ impl Options {
                 || argument == "--keep-state"
                 || argument == "--allow-continuous-rpo0-lab"
                 || argument == "--allow-lifecycle-lab"
+                || argument == "--allow-private-lan-lab"
                 || argument == "--emit-test-effect"
             {
                 if flags.iter().any(|value| value == argument) {
@@ -623,6 +648,59 @@ fn require_lifecycle_opt_in(options: &Options) -> Result<(), ClusterError> {
             "LIFECYCLE_LAB_DISABLED",
             "lifecycle service requires explicit --allow-lifecycle-lab",
         ))
+    }
+}
+
+fn continuous_bind_policy(options: &Options) -> Result<LabBindPolicy, ClusterError> {
+    LabBindPolicy::from_flags(
+        options.flag("--allow-continuous-rpo0-lab"),
+        options.flag("--allow-private-lan-lab"),
+    )
+}
+
+fn lifecycle_bind_policy(options: &Options) -> Result<LabBindPolicy, ClusterError> {
+    LabBindPolicy::from_flags(
+        options.flag("--allow-lifecycle-lab"),
+        options.flag("--allow-private-lan-lab"),
+    )
+}
+
+fn expected_peer_ips(options: &Options) -> Result<Vec<std::net::IpAddr>, ClusterError> {
+    match options.optional_value("--expected-peer-ip") {
+        Some(value) => value
+            .split(',')
+            .map(|item| {
+                item.parse::<std::net::IpAddr>()
+                    .map_err(|error| cli_error(format!("invalid --expected-peer-ip: {error}")))
+            })
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn successor_retry(options: &Options) -> Result<Option<CounterOperation>, ClusterError> {
+    match (
+        options.optional_value("--retry-operation-byte"),
+        options.optional_value("--retry-expected-commit"),
+        options.optional_value("--retry-increment"),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(id), Some(expected), Some(increment)) => Ok(Some(CounterOperation {
+            id: OperationId::new(
+                [id.parse::<u8>()
+                    .map_err(|error| cli_error(format!("invalid retry operation: {error}")))?;
+                    16],
+            ),
+            expected_commit_index: expected
+                .parse::<u64>()
+                .map_err(|error| cli_error(format!("invalid retry expected commit: {error}")))?,
+            increment: increment
+                .parse::<u64>()
+                .map_err(|error| cli_error(format!("invalid retry increment: {error}")))?,
+        })),
+        _ => Err(cli_error(
+            "retry operation byte, expected commit, and increment must be supplied together",
+        )),
     }
 }
 

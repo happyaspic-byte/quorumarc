@@ -105,6 +105,7 @@ fn live_client_ack_requires_two_process_durable_copies_and_exact_retry_is_stable
     assert_success("second fresh submit", &second);
     assert!(String::from_utf8_lossy(&second.stdout).contains("commit_index=2"));
     assert!(String::from_utf8_lossy(&second.stdout).contains("value=7"));
+    assert!(String::from_utf8_lossy(&second.stdout).contains("state_root="));
 
     let conflicting = submit(&fixture, primary_address, 73, 0, 9);
     assert!(!conflicting.status.success());
