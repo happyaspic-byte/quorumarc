@@ -129,6 +129,8 @@ fn production_witness_server_serves_authenticated_votes_over_mtls() {
     let runtime = ProductionWitnessRuntime::open(
         &directory,
         [41; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -175,6 +177,8 @@ fn production_witness_server_serves_authenticated_votes_over_mtls() {
     let resumed = ProductionWitnessRuntime::open(
         &directory,
         [41; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -196,6 +200,8 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     let runtime = ProductionWitnessRuntime::open(
         &directory,
         [42; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -247,6 +253,8 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     let resumed = ProductionWitnessRuntime::open(
         &directory,
         [42; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -268,6 +276,8 @@ fn production_witness_server_commits_max_payload_signed_frame() {
     let runtime = ProductionWitnessRuntime::open(
         &directory,
         [43; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -306,6 +316,8 @@ fn production_witness_server_commits_max_payload_signed_frame() {
     let resumed = ProductionWitnessRuntime::open(
         &directory,
         [43; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -327,6 +339,8 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
     let runtime = ProductionWitnessRuntime::open(
         &directory,
         [44; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -367,6 +381,8 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
     let resumed = ProductionWitnessRuntime::open(
         &directory,
         [44; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -387,6 +403,8 @@ fn production_witness_server_shutdown_closes_and_joins_idle_workers() {
     let runtime = ProductionWitnessRuntime::open(
         &directory,
         [45; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),

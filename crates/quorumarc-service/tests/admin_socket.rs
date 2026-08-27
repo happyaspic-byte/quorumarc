@@ -66,8 +66,14 @@ fn local_admin_socket_records_authenticated_mutation_and_exact_retry() {
     let socket = directory.join(format!("admin-{sequence}.sock"));
     let key = SigningKey::from_bytes(&[7_u8; 32]);
     let journal = ManagementJournal::open(&directory, [7; 16]).expect("journal");
-    let admission =
-        AuthenticatedRequestJournal::new(journal, "node-a", "node-a-2026-01", key.verifying_key());
+    let admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
 
     let current_uid = rustix::process::getuid().as_raw();
     let server = LocalAdminServer::bind_with_allowed_uid(&socket, admission, current_uid)
@@ -102,8 +108,14 @@ fn local_admin_socket_refuses_unauthenticated_and_malformed_frames() {
     let key = SigningKey::from_bytes(&[7_u8; 32]);
     let other = SigningKey::from_bytes(&[9_u8; 32]);
     let journal = ManagementJournal::open(&directory, [8; 16]).expect("journal");
-    let admission =
-        AuthenticatedRequestJournal::new(journal, "node-a", "node-a-2026-01", key.verifying_key());
+    let admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
 
     let current_uid = rustix::process::getuid().as_raw();
     let server = LocalAdminServer::bind_with_allowed_uid(&socket, admission, current_uid)
@@ -139,8 +151,14 @@ fn local_admin_socket_refuses_unauthorized_peer_uid() {
     let socket = directory.join(format!("admin-uid-{sequence}.sock"));
     let key = SigningKey::from_bytes(&[7_u8; 32]);
     let journal = ManagementJournal::open(&directory, [9; 16]).expect("journal");
-    let admission =
-        AuthenticatedRequestJournal::new(journal, "node-a", "node-a-2026-01", key.verifying_key());
+    let admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
 
     let current_uid = rustix::process::getuid().as_raw();
     let forbidden_uid = current_uid.wrapping_add(10_000);

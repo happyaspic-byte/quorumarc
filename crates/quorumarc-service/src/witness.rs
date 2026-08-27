@@ -124,13 +124,22 @@ impl ProductionWitnessRuntime {
     pub fn open(
         directory: &Path,
         identity: [u8; 16],
+        cluster_id: impl Into<String>,
+        workload_id: impl Into<String>,
         node_id: impl Into<String>,
         key_id: impl Into<String>,
         verifying_key: VerifyingKey,
     ) -> Result<Self, JournalError> {
         let journal = ManagementJournal::open(directory, identity)?;
         Ok(Self {
-            admission: AuthenticatedRequestJournal::new(journal, node_id, key_id, verifying_key),
+            admission: AuthenticatedRequestJournal::new(
+                journal,
+                cluster_id,
+                workload_id,
+                node_id,
+                key_id,
+                verifying_key,
+            ),
         })
     }
 

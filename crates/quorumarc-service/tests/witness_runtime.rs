@@ -157,6 +157,8 @@ fn production_witness_records_authenticated_votes_durably_and_restarts_closed() 
     let mut runtime = ProductionWitnessRuntime::open(
         &directory,
         [41; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -170,6 +172,8 @@ fn production_witness_records_authenticated_votes_durably_and_restarts_closed() 
     let mut resumed = ProductionWitnessRuntime::open(
         &directory,
         [41; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -196,6 +200,8 @@ fn production_witness_refuses_response_frames_and_authentication_failure() {
     let mut runtime = ProductionWitnessRuntime::open(
         &directory,
         [42; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),

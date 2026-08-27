@@ -64,6 +64,8 @@ impl AdmissionError {
 #[derive(Debug)]
 pub struct AuthenticatedRequestJournal {
     journal: ManagementJournal,
+    cluster_id: String,
+    workload_id: String,
     node_id: String,
     key_id: String,
     verifying_key: VerifyingKey,
@@ -73,12 +75,16 @@ impl AuthenticatedRequestJournal {
     #[must_use]
     pub fn new(
         journal: ManagementJournal,
+        cluster_id: impl Into<String>,
+        workload_id: impl Into<String>,
         node_id: impl Into<String>,
         key_id: impl Into<String>,
         verifying_key: VerifyingKey,
     ) -> Self {
         Self {
             journal,
+            cluster_id: cluster_id.into(),
+            workload_id: workload_id.into(),
             node_id: node_id.into(),
             key_id: key_id.into(),
             verifying_key,
@@ -100,7 +106,11 @@ impl AuthenticatedRequestJournal {
                 ProductionFrameError::AuthenticationFailed => AdmissionError::AuthenticationFailed,
             })?;
         let request = frame.request();
-        if request.node_id != self.node_id || request.key_id != self.key_id {
+        if request.cluster_id != self.cluster_id
+            || request.workload_id != self.workload_id
+            || request.node_id != self.node_id
+            || request.key_id != self.key_id
+        {
             return Err(AdmissionError::AuthenticationFailed);
         }
         let digest = request_digest(request);

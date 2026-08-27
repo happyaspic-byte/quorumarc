@@ -37,8 +37,14 @@ fn authenticated_request_is_durable_before_execution_and_exact_retry_is_stable()
     let frame = ProductionFrame::sign(ProductionFrameKind::Request, request(1, b"lease"), &key)
         .expect("sign");
     let encoded = frame.encode().expect("encode");
-    let mut admission =
-        AuthenticatedRequestJournal::new(journal, "node-a", "node-a-2026-01", key.verifying_key());
+    let mut admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
 
     assert_eq!(admission.admit(&encoded), Ok(ManagementOutcome::Committed));
     assert_eq!(admission.highest_sequence(), 1);
@@ -58,8 +64,14 @@ fn authentication_and_malformed_failures_do_not_advance_or_suspect_node_failure(
     let journal = ManagementJournal::open(&directory, [8; 16]).expect("journal");
     let key = SigningKey::from_bytes(&[7_u8; 32]);
     let other = SigningKey::from_bytes(&[9_u8; 32]);
-    let mut admission =
-        AuthenticatedRequestJournal::new(journal, "node-a", "node-a-2026-01", key.verifying_key());
+    let mut admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
 
     let wrong_key =
         ProductionFrame::sign(ProductionFrameKind::Request, request(1, b"lease"), &other)
@@ -79,6 +91,58 @@ fn authentication_and_malformed_failures_do_not_advance_or_suspect_node_failure(
 }
 
 #[test]
+fn signed_wrong_cluster_or_workload_cannot_consume_sequence() {
+    let directory =
+        std::env::temp_dir().join(format!("quorumarc-protocol-context-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("directory");
+    let journal = ManagementJournal::open(&directory, [10; 16]).expect("journal");
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let mut admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
+
+    let mut wrong_cluster = request(1, b"lease");
+    wrong_cluster.cluster_id = "other-cluster".to_owned();
+    let wrong_cluster = ProductionFrame::sign(ProductionFrameKind::Request, wrong_cluster, &key)
+        .expect("sign")
+        .encode()
+        .expect("encode");
+    assert_eq!(
+        admission.admit(&wrong_cluster),
+        Err(AdmissionError::AuthenticationFailed)
+    );
+    assert_eq!(admission.highest_sequence(), 0);
+
+    let mut wrong_workload = request(1, b"lease");
+    wrong_workload.workload_id = "other-workload".to_owned();
+    let wrong_workload = ProductionFrame::sign(ProductionFrameKind::Request, wrong_workload, &key)
+        .expect("sign")
+        .encode()
+        .expect("encode");
+    assert_eq!(
+        admission.admit(&wrong_workload),
+        Err(AdmissionError::AuthenticationFailed)
+    );
+    assert_eq!(admission.highest_sequence(), 0);
+
+    let legitimate =
+        ProductionFrame::sign(ProductionFrameKind::Request, request(1, b"lease"), &key)
+            .expect("sign")
+            .encode()
+            .expect("encode");
+    assert_eq!(
+        admission.admit(&legitimate),
+        Ok(ManagementOutcome::Committed)
+    );
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn authenticated_conflict_and_future_sequence_fail_closed() {
     let directory = std::env::temp_dir().join(format!(
         "quorumarc-protocol-conflict-{}",
@@ -87,8 +151,14 @@ fn authenticated_conflict_and_future_sequence_fail_closed() {
     fs::create_dir_all(&directory).expect("directory");
     let journal = ManagementJournal::open(&directory, [9; 16]).expect("journal");
     let key = SigningKey::from_bytes(&[7_u8; 32]);
-    let mut admission =
-        AuthenticatedRequestJournal::new(journal, "node-a", "node-a-2026-01", key.verifying_key());
+    let mut admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
 
     let first = ProductionFrame::sign(ProductionFrameKind::Request, request(1, b"lease"), &key)
         .expect("sign")

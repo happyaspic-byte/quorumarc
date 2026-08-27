@@ -52,6 +52,8 @@ fn durable_controller_records_request_before_execution_and_resumes_after_restart
     let mut controller = DurableController::open(
         &directory,
         [7; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -67,6 +69,8 @@ fn durable_controller_records_request_before_execution_and_resumes_after_restart
     let mut resumed = DurableController::open(
         &directory,
         [7; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
@@ -97,6 +101,8 @@ fn durable_controller_refuses_stale_replay_without_suspecting_node_failure() {
     let mut controller = DurableController::open(
         &directory,
         [8; 16],
+        "prod-cluster",
+        "orders-api",
         "node-a",
         "node-a-2026-01",
         key.verifying_key(),
