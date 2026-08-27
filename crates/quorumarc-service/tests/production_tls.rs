@@ -72,7 +72,8 @@ fn production_transport_completes_only_with_mutually_trusted_certificates() {
 
     let server_thread = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
-        let connection = ServerConnection::new(Arc::new(server_config)).expect("server TLS");
+        let connection = ServerConnection::new(Arc::new(server_config.into_server_config()))
+            .expect("server TLS");
         let mut tls = StreamOwned::new(connection, stream);
         let mut request = [0_u8; 4];
         tls.read_exact(&mut request).expect("authenticated read");
@@ -113,7 +114,8 @@ fn production_transport_refuses_client_without_trusted_certificate() {
 
     let server_thread = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
-        let connection = ServerConnection::new(Arc::new(server_config)).expect("server TLS");
+        let connection = ServerConnection::new(Arc::new(server_config.into_server_config()))
+            .expect("server TLS");
         let mut tls = StreamOwned::new(connection, stream);
         let mut request = [0_u8; 4];
         assert!(tls.read_exact(&mut request).is_err());

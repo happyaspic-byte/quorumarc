@@ -256,3 +256,122 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     assert!(!resumed.effects_open());
     let _ = fs::remove_dir_all(directory);
 }
+
+#[test]
+fn production_witness_server_commits_max_payload_signed_frame() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-server-max-payload-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let runtime = ProductionWitnessRuntime::open(
+        &directory,
+        [43; 16],
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    )
+    .expect("open");
+
+    let (ca, server_id, client_id) = issue_identities();
+    let server_config =
+        server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca.clone()])
+            .expect("server config");
+    let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
+        .expect("client config");
+    let server =
+        ProductionWitnessServer::bind("127.0.0.1:0".parse().expect("addr"), server_config, runtime)
+            .expect("bind");
+    let listen_addr = server.local_addr().expect("local addr");
+    let shutdown = ShutdownToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_thread = thread::spawn(move || {
+        server.serve_until(&shutdown_clone).expect("serve");
+    });
+
+    let payload = vec![0x5a_u8; 65_536];
+    let first = signed_request(1, [11; 16], &payload, &key);
+    assert!(first.len() > 65_536);
+    let stream = connect_retry(listen_addr).expect("connect");
+    let server_name = ServerName::try_from("witness.test").expect("server name");
+    let connection =
+        ClientConnection::new(Arc::new(client_config), server_name).expect("client TLS");
+    let mut tls = StreamOwned::new(connection, stream);
+    write_frame(&mut tls, &first);
+    assert_eq!(read_status(&mut tls), b"COMMITTED\n");
+
+    shutdown.request();
+    server_thread.join().expect("server thread");
+    let resumed = ProductionWitnessRuntime::open(
+        &directory,
+        [43; 16],
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    )
+    .expect("resume");
+    assert_eq!(resumed.highest_sequence(), 1);
+    assert!(!resumed.effects_open());
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-server-idle-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let runtime = ProductionWitnessRuntime::open(
+        &directory,
+        [44; 16],
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    )
+    .expect("open");
+
+    let (ca, server_id, client_id) = issue_identities();
+    let server_config =
+        server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca.clone()])
+            .expect("server config");
+    let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
+        .expect("client config");
+    let server =
+        ProductionWitnessServer::bind("127.0.0.1:0".parse().expect("addr"), server_config, runtime)
+            .expect("bind");
+    let listen_addr = server.local_addr().expect("local addr");
+    let shutdown = ShutdownToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_thread = thread::spawn(move || {
+        server.serve_until(&shutdown_clone).expect("serve");
+    });
+
+    let idle = connect_retry(listen_addr).expect("idle connect");
+    let started = std::time::Instant::now();
+    let first = signed_request(1, [11; 16], b"vote", &key);
+    let stream = connect_retry(listen_addr).expect("vote connect");
+    let server_name = ServerName::try_from("witness.test").expect("server name");
+    let connection =
+        ClientConnection::new(Arc::new(client_config), server_name).expect("client TLS");
+    let mut tls = StreamOwned::new(connection, stream);
+    write_frame(&mut tls, &first);
+    assert_eq!(read_status(&mut tls), b"COMMITTED\n");
+    assert!(started.elapsed() < Duration::from_millis(200));
+    drop(idle);
+
+    shutdown.request();
+    server_thread.join().expect("server thread");
+    let resumed = ProductionWitnessRuntime::open(
+        &directory,
+        [44; 16],
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    )
+    .expect("resume");
+    assert_eq!(resumed.highest_sequence(), 1);
+    let _ = fs::remove_dir_all(directory);
+}

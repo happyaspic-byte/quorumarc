@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
@@ -10,6 +11,7 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
 use crate::protocol::{AdmissionError, AuthenticatedRequestJournal};
 use crate::signal::ShutdownToken;
+use crate::tls::MtlsServerConfig;
 
 /// Static three-member Witness membership.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,7 +110,8 @@ fn canonical_ip(address: IpAddr) -> IpAddr {
 }
 
 const WITNESS_IO_TIMEOUT: Duration = Duration::from_millis(500);
-const MAX_WITNESS_FRAME: usize = 65_536;
+const MAX_WITNESS_FRAME: usize =
+    8 + 2 + 1 + 4 * (1 + 128) + 16 + 8 + 8 + 8 + 8 + 32 + 4 + 65_536 + 64;
 
 /// Independent Witness that records authenticated votes without opening effects.
 #[derive(Debug)]
@@ -158,21 +161,21 @@ pub enum WitnessServerError {
 pub struct ProductionWitnessServer {
     listener: TcpListener,
     tls_config: Arc<ServerConfig>,
-    runtime: Mutex<ProductionWitnessRuntime>,
+    runtime: Arc<Mutex<ProductionWitnessRuntime>>,
 }
 
 impl ProductionWitnessServer {
     pub fn bind(
         addr: SocketAddr,
-        tls_config: ServerConfig,
+        tls_config: MtlsServerConfig,
         runtime: ProductionWitnessRuntime,
     ) -> Result<Self, WitnessServerError> {
         let listener =
             TcpListener::bind(addr).map_err(|_error| WitnessServerError::SocketBindFailed)?;
         Ok(Self {
             listener,
-            tls_config: Arc::new(tls_config),
-            runtime: Mutex::new(runtime),
+            tls_config: tls_config.into_arc(),
+            runtime: Arc::new(Mutex::new(runtime)),
         })
     }
 
@@ -189,7 +192,13 @@ impl ProductionWitnessServer {
         while !shutdown.is_requested() {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    let _ = self.serve_stream(stream);
+                    let tls_config = Arc::clone(&self.tls_config);
+                    let runtime = Arc::clone(&self.runtime);
+                    let _ = thread::Builder::new()
+                        .name("quorumarc-witness-conn".to_owned())
+                        .spawn(move || {
+                            let _ = serve_stream(stream, tls_config, runtime);
+                        });
                 }
                 Err(error)
                     if matches!(
@@ -204,39 +213,44 @@ impl ProductionWitnessServer {
         }
         Ok(())
     }
+}
 
-    fn serve_stream(&self, stream: TcpStream) -> Result<(), WitnessServerError> {
-        stream
-            .set_nonblocking(false)
-            .and_then(|()| stream.set_read_timeout(Some(WITNESS_IO_TIMEOUT)))
-            .and_then(|()| stream.set_write_timeout(Some(WITNESS_IO_TIMEOUT)))
-            .map_err(|_error| WitnessServerError::SocketServeFailed)?;
-        let connection = ServerConnection::new(Arc::clone(&self.tls_config))
-            .map_err(|_error| WitnessServerError::SocketServeFailed)?;
-        let mut tls = StreamOwned::new(connection, stream);
-        let mut length = [0_u8; 4];
-        tls.read_exact(&mut length)
-            .map_err(|_error| WitnessServerError::SocketServeFailed)?;
-        let frame_len = u32::from_be_bytes(length) as usize;
-        if frame_len == 0 || frame_len > MAX_WITNESS_FRAME {
-            return write_witness_response(&mut tls, b"MALFORMED\n");
-        }
-        let mut frame = vec![0_u8; frame_len];
-        tls.read_exact(&mut frame)
-            .map_err(|_error| WitnessServerError::SocketServeFailed)?;
-        let mut runtime = self
-            .runtime
+fn serve_stream(
+    stream: TcpStream,
+    tls_config: Arc<ServerConfig>,
+    runtime: Arc<Mutex<ProductionWitnessRuntime>>,
+) -> Result<(), WitnessServerError> {
+    stream
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(WITNESS_IO_TIMEOUT)))
+        .and_then(|()| stream.set_write_timeout(Some(WITNESS_IO_TIMEOUT)))
+        .map_err(|_error| WitnessServerError::SocketServeFailed)?;
+    let connection = ServerConnection::new(tls_config)
+        .map_err(|_error| WitnessServerError::SocketServeFailed)?;
+    let mut tls = StreamOwned::new(connection, stream);
+    let mut length = [0_u8; 4];
+    tls.read_exact(&mut length)
+        .map_err(|_error| WitnessServerError::SocketServeFailed)?;
+    let frame_len = u32::from_be_bytes(length) as usize;
+    if frame_len == 0 || frame_len > MAX_WITNESS_FRAME {
+        return write_witness_response(&mut tls, b"MALFORMED\n");
+    }
+    let mut frame = vec![0_u8; frame_len];
+    tls.read_exact(&mut frame)
+        .map_err(|_error| WitnessServerError::SocketServeFailed)?;
+    let response = {
+        let mut runtime = runtime
             .lock()
             .map_err(|_error| WitnessServerError::StateUnavailable)?;
-        let response = match runtime.admit_vote(&frame) {
+        match runtime.admit_vote(&frame) {
             Ok(ManagementOutcome::Committed) => b"COMMITTED\n".as_slice(),
             Ok(ManagementOutcome::AlreadyDurable) => b"ALREADY_DURABLE\n".as_slice(),
             Err(AdmissionError::Malformed) => b"MALFORMED\n".as_slice(),
             Err(AdmissionError::AuthenticationFailed) => b"AUTHENTICATION_FAILED\n".as_slice(),
             Err(AdmissionError::ReplayRefused) => b"REPLAY_REFUSED\n".as_slice(),
-        };
-        write_witness_response(&mut tls, response)
-    }
+        }
+    };
+    write_witness_response(&mut tls, response)
 }
 
 fn write_witness_response(

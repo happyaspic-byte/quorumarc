@@ -12,12 +12,30 @@ pub enum TlsConfigError {
     InvalidPrivateKey,
 }
 
+/// rustls server configuration that always requires a client certificate.
+#[derive(Debug)]
+pub struct MtlsServerConfig {
+    config: ServerConfig,
+}
+
+impl MtlsServerConfig {
+    #[must_use]
+    pub fn into_server_config(self) -> ServerConfig {
+        self.config
+    }
+
+    #[must_use]
+    pub fn into_arc(self) -> Arc<ServerConfig> {
+        Arc::new(self.config)
+    }
+}
+
 /// Builds an mTLS server configuration requiring client certificates signed by trusted roots.
 pub fn server_mtls_config(
     server_certificates: Vec<CertificateDer<'static>>,
     server_key: PrivateKeyDer<'static>,
     trusted_client_roots: Vec<CertificateDer<'static>>,
-) -> Result<ServerConfig, TlsConfigError> {
+) -> Result<MtlsServerConfig, TlsConfigError> {
     if server_certificates.is_empty() || trusted_client_roots.is_empty() {
         return Err(TlsConfigError::InvalidCertificateChain);
     }
@@ -30,10 +48,11 @@ pub fn server_mtls_config(
     let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
         .build()
         .map_err(|_error| TlsConfigError::InvalidRootStore)?;
-    ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+    let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(server_certificates, server_key)
-        .map_err(|_error| TlsConfigError::InvalidPrivateKey)
+        .map_err(|_error| TlsConfigError::InvalidPrivateKey)?;
+    Ok(MtlsServerConfig { config })
 }
 
 /// Builds an mTLS client configuration presenting a certificate signed by a trusted authority.
