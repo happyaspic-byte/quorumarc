@@ -101,6 +101,7 @@ enum Command {
     Status { config: Option<PathBuf> },
     Run(RunOptions),
     Health { config: Option<PathBuf> },
+    ValidateConfig { config: Option<PathBuf> },
     InspectProof(ProofOptions),
     InspectStore { store: PathBuf },
     SimulateFailure { scenario: Scenario, seed: u64 },
@@ -248,6 +249,7 @@ where
         Command::Status { config } => status(config.as_deref()),
         Command::Run(options) => run(options),
         Command::Health { config } => health(config.as_deref()),
+        Command::ValidateConfig { config } => validate_config(config.as_deref()),
         Command::InspectProof(options) => inspect_proof(options),
         Command::InspectStore { store } => inspect_store(&store),
         Command::SimulateFailure { scenario, seed } => simulate_failure(scenario, seed),
@@ -267,6 +269,9 @@ fn parse_command(arguments: &[OsString]) -> Result<Command, Failure> {
         }),
         "run" => parse_run_options(options).map(Command::Run),
         "health" => Ok(Command::Health {
+            config: parse_single_path_option(options, "--config")?,
+        }),
+        "validate-config" => Ok(Command::ValidateConfig {
             config: parse_single_path_option(options, "--config")?,
         }),
         "inspect-proof" => parse_proof_options(options).map(Command::InspectProof),
@@ -571,6 +576,59 @@ fn health(config_path: Option<&Path>) -> CliReport {
     }
 }
 
+fn validate_config(config_path: Option<&Path>) -> CliReport {
+    let Some(path) = config_path else {
+        return CliReport::refusal(
+            "validate-config",
+            "CONFIG_REQUIRED",
+            "validate-config requires an explicit --config file",
+            EXIT_CONFIG,
+        );
+    };
+    let bytes = match read_bounded(path, MAX_CONFIG_SIZE, "CONFIG") {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            return CliReport::refusal(
+                "validate-config",
+                failure.reason,
+                failure.detail,
+                failure.exit_code,
+            );
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            return CliReport::refusal(
+                "validate-config",
+                "CONFIG_INVALID_UTF8",
+                error.to_string(),
+                EXIT_CONFIG,
+            );
+        }
+    };
+    match quorumarc_service::config::ProductionConfig::parse(&text) {
+        Ok(config) => {
+            let fields = [
+                ("event", "validate-config".to_owned()),
+                ("status", "valid-effect-closed".to_owned()),
+                ("reason_code", "CONFIG_VALID_EFFECT_CLOSED".to_owned()),
+                ("cluster_id", config.cluster_id().to_owned()),
+                ("members", config.members().len().to_string()),
+                ("effect_gate", "closed".to_owned()),
+                ("authority", "denied".to_owned()),
+            ];
+            CliReport::output(json_record(&fields))
+        }
+        Err(error) => CliReport::refusal(
+            "validate-config",
+            error.reason_code(),
+            format!("{error:?}"),
+            EXIT_CONFIG,
+        ),
+    }
+}
+
 fn run(options: RunOptions) -> CliReport {
     let Some(config_path) = options.config.as_deref() else {
         return CliReport::refusal(
@@ -761,7 +819,7 @@ fn help() -> CliReport {
         ("status", "ok".to_owned()),
         (
             "usage",
-            "quorumarc-agent <status|run|health|inspect-proof|inspect-store|simulate-failure> [options]"
+            "quorumarc-agent <status|run|health|validate-config|inspect-proof|inspect-store|simulate-failure> [options]"
                 .to_owned(),
         ),
         ("effect_gate", "closed".to_owned()),
@@ -1410,6 +1468,80 @@ mod tests {
         let report = execute(["run"]);
         assert_eq!(report.exit_code(), EXIT_CONFIG);
         assert!(contains_reason(&report, "CONFIG_REQUIRED"));
+    }
+
+    #[test]
+    fn validate_config_requires_explicit_configuration() {
+        let report = execute(["validate-config"]);
+        assert_eq!(report.exit_code(), EXIT_CONFIG);
+        assert!(contains_reason(&report, "CONFIG_REQUIRED"));
+        assert!(contains_reason(&report, "effect_gate"));
+    }
+
+    #[test]
+    fn validate_config_refuses_shared_witness_automatic_promotion() {
+        let directory = temporary_directory("shared-witness");
+        if fs::create_dir_all(&directory).is_err() {
+            std::process::abort();
+        }
+        let path = directory.join("cluster.conf");
+        let text = r#"
+schema_version = "1"
+cluster_id = "prod-cluster"
+node_id = "node-a"
+workload_id = "orders-api"
+role = "data"
+listen = "172.30.1.22:7601"
+witness = "172.30.1.22:7602"
+store_dir = "/var/lib/quorumarc/authority"
+signing_key = "/etc/quorumarc/node-a.seed"
+automatic_promotion = true
+
+[fence]
+mechanism = "hardware-power"
+profile = "pdu-a"
+read_back = true
+
+[workload]
+unit = "orders-api.service"
+
+[effect]
+vip = "172.30.1.100/24"
+interface = "enp1s0"
+
+[[members]]
+id = "node-a"
+role = "data"
+address = "172.30.1.22:7601"
+failure_domain = "power-a"
+
+[[members]]
+id = "node-b"
+role = "data"
+address = "172.30.1.21:7601"
+failure_domain = "power-b"
+
+[[members]]
+id = "witness-a"
+role = "witness"
+address = "172.30.1.22:7602"
+failure_domain = "power-w"
+"#;
+        if fs::write(&path, text).is_err() {
+            std::process::abort();
+        }
+        let report = execute([
+            OsString::from("validate-config"),
+            OsString::from("--config"),
+            path.as_os_str().to_owned(),
+        ]);
+        assert_eq!(report.exit_code(), EXIT_CONFIG);
+        assert!(contains_reason(
+            &report,
+            "WITNESS_FAILURE_DOMAIN_NOT_INDEPENDENT"
+        ));
+        assert!(contains_reason(&report, "\"effect_gate\":\"closed\""));
+        let _cleanup_result = fs::remove_dir_all(directory);
     }
 
     #[test]
