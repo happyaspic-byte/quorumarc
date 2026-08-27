@@ -2,19 +2,24 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"QARCMJ01";
+use sha2::{Digest, Sha256};
+
+const MAGIC: &[u8; 8] = b"QARCMJ02";
+const CHECKSUM_DOMAIN: &[u8] = b"quorumarc/management-journal/v2\0";
 const IDENTITY_LEN: usize = 16;
 const OPERATION_ID_LEN: usize = 16;
 const DIGEST_LEN: usize = 32;
-const RECORD_LEN: usize = MAGIC.len() + IDENTITY_LEN + 8 + OPERATION_ID_LEN + DIGEST_LEN;
+const CHECKSUM_LEN: usize = 32;
+const HEADER_LEN: usize = MAGIC.len() + IDENTITY_LEN;
+const RECORD_BODY_LEN: usize = 8 + OPERATION_ID_LEN + DIGEST_LEN;
+const RECORD_LEN: usize = RECORD_BODY_LEN + CHECKSUM_LEN;
 
 /// Durable, restart-safe management anti-replay journal.
 #[derive(Debug)]
 pub struct ManagementJournal {
     path: PathBuf,
     identity: [u8; IDENTITY_LEN],
-    highest_sequence: u64,
-    last_operation: Option<ManagementOperation>,
+    operations: Vec<ManagementOperation>,
 }
 
 /// One signed management operation identity.
@@ -39,6 +44,7 @@ pub enum JournalError {
     ConflictingOperation,
     StaleSequence,
     InvalidOperation,
+    Corrupt,
     Io,
 }
 
@@ -49,7 +55,7 @@ impl ManagementOperation {
         operation_id: [u8; OPERATION_ID_LEN],
         digest: [u8; DIGEST_LEN],
     ) -> Result<Self, JournalError> {
-        if sequence == 0 {
+        if sequence == 0 || operation_id.iter().all(|byte| *byte == 0) {
             return Err(JournalError::InvalidOperation);
         }
         Ok(Self {
@@ -61,33 +67,49 @@ impl ManagementOperation {
 }
 
 impl ManagementJournal {
-    /// Opens or creates an identity-bound management journal.
+    /// Opens or creates an identity-bound append-only management journal.
     pub fn open(directory: &Path, identity: [u8; IDENTITY_LEN]) -> Result<Self, JournalError> {
         fs::create_dir_all(directory).map_err(|_error| JournalError::Io)?;
         let path = directory.join("management.journal");
-        if path.exists() {
-            let mut journal = recover(&path)?;
-            if journal.identity != identity {
-                return Err(JournalError::IdentityMismatch);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(&header(identity))
+                    .and_then(|()| file.sync_all())
+                    .map_err(|_error| JournalError::Io)?;
+                File::open(directory)
+                    .and_then(|parent| parent.sync_all())
+                    .map_err(|_error| JournalError::Io)?;
+                Ok(Self {
+                    path,
+                    identity,
+                    operations: Vec::new(),
+                })
             }
-            journal.path = path;
-            Ok(journal)
-        } else {
-            let journal = Self {
-                path,
-                identity,
-                highest_sequence: 0,
-                last_operation: None,
-            };
-            journal.persist()?;
-            Ok(journal)
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&path).map_err(|_error| JournalError::Io)?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(JournalError::Corrupt);
+                }
+                let (recovered_identity, operations) = recover(&path)?;
+                if recovered_identity != identity {
+                    return Err(JournalError::IdentityMismatch);
+                }
+                Ok(Self {
+                    path,
+                    identity,
+                    operations,
+                })
+            }
+            Err(_error) => Err(JournalError::Io),
         }
     }
 
     /// Highest committed sequence.
     #[must_use]
-    pub const fn highest_sequence(&self) -> u64 {
-        self.highest_sequence
+    pub fn highest_sequence(&self) -> u64 {
+        self.operations
+            .last()
+            .map_or(0, |operation| operation.sequence)
     }
 
     /// Records an exact-retry-safe management operation.
@@ -95,106 +117,118 @@ impl ManagementJournal {
         &mut self,
         operation: ManagementOperation,
     ) -> Result<ManagementOutcome, JournalError> {
-        if let Some(last) = self.last_operation {
-            if last.sequence == operation.sequence {
-                if last == operation {
-                    return Ok(ManagementOutcome::AlreadyDurable);
-                }
-                if last.operation_id == operation.operation_id {
-                    return Err(JournalError::ConflictingOperation);
-                }
-                return Err(JournalError::StaleSequence);
-            }
-            if operation.sequence <= last.sequence {
-                return Err(JournalError::StaleSequence);
-            }
-            if operation.sequence != last.sequence.saturating_add(1) {
-                return Err(JournalError::StaleSequence);
-            }
-        } else if operation.sequence != 1 {
+        if let Some(existing) = self
+            .operations
+            .iter()
+            .find(|existing| existing.operation_id == operation.operation_id)
+        {
+            return if *existing == operation {
+                Ok(ManagementOutcome::AlreadyDurable)
+            } else {
+                Err(JournalError::ConflictingOperation)
+            };
+        }
+        if let Some(existing) = self
+            .operations
+            .iter()
+            .find(|existing| existing.sequence == operation.sequence)
+        {
+            return if *existing == operation {
+                Ok(ManagementOutcome::AlreadyDurable)
+            } else {
+                Err(JournalError::StaleSequence)
+            };
+        }
+        let expected = self.highest_sequence().saturating_add(1);
+        if operation.sequence != expected {
             return Err(JournalError::StaleSequence);
         }
-        self.last_operation = Some(operation);
-        self.highest_sequence = operation.sequence;
-        self.persist()?;
-        Ok(ManagementOutcome::Committed)
-    }
 
-    fn persist(&self) -> Result<(), JournalError> {
-        let temporary = self.path.with_extension("journal.tmp");
+        let encoded = encode_record(self.identity, operation);
         let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&temporary)
+            .append(true)
+            .open(&self.path)
             .map_err(|_error| JournalError::Io)?;
-        file.write_all(&encode(self.identity, self.last_operation))
+        file.write_all(&encoded)
             .and_then(|()| file.sync_all())
             .map_err(|_error| JournalError::Io)?;
-        fs::rename(&temporary, &self.path).map_err(|_error| JournalError::Io)?;
-        if let Some(parent) = self.path.parent() {
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_error| JournalError::Io)?;
-        }
-        Ok(())
+        self.operations.push(operation);
+        Ok(ManagementOutcome::Committed)
     }
 }
 
-fn recover(path: &Path) -> Result<ManagementJournal, JournalError> {
+fn header(identity: [u8; IDENTITY_LEN]) -> [u8; HEADER_LEN] {
+    let mut bytes = [0_u8; HEADER_LEN];
+    bytes[..MAGIC.len()].copy_from_slice(MAGIC);
+    bytes[MAGIC.len()..].copy_from_slice(&identity);
+    bytes
+}
+
+fn recover(path: &Path) -> Result<([u8; IDENTITY_LEN], Vec<ManagementOperation>), JournalError> {
     let mut bytes = Vec::new();
     File::open(path)
         .and_then(|mut file| file.read_to_end(&mut bytes))
         .map_err(|_error| JournalError::Io)?;
-    if bytes.len() != RECORD_LEN || &bytes[..MAGIC.len()] != MAGIC {
-        return Err(JournalError::Io);
+    if bytes.len() < HEADER_LEN
+        || &bytes[..MAGIC.len()] != MAGIC
+        || (bytes.len() - HEADER_LEN) % RECORD_LEN != 0
+    {
+        return Err(JournalError::Corrupt);
     }
     let mut identity = [0_u8; IDENTITY_LEN];
-    identity.copy_from_slice(&bytes[MAGIC.len()..MAGIC.len() + IDENTITY_LEN]);
-    let sequence_offset = MAGIC.len() + IDENTITY_LEN;
-    let sequence = u64::from_be_bytes(
-        bytes[sequence_offset..sequence_offset + 8]
-            .try_into()
-            .map_err(|_error| JournalError::Io)?,
-    );
-    let mut operation_id = [0_u8; OPERATION_ID_LEN];
-    let id_offset = sequence_offset + 8;
-    operation_id.copy_from_slice(&bytes[id_offset..id_offset + OPERATION_ID_LEN]);
-    let mut digest = [0_u8; DIGEST_LEN];
-    let digest_offset = id_offset + OPERATION_ID_LEN;
-    digest.copy_from_slice(&bytes[digest_offset..digest_offset + DIGEST_LEN]);
-    let last_operation = if sequence == 0 {
-        None
-    } else {
-        Some(ManagementOperation {
-            sequence,
-            operation_id,
-            digest,
-        })
-    };
-    Ok(ManagementJournal {
-        path: path.to_path_buf(),
-        identity,
-        highest_sequence: sequence,
-        last_operation,
-    })
+    identity.copy_from_slice(&bytes[MAGIC.len()..HEADER_LEN]);
+    let mut operations = Vec::new();
+    for record in bytes[HEADER_LEN..].chunks_exact(RECORD_LEN) {
+        let operation = decode_record(identity, record)?;
+        let expected = u64::try_from(operations.len())
+            .map_err(|_error| JournalError::Corrupt)?
+            .saturating_add(1);
+        if operation.sequence != expected
+            || operations.iter().any(|existing: &ManagementOperation| {
+                existing.operation_id == operation.operation_id
+            })
+        {
+            return Err(JournalError::Corrupt);
+        }
+        operations.push(operation);
+    }
+    Ok((identity, operations))
 }
 
-fn encode(
-    identity: [u8; IDENTITY_LEN],
-    last_operation: Option<ManagementOperation>,
-) -> [u8; RECORD_LEN] {
+fn encode_record(identity: [u8; IDENTITY_LEN], operation: ManagementOperation) -> [u8; RECORD_LEN] {
     let mut bytes = [0_u8; RECORD_LEN];
-    bytes[..MAGIC.len()].copy_from_slice(MAGIC);
-    bytes[MAGIC.len()..MAGIC.len() + IDENTITY_LEN].copy_from_slice(&identity);
-    if let Some(operation) = last_operation {
-        let sequence_offset = MAGIC.len() + IDENTITY_LEN;
-        bytes[sequence_offset..sequence_offset + 8]
-            .copy_from_slice(&operation.sequence.to_be_bytes());
-        let id_offset = sequence_offset + 8;
-        bytes[id_offset..id_offset + OPERATION_ID_LEN].copy_from_slice(&operation.operation_id);
-        let digest_offset = id_offset + OPERATION_ID_LEN;
-        bytes[digest_offset..digest_offset + DIGEST_LEN].copy_from_slice(&operation.digest);
-    }
+    bytes[..8].copy_from_slice(&operation.sequence.to_be_bytes());
+    bytes[8..8 + OPERATION_ID_LEN].copy_from_slice(&operation.operation_id);
+    bytes[8 + OPERATION_ID_LEN..RECORD_BODY_LEN].copy_from_slice(&operation.digest);
+    let checksum = record_checksum(identity, &bytes[..RECORD_BODY_LEN]);
+    bytes[RECORD_BODY_LEN..].copy_from_slice(&checksum);
     bytes
+}
+
+fn decode_record(
+    identity: [u8; IDENTITY_LEN],
+    bytes: &[u8],
+) -> Result<ManagementOperation, JournalError> {
+    let expected = record_checksum(identity, &bytes[..RECORD_BODY_LEN]);
+    if bytes[RECORD_BODY_LEN..] != expected {
+        return Err(JournalError::Corrupt);
+    }
+    let sequence = u64::from_be_bytes(
+        bytes[..8]
+            .try_into()
+            .map_err(|_error| JournalError::Corrupt)?,
+    );
+    let mut operation_id = [0_u8; OPERATION_ID_LEN];
+    operation_id.copy_from_slice(&bytes[8..8 + OPERATION_ID_LEN]);
+    let mut digest = [0_u8; DIGEST_LEN];
+    digest.copy_from_slice(&bytes[8 + OPERATION_ID_LEN..RECORD_BODY_LEN]);
+    ManagementOperation::new(sequence, operation_id, digest)
+}
+
+fn record_checksum(identity: [u8; IDENTITY_LEN], body: &[u8]) -> [u8; CHECKSUM_LEN] {
+    let mut hasher = Sha256::new();
+    hasher.update(CHECKSUM_DOMAIN);
+    hasher.update(identity);
+    hasher.update(body);
+    hasher.finalize().into()
 }

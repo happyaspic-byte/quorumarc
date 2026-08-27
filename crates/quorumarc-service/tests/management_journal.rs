@@ -38,6 +38,14 @@ fn management_journal_persists_exact_retry_and_refuses_conflicts() {
         reopened.record(ManagementOperation::new(2, [12; 16], [25; 32]).expect("next")),
         Ok(ManagementOutcome::Committed)
     );
+    assert_eq!(
+        reopened.record(operation),
+        Ok(ManagementOutcome::AlreadyDurable)
+    );
+    assert_eq!(
+        reopened.record(ManagementOperation::new(3, [11; 16], [29; 32]).expect("reused id")),
+        Err(JournalError::ConflictingOperation)
+    );
 
     fs::remove_dir_all(directory).expect("remove journal fixture");
 }
