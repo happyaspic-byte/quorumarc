@@ -14,6 +14,7 @@
 mod codec;
 mod counter;
 mod error;
+mod generic_journal;
 mod replica;
 
 pub const MAX_WAL_RECORDS: u64 = 1_024;
@@ -24,4 +25,7 @@ pub use counter::{
     WorkloadProgress,
 };
 pub use error::{ReplicaError, Rpo0Error, WalCorruption};
+pub use generic_journal::{
+    GenericAcknowledgement, GenericJournal, GenericJournalError, GenericOperation, GenericProgress,
+};
 pub use replica::{DurableReceipt, Fault, FileReplica, MemoryReplica, ReplicaSink};
