@@ -76,6 +76,19 @@ fn sealed_segment_catch_up_installs_contiguous_tail_and_refuses_divergence() {
         follower.install_sealed_segment(&wrong_base),
         Err(GenericJournalError::RecoveryMismatch)
     ));
+    assert_eq!(follower.len(), 2);
+    assert_eq!(follower.recover().expect("progress").commit_index, 2);
+
+    let colliding_op = GenericOperation::new([2; 16], 2, b"entry-colliding").expect("op");
+    let colliding_segment =
+        SealedSegment::seal_chained(3, 3, 3, second.final_state_root(), &[colliding_op])
+            .expect("colliding");
+    assert!(matches!(
+        follower.install_sealed_segment(&colliding_segment),
+        Err(GenericJournalError::Corrupt)
+    ));
+    assert_eq!(follower.len(), 2);
+    assert_eq!(follower.recover().expect("progress").commit_index, 2);
 }
 
 #[test]
