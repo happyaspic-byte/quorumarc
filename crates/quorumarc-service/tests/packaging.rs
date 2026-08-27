@@ -11,6 +11,10 @@ fn read_unit(name: &str) -> String {
     fs::read_to_string(packaging_root().join("systemd").join(name)).expect("unit file")
 }
 
+fn read_debian(name: &str) -> String {
+    fs::read_to_string(packaging_root().join("debian").join(name)).expect("debian file")
+}
+
 #[test]
 fn agent_unit_is_sandboxed_and_starts_closed_daemon() {
     let unit = read_unit("quorumarc-agent.service");
@@ -66,4 +70,18 @@ fn sysusers_and_tmpfiles_create_least_privilege_paths() {
     );
     assert!(tmpfiles.contains("d /etc/quorumarc-agent 0750 root quorumarc"));
     assert!(tmpfiles.contains("d /etc/quorumarc-witness 0750 root quorumarc-witness"));
+}
+
+#[test]
+fn debian_packaging_declares_agent_and_witness_packages() {
+    let control = read_debian("control");
+    assert!(control.contains("Package: quorumarc-agent"));
+    assert!(control.contains("Package: quorumarc-witness"));
+    assert!(control.contains("Architecture: linux-any"));
+    assert!(control.contains("Depends: ${shlibs:Depends}, ${misc:Depends}"));
+    let rules = read_debian("rules");
+    assert!(rules.contains("override_dh_auto_test"));
+    let conffiles = read_debian("conffiles");
+    assert!(conffiles.contains("/etc/quorumarc-agent/agent.toml"));
+    assert!(conffiles.contains("/etc/quorumarc-witness/witness.toml"));
 }

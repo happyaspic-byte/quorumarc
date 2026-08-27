@@ -1,0 +1,16 @@
+Source: quorumarc
+Section: admin
+Priority: optional
+Maintainer: QuorumArc Contributors <maintainers@quorumarc.internal>
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13), cargo, rustc
+
+Package: quorumarc-agent
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: QuorumArc data-node HA management agent
+
+Package: quorumarc-witness
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: QuorumArc independent Witness service
