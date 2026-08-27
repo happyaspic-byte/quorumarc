@@ -7,6 +7,58 @@ use crate::model::{
 
 const ENVELOPE_MAGIC: &[u8; 8] = b"QARCENV\0";
 const SIGNED_MAGIC: &[u8; 8] = b"QARCSIG\0";
+const BINDING_MAGIC: &[u8; 8] = b"QARCBND\0";
+const VOTE_MAGIC: &[u8; 8] = b"QARCVOT\0";
+
+impl QuorumBinding {
+    /// Serializes one standalone quorum binding using the canonical production format.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, EnvelopeError> {
+        let mut writer = Writer::new();
+        writer.put_bytes(BINDING_MAGIC);
+        encode_binding(&mut writer, self)?;
+        writer.finish(MAX_ENVELOPE_SIZE)
+    }
+
+    /// Strictly decodes one standalone quorum binding.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, EnvelopeError> {
+        enforce_size(bytes.len(), MAX_ENVELOPE_SIZE)?;
+        let mut reader = Reader::new(bytes);
+        if reader.read_array::<8>()? != *BINDING_MAGIC {
+            return Err(EnvelopeError::InvalidMagic);
+        }
+        let binding = decode_binding(&mut reader)?;
+        reader.finish()?;
+        Ok(binding)
+    }
+}
+
+impl SignedVote {
+    /// Serializes the vote identity and Ed25519 signature without changing its bound statement.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, EnvelopeError> {
+        let mut writer = Writer::new();
+        writer.put_bytes(VOTE_MAGIC);
+        writer.put_id(self.voter_id())?;
+        writer.put_id(self.key_id())?;
+        writer.put_bytes(self.signature_bytes());
+        writer.finish(MAX_ENVELOPE_SIZE)
+    }
+
+    /// Strictly decodes one standalone signed vote.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, EnvelopeError> {
+        enforce_size(bytes.len(), MAX_ENVELOPE_SIZE)?;
+        let mut reader = Reader::new(bytes);
+        if reader.read_array::<8>()? != *VOTE_MAGIC {
+            return Err(EnvelopeError::InvalidMagic);
+        }
+        let vote = Self {
+            voter_id: reader.read_id()?,
+            key_id: reader.read_id()?,
+            signature: reader.read_array::<64>()?,
+        };
+        reader.finish()?;
+        Ok(vote)
+    }
+}
 
 /// Maximum accepted bytes for an unsigned canonical promotion envelope.
 pub const MAX_ENVELOPE_SIZE: usize = 49_152;

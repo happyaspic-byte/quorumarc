@@ -5,11 +5,17 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use quorumarc_runtime::{VoteReasonCode, WitnessOpenError, WitnessPolicy, WitnessVoteActor};
+use quorumarc_store::{FileBackend, StoreIdentity};
+use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SignedVote};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
-use crate::protocol::{AdmissionError, AuthenticatedRequestJournal};
+use crate::protocol::{
+    AdmissionError, AuthenticatedRequestJournal, ProductionFrame, ProductionFrameError,
+    ProductionFrameKind, ProductionVotePayload,
+};
 use crate::signal::ShutdownToken;
 use crate::tls::MtlsServerConfig;
 
@@ -113,11 +119,225 @@ const WITNESS_IO_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_WITNESS_CONNECTIONS: usize = 32;
 const MAX_WITNESS_FRAME: usize =
     8 + 2 + 1 + 4 * (1 + 128) + 16 + 8 + 8 + 8 + 8 + 32 + 4 + 65_536 + 64;
+const VOTE_REPLY_MAGIC: &[u8; 8] = b"QARCVR01";
+
+#[derive(Clone, Debug)]
+pub struct CandidateCredential {
+    node_id: CanonicalId,
+    key_id: CanonicalId,
+    verifying_key: VerifyingKey,
+}
+
+impl CandidateCredential {
+    pub fn new(
+        node_id: impl Into<String>,
+        key_id: impl Into<String>,
+        verifying_key: VerifyingKey,
+    ) -> Result<Self, ProductionFrameError> {
+        Ok(Self {
+            node_id: CanonicalId::new(node_id.into())
+                .map_err(|_error| ProductionFrameError::Malformed)?,
+            key_id: CanonicalId::new(key_id.into())
+                .map_err(|_error| ProductionFrameError::Malformed)?,
+            verifying_key,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProductionVoteReply {
+    binding: QuorumBinding,
+    code: VoteReasonCode,
+    signed_vote: Option<SignedVote>,
+    durable_generation: Option<u64>,
+}
+
+impl ProductionVoteReply {
+    #[must_use]
+    pub const fn binding(&self) -> &QuorumBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> VoteReasonCode {
+        self.code
+    }
+
+    #[must_use]
+    pub const fn signed_vote(&self) -> Option<&SignedVote> {
+        self.signed_vote.as_ref()
+    }
+
+    #[must_use]
+    pub const fn durable_generation(&self) -> Option<u64> {
+        self.durable_generation
+    }
+
+    #[must_use]
+    pub const fn is_granted(&self) -> bool {
+        self.code.is_granted()
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, ProductionVoteError> {
+        let binding = self
+            .binding
+            .to_canonical_bytes()
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let vote = self
+            .signed_vote
+            .as_ref()
+            .map(SignedVote::to_canonical_bytes)
+            .transpose()
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let binding_len =
+            u32::try_from(binding.len()).map_err(|_error| ProductionVoteError::Malformed)?;
+        let vote_len = u32::try_from(vote.as_ref().map_or(0, Vec::len))
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(VOTE_REPLY_MAGIC);
+        bytes.push(vote_reason_tag(self.code));
+        bytes.extend_from_slice(&self.durable_generation.unwrap_or(0).to_be_bytes());
+        bytes.extend_from_slice(&binding_len.to_be_bytes());
+        bytes.extend_from_slice(&binding);
+        bytes.extend_from_slice(&vote_len.to_be_bytes());
+        if let Some(vote) = vote {
+            bytes.extend_from_slice(&vote);
+        }
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProductionVoteError> {
+        let mut cursor = 0_usize;
+        if vote_reply_take(bytes, &mut cursor, VOTE_REPLY_MAGIC.len())? != VOTE_REPLY_MAGIC {
+            return Err(ProductionVoteError::Malformed);
+        }
+        let code = vote_reason_from_tag(vote_reply_take(bytes, &mut cursor, 1)?[0])?;
+        let durable_generation = u64::from_be_bytes(
+            vote_reply_take(bytes, &mut cursor, 8)?
+                .try_into()
+                .map_err(|_error| ProductionVoteError::Malformed)?,
+        );
+        let binding_len = u32::from_be_bytes(
+            vote_reply_take(bytes, &mut cursor, 4)?
+                .try_into()
+                .map_err(|_error| ProductionVoteError::Malformed)?,
+        ) as usize;
+        let binding =
+            QuorumBinding::from_canonical_bytes(vote_reply_take(bytes, &mut cursor, binding_len)?)
+                .map_err(|_error| ProductionVoteError::Malformed)?;
+        let vote_len = u32::from_be_bytes(
+            vote_reply_take(bytes, &mut cursor, 4)?
+                .try_into()
+                .map_err(|_error| ProductionVoteError::Malformed)?,
+        ) as usize;
+        let signed_vote = if vote_len == 0 {
+            None
+        } else {
+            Some(
+                SignedVote::from_canonical_bytes(vote_reply_take(bytes, &mut cursor, vote_len)?)
+                    .map_err(|_error| ProductionVoteError::Malformed)?,
+            )
+        };
+        if cursor != bytes.len()
+            || code.is_granted() != signed_vote.is_some()
+            || code.is_granted() != (durable_generation != 0)
+        {
+            return Err(ProductionVoteError::Malformed);
+        }
+        Ok(Self {
+            binding,
+            code,
+            signed_vote,
+            durable_generation: (durable_generation != 0).then_some(durable_generation),
+        })
+    }
+}
+
+fn vote_reason_tag(code: VoteReasonCode) -> u8 {
+    match code {
+        VoteReasonCode::GrantedDurablyRecorded => 1,
+        VoteReasonCode::GrantedAlreadyDurable => 2,
+        VoteReasonCode::RefusedMalformedBinding => 3,
+        VoteReasonCode::RefusedWorkloadMismatch => 4,
+        VoteReasonCode::RefusedPolicyMismatch => 5,
+        VoteReasonCode::RefusedCandidateNotAllowed => 6,
+        VoteReasonCode::RefusedLeaseTooLong => 7,
+        VoteReasonCode::RefusedStaleEpoch => 8,
+        VoteReasonCode::RefusedConflictSameEpoch => 9,
+        VoteReasonCode::RefusedEpochAlreadyAccepted => 10,
+        VoteReasonCode::RefusedStorePoisoned => 11,
+        VoteReasonCode::RefusedDurabilityIo => 12,
+        VoteReasonCode::RefusedStoreInvariant => 13,
+        VoteReasonCode::RefusedGenerationExhausted => 14,
+        VoteReasonCode::RefusedSigningFailure => 15,
+    }
+}
+
+fn vote_reason_from_tag(tag: u8) -> Result<VoteReasonCode, ProductionVoteError> {
+    match tag {
+        1 => Ok(VoteReasonCode::GrantedDurablyRecorded),
+        2 => Ok(VoteReasonCode::GrantedAlreadyDurable),
+        3 => Ok(VoteReasonCode::RefusedMalformedBinding),
+        4 => Ok(VoteReasonCode::RefusedWorkloadMismatch),
+        5 => Ok(VoteReasonCode::RefusedPolicyMismatch),
+        6 => Ok(VoteReasonCode::RefusedCandidateNotAllowed),
+        7 => Ok(VoteReasonCode::RefusedLeaseTooLong),
+        8 => Ok(VoteReasonCode::RefusedStaleEpoch),
+        9 => Ok(VoteReasonCode::RefusedConflictSameEpoch),
+        10 => Ok(VoteReasonCode::RefusedEpochAlreadyAccepted),
+        11 => Ok(VoteReasonCode::RefusedStorePoisoned),
+        12 => Ok(VoteReasonCode::RefusedDurabilityIo),
+        13 => Ok(VoteReasonCode::RefusedStoreInvariant),
+        14 => Ok(VoteReasonCode::RefusedGenerationExhausted),
+        15 => Ok(VoteReasonCode::RefusedSigningFailure),
+        _ => Err(ProductionVoteError::Malformed),
+    }
+}
+
+fn vote_reply_take<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], ProductionVoteError> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or(ProductionVoteError::Malformed)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(ProductionVoteError::Malformed)?;
+    *cursor = end;
+    Ok(value)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductionVoteError {
+    Malformed,
+    AuthenticationFailed,
+    UnsupportedRuntime,
+}
+
+enum RuntimeMode {
+    Management(Box<AuthenticatedRequestJournal>),
+    Vote {
+        cluster_id: String,
+        credentials: Vec<CandidateCredential>,
+        actor: WitnessVoteActor<FileBackend>,
+    },
+}
+
+impl std::fmt::Debug for RuntimeMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Management(_) => formatter.write_str("Management"),
+            Self::Vote { .. } => formatter.write_str("Vote"),
+        }
+    }
+}
 
 /// Independent Witness that records authenticated votes without opening effects.
 #[derive(Debug)]
 pub struct ProductionWitnessRuntime {
-    admission: AuthenticatedRequestJournal,
+    mode: RuntimeMode,
 }
 
 impl ProductionWitnessRuntime {
@@ -132,29 +352,130 @@ impl ProductionWitnessRuntime {
     ) -> Result<Self, JournalError> {
         let journal = ManagementJournal::open(directory, identity)?;
         Ok(Self {
-            admission: AuthenticatedRequestJournal::new(
+            mode: RuntimeMode::Management(Box::new(AuthenticatedRequestJournal::new(
                 journal,
                 cluster_id,
                 workload_id,
                 node_id,
                 key_id,
                 verifying_key,
-            ),
+            ))),
+        })
+    }
+
+    pub fn open_vote_actor(
+        directory: &Path,
+        store_identity: StoreIdentity,
+        policy: WitnessPolicy,
+        signing_key: SigningKey,
+        credentials: impl IntoIterator<Item = CandidateCredential>,
+    ) -> Result<Self, WitnessOpenError> {
+        let cluster_id = store_identity.cluster_id().to_owned();
+        let actor =
+            WitnessVoteActor::open(policy, signing_key, directory, store_identity, FileBackend)?;
+        Ok(Self {
+            mode: RuntimeMode::Vote {
+                cluster_id,
+                credentials: credentials.into_iter().collect(),
+                actor,
+            },
         })
     }
 
     pub fn admit_vote(&mut self, bytes: &[u8]) -> Result<ManagementOutcome, AdmissionError> {
-        self.admission.admit(bytes)
+        match &mut self.mode {
+            RuntimeMode::Management(admission) => admission.admit(bytes),
+            RuntimeMode::Vote { .. } => Err(AdmissionError::Malformed),
+        }
+    }
+
+    pub fn handle_vote(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ProductionVoteReply, ProductionVoteError> {
+        let RuntimeMode::Vote {
+            cluster_id,
+            credentials,
+            actor,
+        } = &mut self.mode
+        else {
+            return Err(ProductionVoteError::UnsupportedRuntime);
+        };
+        let frame = ProductionFrame::decode(bytes).map_err(map_vote_frame_error)?;
+        if frame.kind() != ProductionFrameKind::Request {
+            return Err(ProductionVoteError::Malformed);
+        }
+        let request = frame.request();
+        if request.cluster_id != *cluster_id {
+            return Err(ProductionVoteError::AuthenticationFailed);
+        }
+        let credential = credentials
+            .iter()
+            .find(|credential| {
+                credential.node_id.as_str() == request.node_id
+                    && credential.key_id.as_str() == request.key_id
+            })
+            .ok_or(ProductionVoteError::AuthenticationFailed)?;
+        frame
+            .verify(&credential.verifying_key)
+            .map_err(map_vote_frame_error)?;
+        let payload = ProductionVotePayload::decode(&request.payload)
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let binding = QuorumBinding {
+            protocol_version: PROTOCOL_VERSION,
+            message_id: MessageId::new(request.request_id),
+            workload_id: CanonicalId::new(request.workload_id.clone())
+                .map_err(|_error| ProductionVoteError::Malformed)?,
+            candidate_node_id: credential.node_id.clone(),
+            candidate_incarnation: request.incarnation,
+            epoch: request.epoch,
+            policy_hash: request.policy_hash,
+            required_commit: payload.required_commit(),
+            durable_commit: request.progress_commit,
+            state_root: payload.state_root(),
+            lease_not_before_ms: payload.lease_not_before_ms(),
+            lease_expires_at_ms: payload.lease_expires_at_ms(),
+        };
+        let reply = actor.handle_vote(&binding);
+        Ok(ProductionVoteReply {
+            binding,
+            code: reply.code(),
+            signed_vote: reply.signed_vote().cloned(),
+            durable_generation: reply.durable_generation(),
+        })
+    }
+
+    #[must_use]
+    pub const fn is_vote_mode(&self) -> bool {
+        matches!(self.mode, RuntimeMode::Vote { .. })
     }
 
     #[must_use]
     pub fn highest_sequence(&self) -> u64 {
-        self.admission.highest_sequence()
+        match &self.mode {
+            RuntimeMode::Management(admission) => admission.highest_sequence(),
+            RuntimeMode::Vote { actor, .. } => actor.durable_generation(),
+        }
+    }
+
+    #[must_use]
+    pub fn highest_epoch(&self) -> u64 {
+        match &self.mode {
+            RuntimeMode::Management(_) => 0,
+            RuntimeMode::Vote { actor, .. } => actor.highest_durable_epoch(),
+        }
     }
 
     #[must_use]
     pub const fn effects_open(&self) -> bool {
         false
+    }
+}
+
+fn map_vote_frame_error(error: ProductionFrameError) -> ProductionVoteError {
+    match error {
+        ProductionFrameError::Malformed => ProductionVoteError::Malformed,
+        ProductionFrameError::AuthenticationFailed => ProductionVoteError::AuthenticationFailed,
     }
 }
 
@@ -164,6 +485,7 @@ pub enum WitnessServerError {
     SocketBindFailed,
     SocketServeFailed,
     StateUnavailable,
+    InvalidRuntime,
 }
 
 /// Production Witness TCP server with rustls mTLS authentication.
@@ -180,6 +502,9 @@ impl ProductionWitnessServer {
         tls_config: MtlsServerConfig,
         runtime: ProductionWitnessRuntime,
     ) -> Result<Self, WitnessServerError> {
+        if !runtime.is_vote_mode() {
+            return Err(WitnessServerError::InvalidRuntime);
+        }
         let listener = TcpListener::bind(membership.witness_address())
             .map_err(|_error| WitnessServerError::SocketBindFailed)?;
         Ok(Self {
@@ -285,15 +610,18 @@ fn serve_stream(
         let mut runtime = runtime
             .lock()
             .map_err(|_error| WitnessServerError::StateUnavailable)?;
-        match runtime.admit_vote(&frame) {
-            Ok(ManagementOutcome::Committed) => b"COMMITTED\n".as_slice(),
-            Ok(ManagementOutcome::AlreadyDurable) => b"ALREADY_DURABLE\n".as_slice(),
-            Err(AdmissionError::Malformed) => b"MALFORMED\n".as_slice(),
-            Err(AdmissionError::AuthenticationFailed) => b"AUTHENTICATION_FAILED\n".as_slice(),
-            Err(AdmissionError::ReplayRefused) => b"REPLAY_REFUSED\n".as_slice(),
+        match runtime.handle_vote(&frame) {
+            Ok(reply) => reply
+                .encode()
+                .map_err(|_error| WitnessServerError::SocketServeFailed)?,
+            Err(ProductionVoteError::Malformed) => b"MALFORMED\n".to_vec(),
+            Err(ProductionVoteError::AuthenticationFailed) => b"AUTHENTICATION_FAILED\n".to_vec(),
+            Err(ProductionVoteError::UnsupportedRuntime) => {
+                return Err(WitnessServerError::InvalidRuntime);
+            }
         }
     };
-    write_witness_response(&mut tls, response)
+    write_witness_response(&mut tls, &response)
 }
 
 fn write_witness_response(

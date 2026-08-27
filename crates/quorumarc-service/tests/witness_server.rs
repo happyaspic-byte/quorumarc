@@ -14,12 +14,18 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::{ClientConnection, StreamOwned};
 
-use quorumarc_service::protocol::{ProductionFrame, ProductionFrameKind, ProductionRequest};
+use quorumarc_runtime::{VoteReasonCode, WitnessPolicy};
+use quorumarc_service::protocol::{
+    ProductionFrame, ProductionFrameKind, ProductionRequest, ProductionVotePayload,
+};
 use quorumarc_service::signal::ShutdownToken;
 use quorumarc_service::tls::{client_mtls_config, server_mtls_config};
 use quorumarc_service::witness::{
-    ProductionWitnessRuntime, ProductionWitnessServer, WitnessMembership,
+    CandidateCredential, ProductionVoteReply, ProductionWitnessRuntime, ProductionWitnessServer,
+    WitnessMembership,
 };
+use quorumarc_store::{StoreIdentity, StoreRole};
+use quorumarc_wire::CanonicalId;
 
 struct IssuedIdentity {
     certificate: CertificateDer<'static>,
@@ -121,6 +127,54 @@ fn membership() -> WitnessMembership {
     .expect("membership")
 }
 
+fn canonical_id(value: &str) -> CanonicalId {
+    CanonicalId::new(value).expect("canonical id")
+}
+
+fn vote_runtime(
+    directory: &std::path::Path,
+    node_a: &SigningKey,
+    node_b: &SigningKey,
+) -> ProductionWitnessRuntime {
+    let policy = WitnessPolicy::new(
+        canonical_id("witness-a"),
+        canonical_id("witness-2026-01"),
+        canonical_id("orders-api"),
+        [23; 32],
+        [canonical_id("node-a"), canonical_id("node-b")],
+        5_000,
+    )
+    .expect("policy");
+    let identity = StoreIdentity::new(
+        "prod-cluster",
+        "orders-api",
+        "witness-a",
+        StoreRole::Witness,
+        [51; 16],
+    )
+    .expect("identity");
+    ProductionWitnessRuntime::open_vote_actor(
+        directory,
+        identity,
+        policy,
+        SigningKey::from_bytes(&[29; 32]),
+        [
+            CandidateCredential::new("node-a", "node-a-2026-01", node_a.verifying_key())
+                .expect("node a"),
+            CandidateCredential::new("node-b", "node-b-2026-01", node_b.verifying_key())
+                .expect("node b"),
+        ],
+    )
+    .expect("vote runtime")
+}
+
+fn signed_vote_request(key: &SigningKey) -> Vec<u8> {
+    let payload = ProductionVotePayload::new([31; 32], 12, 10_000, 14_000)
+        .expect("payload")
+        .encode();
+    signed_request(1, [61; 16], &payload, key)
+}
+
 fn write_frame(tls: &mut StreamOwned<ClientConnection, TcpStream>, frame: &[u8]) {
     let len = u32::try_from(frame.len()).expect("len");
     tls.write_all(&len.to_be_bytes()).expect("write len");
@@ -138,46 +192,72 @@ fn read_status(tls: &mut StreamOwned<ClientConnection, TcpStream>) -> Vec<u8> {
 }
 
 #[test]
-fn production_witness_server_serves_authenticated_votes_over_mtls() {
-    let directory =
-        std::env::temp_dir().join(format!("quorumarc-witness-server-{}", std::process::id()));
+fn production_witness_server_returns_signed_policy_checked_vote_over_mtls() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-witness-signed-vote-{}",
+        std::process::id()
+    ));
     fs::create_dir_all(&directory).expect("directory");
-    let key = SigningKey::from_bytes(&[7_u8; 32]);
-    let runtime = ProductionWitnessRuntime::open(
-        &directory,
-        [41; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("open");
-    assert!(!runtime.effects_open());
-
+    let node_a = SigningKey::from_bytes(&[7_u8; 32]);
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &node_a, &node_b);
     let (ca, server_id, client_id) = issue_identities();
     let server_config =
         server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca.clone()])
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-
     let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
-    let server_thread = thread::spawn(move || {
-        server.serve_until(&shutdown_clone).expect("serve");
-    });
+    let server_thread = thread::spawn(move || server.serve_until(&shutdown_clone));
 
-    let first = signed_request(1, [11; 16], b"vote", &key);
+    let stream = connect_retry(listen_addr).expect("connect");
+    let server_name = ServerName::try_from("witness.test").expect("server name");
+    let connection =
+        ClientConnection::new(Arc::new(client_config), server_name).expect("client TLS");
+    let mut tls = StreamOwned::new(connection, stream);
+    write_frame(&mut tls, &signed_vote_request(&node_a));
+    let reply = ProductionVoteReply::decode(&read_status(&mut tls)).expect("vote reply");
+    assert_eq!(reply.code(), VoteReasonCode::GrantedDurablyRecorded);
+    assert!(reply.signed_vote().is_some());
+    assert_eq!(reply.binding().candidate_node_id.as_str(), "node-a");
+
+    shutdown.request();
+    server_thread.join().expect("server thread").expect("serve");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_witness_server_exact_vote_retry_returns_same_signed_vote() {
+    let directory =
+        std::env::temp_dir().join(format!("quorumarc-witness-retry-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("directory");
+    let node_a = SigningKey::from_bytes(&[7_u8; 32]);
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &node_a, &node_b);
+    let (ca, server_id, client_id) = issue_identities();
+    let server_config =
+        server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca.clone()])
+            .expect("server config");
+    let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
+        .expect("client config");
+    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
+    let listen_addr = server.local_addr().expect("local addr");
+    let shutdown = ShutdownToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_thread = thread::spawn(move || server.serve_until(&shutdown_clone));
+    let first = signed_vote_request(&node_a);
+
     let stream = connect_retry(listen_addr).expect("connect");
     let server_name = ServerName::try_from("witness.test").expect("server name");
     let connection =
         ClientConnection::new(Arc::new(client_config.clone()), server_name).expect("client TLS");
     let mut tls = StreamOwned::new(connection, stream);
     write_frame(&mut tls, &first);
-    assert_eq!(read_status(&mut tls), b"COMMITTED\n");
+    let committed = ProductionVoteReply::decode(&read_status(&mut tls)).expect("committed");
+    assert_eq!(committed.code(), VoteReasonCode::GrantedDurablyRecorded);
 
     let stream2 = connect_retry(listen_addr).expect("connect 2");
     let server_name2 = ServerName::try_from("witness.test").expect("server name");
@@ -185,23 +265,13 @@ fn production_witness_server_serves_authenticated_votes_over_mtls() {
         ClientConnection::new(Arc::new(client_config), server_name2).expect("client TLS 2");
     let mut tls2 = StreamOwned::new(connection2, stream2);
     write_frame(&mut tls2, &first);
-    assert_eq!(read_status(&mut tls2), b"ALREADY_DURABLE\n");
+    let retried = ProductionVoteReply::decode(&read_status(&mut tls2)).expect("retry");
+    assert_eq!(retried.code(), VoteReasonCode::GrantedAlreadyDurable);
+    assert_eq!(retried.signed_vote(), committed.signed_vote());
+    assert_eq!(retried.durable_generation(), committed.durable_generation());
 
     shutdown.request();
-    server_thread.join().expect("server thread");
-
-    let resumed = ProductionWitnessRuntime::open(
-        &directory,
-        [41; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("resume");
-    assert!(!resumed.effects_open());
-    assert_eq!(resumed.highest_sequence(), 1);
+    server_thread.join().expect("server thread").expect("serve");
     let _ = fs::remove_dir_all(directory);
 }
 
@@ -213,16 +283,8 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     ));
     fs::create_dir_all(&directory).expect("directory");
     let key = SigningKey::from_bytes(&[7_u8; 32]);
-    let runtime = ProductionWitnessRuntime::open(
-        &directory,
-        [42; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("open");
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &key, &node_b);
 
     let (trusted_ca, server_id, _) = issue_identities();
     let (_, _, untrusted_client) = issue_identities();
@@ -247,7 +309,7 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
         server.serve_until(&shutdown_clone).expect("serve");
     });
 
-    let first = signed_request(1, [11; 16], b"vote", &key);
+    let first = signed_vote_request(&key);
     let stream = connect_retry(listen_addr).expect("connect");
     let server_name = ServerName::try_from("witness.test").expect("server name");
     let connection =
@@ -265,39 +327,22 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     shutdown.request();
     server_thread.join().expect("server thread");
 
-    let resumed = ProductionWitnessRuntime::open(
-        &directory,
-        [42; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("resume");
-    assert_eq!(resumed.highest_sequence(), 0);
+    let resumed = vote_runtime(&directory, &key, &node_b);
+    assert_eq!(resumed.highest_epoch(), 0);
     assert!(!resumed.effects_open());
     let _ = fs::remove_dir_all(directory);
 }
 
 #[test]
-fn production_witness_server_commits_max_payload_signed_frame() {
+fn production_witness_server_rejects_non_vote_max_payload_without_advancing_epoch() {
     let directory = std::env::temp_dir().join(format!(
         "quorumarc-witness-server-max-payload-{}",
         std::process::id()
     ));
     fs::create_dir_all(&directory).expect("directory");
     let key = SigningKey::from_bytes(&[7_u8; 32]);
-    let runtime = ProductionWitnessRuntime::open(
-        &directory,
-        [43; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("open");
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &key, &node_b);
 
     let (ca, server_id, client_id) = issue_identities();
     let server_config =
@@ -322,21 +367,12 @@ fn production_witness_server_commits_max_payload_signed_frame() {
         ClientConnection::new(Arc::new(client_config), server_name).expect("client TLS");
     let mut tls = StreamOwned::new(connection, stream);
     write_frame(&mut tls, &first);
-    assert_eq!(read_status(&mut tls), b"COMMITTED\n");
+    assert_eq!(read_status(&mut tls), b"MALFORMED\n");
 
     shutdown.request();
     server_thread.join().expect("server thread");
-    let resumed = ProductionWitnessRuntime::open(
-        &directory,
-        [43; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("resume");
-    assert_eq!(resumed.highest_sequence(), 1);
+    let resumed = vote_runtime(&directory, &key, &node_b);
+    assert_eq!(resumed.highest_epoch(), 0);
     assert!(!resumed.effects_open());
     let _ = fs::remove_dir_all(directory);
 }
@@ -349,16 +385,8 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
     ));
     fs::create_dir_all(&directory).expect("directory");
     let key = SigningKey::from_bytes(&[7_u8; 32]);
-    let runtime = ProductionWitnessRuntime::open(
-        &directory,
-        [44; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("open");
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &key, &node_b);
 
     let (ca, server_id, client_id) = issue_identities();
     let server_config =
@@ -376,30 +404,22 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
 
     let idle = connect_retry(listen_addr).expect("idle connect");
     let started = std::time::Instant::now();
-    let first = signed_request(1, [11; 16], b"vote", &key);
+    let first = signed_vote_request(&key);
     let stream = connect_retry(listen_addr).expect("vote connect");
     let server_name = ServerName::try_from("witness.test").expect("server name");
     let connection =
         ClientConnection::new(Arc::new(client_config), server_name).expect("client TLS");
     let mut tls = StreamOwned::new(connection, stream);
     write_frame(&mut tls, &first);
-    assert_eq!(read_status(&mut tls), b"COMMITTED\n");
+    let reply = ProductionVoteReply::decode(&read_status(&mut tls)).expect("vote reply");
+    assert_eq!(reply.code(), VoteReasonCode::GrantedDurablyRecorded);
     assert!(started.elapsed() < Duration::from_millis(200));
     drop(idle);
 
     shutdown.request();
     server_thread.join().expect("server thread");
-    let resumed = ProductionWitnessRuntime::open(
-        &directory,
-        [44; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("resume");
-    assert_eq!(resumed.highest_sequence(), 1);
+    let resumed = vote_runtime(&directory, &key, &node_b);
+    assert_eq!(resumed.highest_epoch(), 4);
     let _ = fs::remove_dir_all(directory);
 }
 
@@ -411,16 +431,8 @@ fn production_witness_server_shutdown_closes_and_joins_idle_workers() {
     ));
     fs::create_dir_all(&directory).expect("directory");
     let key = SigningKey::from_bytes(&[7_u8; 32]);
-    let runtime = ProductionWitnessRuntime::open(
-        &directory,
-        [45; 16],
-        "prod-cluster",
-        "orders-api",
-        "node-a",
-        "node-a-2026-01",
-        key.verifying_key(),
-    )
-    .expect("open");
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let runtime = vote_runtime(&directory, &key, &node_b);
     let (ca, server_id, _) = issue_identities();
     let server_config = server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca])
         .expect("server config");

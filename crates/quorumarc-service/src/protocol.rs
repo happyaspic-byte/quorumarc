@@ -11,6 +11,8 @@ const SIGNATURE_LEN: usize = 64;
 const MAX_ID_LEN: usize = 128;
 const MAX_PAYLOAD_LEN: usize = 65_536;
 const SIGNATURE_DOMAIN: &[u8] = b"quorumarc/production-rpc/ed25519/v2\0";
+const VOTE_PAYLOAD_MAGIC: &[u8; 8] = b"QARCVP01";
+const VOTE_PAYLOAD_LEN: usize = VOTE_PAYLOAD_MAGIC.len() + 32 + 8 + 8 + 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionFrameKind {
@@ -31,6 +33,79 @@ pub struct ProductionRequest {
     pub progress_commit: u64,
     pub policy_hash: [u8; 32],
     pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProductionVotePayload {
+    state_root: [u8; 32],
+    required_commit: u64,
+    lease_not_before_ms: u64,
+    lease_expires_at_ms: u64,
+}
+
+impl ProductionVotePayload {
+    pub fn new(
+        state_root: [u8; 32],
+        required_commit: u64,
+        lease_not_before_ms: u64,
+        lease_expires_at_ms: u64,
+    ) -> Result<Self, ProductionFrameError> {
+        if state_root.iter().all(|byte| *byte == 0) || lease_not_before_ms >= lease_expires_at_ms {
+            return Err(ProductionFrameError::Malformed);
+        }
+        Ok(Self {
+            state_root,
+            required_commit,
+            lease_not_before_ms,
+            lease_expires_at_ms,
+        })
+    }
+
+    #[must_use]
+    pub fn encode(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(VOTE_PAYLOAD_LEN);
+        bytes.extend_from_slice(VOTE_PAYLOAD_MAGIC);
+        bytes.extend_from_slice(&self.state_root);
+        bytes.extend_from_slice(&self.required_commit.to_be_bytes());
+        bytes.extend_from_slice(&self.lease_not_before_ms.to_be_bytes());
+        bytes.extend_from_slice(&self.lease_expires_at_ms.to_be_bytes());
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProductionFrameError> {
+        if bytes.len() != VOTE_PAYLOAD_LEN
+            || &bytes[..VOTE_PAYLOAD_MAGIC.len()] != VOTE_PAYLOAD_MAGIC
+        {
+            return Err(ProductionFrameError::Malformed);
+        }
+        let mut cursor = VOTE_PAYLOAD_MAGIC.len();
+        Self::new(
+            read_array(bytes, &mut cursor)?,
+            read_u64(bytes, &mut cursor)?,
+            read_u64(bytes, &mut cursor)?,
+            read_u64(bytes, &mut cursor)?,
+        )
+    }
+
+    #[must_use]
+    pub const fn state_root(self) -> [u8; 32] {
+        self.state_root
+    }
+
+    #[must_use]
+    pub const fn required_commit(self) -> u64 {
+        self.required_commit
+    }
+
+    #[must_use]
+    pub const fn lease_not_before_ms(self) -> u64 {
+        self.lease_not_before_ms
+    }
+
+    #[must_use]
+    pub const fn lease_expires_at_ms(self) -> u64 {
+        self.lease_expires_at_ms
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
