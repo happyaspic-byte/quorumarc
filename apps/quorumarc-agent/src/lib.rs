@@ -1857,6 +1857,9 @@ listen = "172.30.1.22:7601"
 witness = "172.30.1.22:7602"
 store_dir = "/var/lib/quorumarc/authority"
 signing_key = "/etc/quorumarc/node-a.seed"
+key_id = "node-a-2026-01"
+policy_hash = "1717171717171717171717171717171717171717171717171717171717171717"
+max_lease_duration_ms = 5000
 automatic_promotion = true
 
 [tls]
@@ -1882,18 +1885,24 @@ id = "node-a"
 role = "data"
 address = "172.30.1.22:7601"
 failure_domain = "power-a"
+key_id = "node-a-2026-01"
+public_key = "/etc/quorumarc/keys/node-a.pub"
 
 [[members]]
 id = "node-b"
 role = "data"
 address = "172.30.1.21:7601"
 failure_domain = "power-b"
+key_id = "node-b-2026-01"
+public_key = "/etc/quorumarc/keys/node-b.pub"
 
 [[members]]
 id = "witness-a"
 role = "witness"
 address = "172.30.1.22:7602"
 failure_domain = "power-w"
+key_id = "witness-2026-01"
+public_key = "/etc/quorumarc/keys/witness-a.pub"
 "#;
         if fs::write(&path, text).is_err() {
             std::process::abort();

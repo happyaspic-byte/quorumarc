@@ -22,6 +22,9 @@ pub struct ProductionConfig {
     witness: SocketAddr,
     store_dir: PathBuf,
     signing_key: PathBuf,
+    key_id: String,
+    policy_hash: String,
+    max_lease_duration_ms: u64,
     #[serde(default)]
     automatic_promotion: bool,
     #[serde(default = "default_log_level")]
@@ -71,6 +74,8 @@ pub struct MemberConfig {
     pub role: String,
     pub address: SocketAddr,
     pub failure_domain: String,
+    pub key_id: String,
+    pub public_key: PathBuf,
 }
 
 /// Typed production-configuration refusal.
@@ -156,6 +161,17 @@ impl ProductionConfig {
         if !config.signing_key.is_absolute() {
             return Err(ConfigError::PathMustBeAbsolute("signing_key".to_owned()));
         }
+        if !valid_identifier(&config.key_id) {
+            return Err(ConfigError::InvalidValue("key_id".to_owned()));
+        }
+        if decode_policy_hash(&config.policy_hash).is_none() {
+            return Err(ConfigError::InvalidValue("policy_hash".to_owned()));
+        }
+        if config.max_lease_duration_ms == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_lease_duration_ms".to_owned(),
+            ));
+        }
         if !config.tls.certificate_chain.is_absolute() {
             return Err(ConfigError::PathMustBeAbsolute(
                 "tls.certificate_chain".to_owned(),
@@ -216,8 +232,25 @@ impl ProductionConfig {
             .collect();
         let member_addresses: BTreeSet<_> =
             config.members.iter().map(|member| member.address).collect();
+        let member_key_ids: BTreeSet<_> = config
+            .members
+            .iter()
+            .map(|member| member.key_id.as_str())
+            .collect();
+        let member_public_keys: BTreeSet<_> = config
+            .members
+            .iter()
+            .map(|member| member.public_key.as_path())
+            .collect();
         if member_ids.len() != config.members.len()
             || member_addresses.len() != config.members.len()
+            || member_key_ids.len() != config.members.len()
+            || member_public_keys.len() != config.members.len()
+            || config.members.iter().any(|member| {
+                !valid_identifier(&member.id)
+                    || !valid_identifier(&member.key_id)
+                    || !member.public_key.is_absolute()
+            })
         {
             return Err(ConfigError::InvalidTopology);
         }
@@ -228,7 +261,10 @@ impl ProductionConfig {
         else {
             return Err(ConfigError::LocalIdentityMismatch);
         };
-        if local.role != config.role || local.address != config.listen {
+        if local.role != config.role
+            || local.address != config.listen
+            || local.key_id != config.key_id
+        {
             return Err(ConfigError::LocalIdentityMismatch);
         }
         let Some(witness_member) = config
@@ -378,6 +414,21 @@ impl ProductionConfig {
         &self.role
     }
 
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    #[must_use]
+    pub fn policy_hash(&self) -> [u8; 32] {
+        decode_policy_hash(&self.policy_hash).unwrap_or([0; 32])
+    }
+
+    #[must_use]
+    pub const fn max_lease_duration_ms(&self) -> u64 {
+        self.max_lease_duration_ms
+    }
+
     /// Local durable store directory.
     #[must_use]
     pub fn store_dir(&self) -> &std::path::Path {
@@ -465,5 +516,38 @@ fn canonical_ip(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
         IpAddr::V4(_) => address,
+    }
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn decode_policy_hash(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || value.bytes().any(|byte| !byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, slot) in decoded.iter_mut().enumerate() {
+        let high = hex_nibble(value.as_bytes()[index * 2])?;
+        let low = hex_nibble(value.as_bytes()[index * 2 + 1])?;
+        *slot = (high << 4) | low;
+    }
+    if decoded.iter().all(|byte| *byte == 0) {
+        return None;
+    }
+    Some(decoded)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }

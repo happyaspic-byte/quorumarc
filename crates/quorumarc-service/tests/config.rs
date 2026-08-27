@@ -18,6 +18,9 @@ listen = "172.30.1.22:7601"
 witness = "172.30.1.23:7602"
 store_dir = "/var/lib/quorumarc/authority"
 signing_key = "/etc/quorumarc/node-a.seed"
+key_id = "node-a-2026-01"
+policy_hash = "1717171717171717171717171717171717171717171717171717171717171717"
+max_lease_duration_ms = 5000
 automatic_promotion = true
 
 [tls]
@@ -43,18 +46,24 @@ id = "node-a"
 role = "data"
 address = "172.30.1.22:7601"
 failure_domain = "power-a"
+key_id = "node-a-2026-01"
+public_key = "/etc/quorumarc/keys/node-a.pub"
 
 [[members]]
 id = "node-b"
 role = "data"
 address = "172.30.1.21:7601"
 failure_domain = "power-b"
+key_id = "node-b-2026-01"
+public_key = "/etc/quorumarc/keys/node-b.pub"
 
 [[members]]
 id = "witness-a"
 role = "witness"
 address = "172.30.1.23:7602"
 failure_domain = "power-w"
+key_id = "witness-2026-01"
+public_key = "/etc/quorumarc/keys/witness-a.pub"
 "#;
 
 #[test]
@@ -63,6 +72,19 @@ fn production_config_accepts_exact_three_member_hardware_fenced_profile() {
     assert_eq!(config.cluster_id(), "prod-cluster");
     assert_eq!(config.members().len(), 3);
     assert!(config.automatic_promotion());
+    assert_eq!(config.key_id(), "node-a-2026-01");
+    assert_eq!(config.policy_hash(), [23; 32]);
+    assert_eq!(config.max_lease_duration_ms(), 5_000);
+    let node_b = config
+        .members()
+        .iter()
+        .find(|member| member.id == "node-b")
+        .expect("node b");
+    assert_eq!(node_b.key_id, "node-b-2026-01");
+    assert_eq!(
+        node_b.public_key,
+        std::path::Path::new("/etc/quorumarc/keys/node-b.pub")
+    );
     assert_eq!(config.effect_gate_state(), "closed");
 }
 
