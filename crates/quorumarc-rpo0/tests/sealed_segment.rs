@@ -3,7 +3,7 @@
 use std::fs;
 
 use quorumarc_rpo0::{
-    GenericJournalError, GenericOperation, GenericSegmentManifest, SealedSegment,
+    FileSegmentStore, GenericJournalError, GenericOperation, GenericSegmentManifest, SealedSegment,
 };
 
 #[test]
@@ -89,6 +89,41 @@ fn sealed_segment_catch_up_installs_contiguous_tail_and_refuses_divergence() {
     ));
     assert_eq!(follower.len(), 2);
     assert_eq!(follower.recover().expect("progress").commit_index, 2);
+}
+
+#[test]
+fn file_segment_store_persists_sealed_segments_and_recovers_exact_progress() {
+    let directory =
+        std::env::temp_dir().join(format!("quorumarc-segment-store-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("directory");
+
+    let mut store = FileSegmentStore::open(&directory).expect("open store");
+    assert_eq!(store.highest_segment_id(), 0);
+    assert_eq!(store.highest_commit(), 0);
+
+    let op1 = GenericOperation::new([1; 16], 0, b"entry-1").expect("op1");
+    let first = SealedSegment::seal(1, 1, 1, &[op1]).expect("first");
+    store.persist_sealed_segment(&first).expect("persist 1");
+    assert_eq!(store.highest_segment_id(), 1);
+    assert_eq!(store.highest_commit(), 1);
+
+    let op2 = GenericOperation::new([2; 16], 1, b"entry-2").expect("op2");
+    let second =
+        SealedSegment::seal_chained(2, 2, 2, first.final_state_root(), &[op2]).expect("second");
+    store.persist_sealed_segment(&second).expect("persist 2");
+    assert_eq!(store.highest_segment_id(), 2);
+    assert_eq!(store.highest_commit(), 2);
+    drop(store);
+
+    let reopened = FileSegmentStore::open(&directory).expect("reopen store");
+    assert_eq!(reopened.highest_segment_id(), 2);
+    assert_eq!(reopened.highest_commit(), 2);
+    let loaded_first = reopened.read_segment(1).expect("read 1");
+    assert_eq!(loaded_first, first);
+    let loaded_second = reopened.read_segment(2).expect("read 2");
+    assert_eq!(loaded_second, second);
+
+    let _ = fs::remove_dir_all(directory);
 }
 
 #[test]

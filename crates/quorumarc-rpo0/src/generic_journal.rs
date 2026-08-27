@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -1083,6 +1083,181 @@ impl GenericSegmentManifest {
             base_root,
             final_state_root,
             checksum,
+        })
+    }
+}
+
+/// Durable, restart-safe on-disk store for sealed segments and manifests.
+#[derive(Debug)]
+pub struct FileSegmentStore {
+    directory: PathBuf,
+    manifests: BTreeMap<u64, GenericSegmentManifest>,
+}
+
+impl FileSegmentStore {
+    /// Opens or recovers a segment store directory.
+    pub fn open(directory: impl Into<PathBuf>) -> Result<Self, GenericJournalError> {
+        let directory = directory.into();
+        std::fs::create_dir_all(&directory)
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        let mut manifests = BTreeMap::new();
+        let mut highest_id = 0_u64;
+        let mut expected_commit = 1_u64;
+        let mut expected_root = [0_u8; 32];
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?
+        {
+            let entry = entry.map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if let Some(suffix) = name.strip_prefix("segment-") {
+                if let Some(id_str) = suffix.strip_suffix(".manifest") {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        let manifest_path = entry.path();
+                        let mut file = File::open(&manifest_path)
+                            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+                        let mut bytes = [0_u8; MANIFEST_LEN];
+                        file.read_exact(&mut bytes)
+                            .map_err(|_error| GenericJournalError::Corrupt)?;
+                        let manifest = GenericSegmentManifest::decode(&bytes)?;
+                        if manifest.segment_id != id {
+                            return Err(GenericJournalError::Corrupt);
+                        }
+                        manifests.insert(id, manifest);
+                    }
+                }
+            }
+        }
+        for (id, manifest) in &manifests {
+            if *id != highest_id.saturating_add(1) {
+                return Err(GenericJournalError::Corrupt);
+            }
+            if manifest.start_commit != expected_commit || manifest.base_root != expected_root {
+                return Err(GenericJournalError::Corrupt);
+            }
+            let segment_path = directory.join(format!("segment-{id}.wal"));
+            let mut file = File::open(&segment_path)
+                .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+            let mut records = Vec::new();
+            file.read_to_end(&mut records)
+                .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+            let progress = recover_bytes_with_base(
+                &records,
+                manifest.start_commit.saturating_sub(1),
+                manifest.base_root,
+            )?;
+            if progress.commit_index != manifest.end_commit
+                || progress.state_root != manifest.final_state_root
+            {
+                return Err(GenericJournalError::Corrupt);
+            }
+            let mut hasher = Sha256::new();
+            hasher.update(SEGMENT_DOMAIN);
+            hasher.update(manifest.segment_id.to_be_bytes());
+            hasher.update(manifest.start_commit.to_be_bytes());
+            hasher.update(manifest.end_commit.to_be_bytes());
+            hasher.update(manifest.record_count.to_be_bytes());
+            hasher.update(manifest.base_root);
+            hasher.update(manifest.final_state_root);
+            hasher.update(&records);
+            let checksum: [u8; 32] = hasher.finalize().into();
+            if checksum != manifest.checksum {
+                return Err(GenericJournalError::Corrupt);
+            }
+            highest_id = *id;
+            expected_commit = manifest.end_commit.saturating_add(1);
+            expected_root = manifest.final_state_root;
+        }
+        Ok(Self {
+            directory,
+            manifests,
+        })
+    }
+
+    #[must_use]
+    pub fn highest_segment_id(&self) -> u64 {
+        self.manifests.keys().last().copied().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn highest_commit(&self) -> u64 {
+        self.manifests
+            .values()
+            .last()
+            .map_or(0, |manifest| manifest.end_commit)
+    }
+
+    pub fn persist_sealed_segment(
+        &mut self,
+        segment: &SealedSegment,
+    ) -> Result<(), GenericJournalError> {
+        let expected_id = self.highest_segment_id().saturating_add(1);
+        if segment.segment_id != expected_id {
+            return Err(GenericJournalError::RecoveryMismatch);
+        }
+        let expected_commit = self.highest_commit().saturating_add(1);
+        if segment.start_commit != expected_commit {
+            return Err(GenericJournalError::RecoveryMismatch);
+        }
+        let expected_root = self
+            .manifests
+            .values()
+            .last()
+            .map_or([0; 32], |manifest| manifest.final_state_root);
+        if segment.base_root != expected_root {
+            return Err(GenericJournalError::RecoveryMismatch);
+        }
+        let manifest = segment.manifest();
+        let segment_path = self
+            .directory
+            .join(format!("segment-{}.wal", segment.segment_id));
+        let manifest_path = self
+            .directory
+            .join(format!("segment-{}.manifest", segment.segment_id));
+        let mut segment_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&segment_path)
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        segment_file
+            .write_all(&segment.records)
+            .and_then(|()| segment_file.sync_all())
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        let mut manifest_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&manifest_path)
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        manifest_file
+            .write_all(&manifest.encode())
+            .and_then(|()| manifest_file.sync_all())
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        sync_parent_directory(&self.directory)?;
+        self.manifests.insert(segment.segment_id, manifest);
+        Ok(())
+    }
+
+    pub fn read_segment(&self, segment_id: u64) -> Result<SealedSegment, GenericJournalError> {
+        let manifest = self
+            .manifests
+            .get(&segment_id)
+            .ok_or(GenericJournalError::ReplicaUnavailable)?;
+        let segment_path = self.directory.join(format!("segment-{segment_id}.wal"));
+        let mut file =
+            File::open(&segment_path).map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        let mut records = Vec::new();
+        file.read_to_end(&mut records)
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        Ok(SealedSegment {
+            segment_id: manifest.segment_id,
+            start_commit: manifest.start_commit,
+            end_commit: manifest.end_commit,
+            base_root: manifest.base_root,
+            final_state_root: manifest.final_state_root,
+            records,
+            checksum: manifest.checksum,
         })
     }
 }
