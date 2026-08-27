@@ -299,6 +299,33 @@ fn production_store_lock_refuses_second_holder_until_release() {
     let _ = fs::remove_dir_all(directory);
 }
 
+#[test]
+fn production_prerequisites_refuse_zero_seed_and_symlink_key() {
+    let (directory, config_text) = isolated_production_config();
+    let store = directory.join("store");
+    let key = directory.join("node.seed");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    fs::write(&key, [0_u8; 32]).expect("zero key");
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).expect("key mode");
+    let config = ProductionConfig::parse(&config_text).expect("parse");
+    assert!(matches!(
+        config.verify_local_prerequisites(),
+        Err(ConfigError::SigningKeyUnavailable)
+    ));
+
+    let material = directory.join("material.seed");
+    fs::write(&material, [7_u8; 32]).expect("material");
+    fs::set_permissions(&material, fs::Permissions::from_mode(0o600)).expect("material mode");
+    fs::remove_file(&key).expect("remove zero key");
+    symlink(&material, &key).expect("symlink key");
+    assert!(matches!(
+        config.verify_local_prerequisites(),
+        Err(ConfigError::SigningKeyUnavailable)
+    ));
+    let _ = fs::remove_dir_all(directory);
+}
+
 fn isolated_production_config() -> (std::path::PathBuf, String) {
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(

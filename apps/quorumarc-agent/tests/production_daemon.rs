@@ -343,6 +343,36 @@ fn production_daemon_refuses_stored_boot_identity_change() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[test]
+fn production_daemon_refuses_all_zero_signing_key() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-zero-key-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    fs::write(&config, production_config_with_prerequisites(&directory)?)?;
+    fs::write(directory.join("node.seed"), [0_u8; 32])?;
+    fs::set_permissions(
+        directory.join("node.seed"),
+        fs::Permissions::from_mode(0o600),
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(!output.status.success());
+    assert!(stderr.contains("CONFIG_SIGNING_KEY_UNAVAILABLE"));
+    assert!(stderr.contains("\"effect_gate\":\"closed\""));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
 fn production_config_with_prerequisites(
     directory: &std::path::Path,
 ) -> Result<String, Box<dyn Error>> {

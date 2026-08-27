@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
-use rustix::fs::{FlockOperation, flock};
+use rustix::fs::{FlockOperation, OFlags, flock};
 use serde::Deserialize;
 
 /// Strict production cluster configuration.
@@ -257,13 +257,28 @@ impl ProductionConfig {
             return Err(ConfigError::StoreUnavailable);
         }
 
-        let key = std::fs::symlink_metadata(&self.signing_key)
+        let mut key = OpenOptions::new()
+            .read(true)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+            .open(&self.signing_key)
             .map_err(|_error| ConfigError::SigningKeyUnavailable)?;
-        if !key.file_type().is_file()
-            || key.file_type().is_symlink()
-            || key.permissions().mode() & 0o077 != 0
-            || key.len() != 32
-        {
+        let metadata = key
+            .metadata()
+            .map_err(|_error| ConfigError::SigningKeyUnavailable)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(ConfigError::SigningKeyUnavailable);
+        }
+        let mut seed = [0_u8; 33];
+        let read = key
+            .read(&mut seed)
+            .map_err(|_error| ConfigError::SigningKeyUnavailable)?;
+        if read != 32 || seed[..32].iter().all(|byte| *byte == 0) {
+            return Err(ConfigError::SigningKeyUnavailable);
+        }
+        let extra = key
+            .read(&mut seed[32..])
+            .map_err(|_error| ConfigError::SigningKeyUnavailable)?;
+        if extra != 0 {
             return Err(ConfigError::SigningKeyUnavailable);
         }
         Ok(())
