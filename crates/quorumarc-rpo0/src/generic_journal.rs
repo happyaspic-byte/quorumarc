@@ -15,6 +15,9 @@ const MAX_RECORD_LEN: usize = HEADER_LEN + MAX_PAYLOAD + CHECKSUM_LEN;
 const MAX_WAL_BYTES: usize = crate::MAX_WAL_RECORDS as usize * MAX_RECORD_LEN;
 const ROOT_DOMAIN: &[u8] = b"quorumarc/generic-journal/state-root/v1\0";
 const RECORD_DOMAIN: &[u8] = b"quorumarc/generic-journal/record/v1\0";
+const SEGMENT_DOMAIN: &[u8] = b"quorumarc/generic-journal/sealed-segment/v1\0";
+const MANIFEST_MAGIC: &[u8; 8] = b"QGSMAN01";
+const MANIFEST_LEN: usize = MANIFEST_MAGIC.len() + 8 + 8 + 8 + 8 + 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenericOperation {
@@ -827,4 +830,152 @@ fn record_checksum(bytes: &[u8]) -> [u8; 32] {
     hasher.update(RECORD_DOMAIN);
     hasher.update(bytes);
     hasher.finalize().into()
+}
+
+/// Immutable, crash-safe segment of sequential generic journal operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedSegment {
+    segment_id: u64,
+    start_commit: u64,
+    end_commit: u64,
+    records: Vec<u8>,
+    checksum: [u8; 32],
+}
+
+/// Manifest summarizing one immutable segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GenericSegmentManifest {
+    pub segment_id: u64,
+    pub start_commit: u64,
+    pub end_commit: u64,
+    pub record_count: u64,
+    pub checksum: [u8; 32],
+}
+
+impl SealedSegment {
+    /// Seals operations into an immutable segment.
+    pub fn seal(
+        segment_id: u64,
+        start_commit: u64,
+        end_commit: u64,
+        operations: &[GenericOperation],
+    ) -> Result<Self, GenericJournalError> {
+        if operations.is_empty()
+            || start_commit == 0
+            || end_commit < start_commit
+            || (end_commit - start_commit).checked_add(1) != Some(operations.len() as u64)
+        {
+            return Err(GenericJournalError::Corrupt);
+        }
+        let mut journal = GenericJournal::new();
+        for op in operations {
+            journal.apply(op.clone())?;
+        }
+        let records = journal.bytes;
+        let mut hasher = Sha256::new();
+        hasher.update(SEGMENT_DOMAIN);
+        hasher.update(segment_id.to_be_bytes());
+        hasher.update(start_commit.to_be_bytes());
+        hasher.update(end_commit.to_be_bytes());
+        hasher.update((operations.len() as u64).to_be_bytes());
+        hasher.update(&records);
+        let checksum: [u8; 32] = hasher.finalize().into();
+        Ok(Self {
+            segment_id,
+            start_commit,
+            end_commit,
+            records,
+            checksum,
+        })
+    }
+
+    #[must_use]
+    pub const fn segment_id(&self) -> u64 {
+        self.segment_id
+    }
+
+    #[must_use]
+    pub const fn start_commit(&self) -> u64 {
+        self.start_commit
+    }
+
+    #[must_use]
+    pub const fn end_commit(&self) -> u64 {
+        self.end_commit
+    }
+
+    #[must_use]
+    pub const fn checksum(&self) -> [u8; 32] {
+        self.checksum
+    }
+
+    #[must_use]
+    pub fn manifest(&self) -> GenericSegmentManifest {
+        GenericSegmentManifest {
+            segment_id: self.segment_id,
+            start_commit: self.start_commit,
+            end_commit: self.end_commit,
+            record_count: (self.end_commit - self.start_commit).saturating_add(1),
+            checksum: self.checksum,
+        }
+    }
+}
+
+impl GenericSegmentManifest {
+    #[must_use]
+    pub fn encode(&self) -> [u8; MANIFEST_LEN] {
+        let mut bytes = [0_u8; MANIFEST_LEN];
+        bytes[..MANIFEST_MAGIC.len()].copy_from_slice(MANIFEST_MAGIC);
+        bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 8]
+            .copy_from_slice(&self.segment_id.to_be_bytes());
+        bytes[MANIFEST_MAGIC.len() + 8..MANIFEST_MAGIC.len() + 16]
+            .copy_from_slice(&self.start_commit.to_be_bytes());
+        bytes[MANIFEST_MAGIC.len() + 16..MANIFEST_MAGIC.len() + 24]
+            .copy_from_slice(&self.end_commit.to_be_bytes());
+        bytes[MANIFEST_MAGIC.len() + 24..MANIFEST_MAGIC.len() + 32]
+            .copy_from_slice(&self.record_count.to_be_bytes());
+        bytes[MANIFEST_MAGIC.len() + 32..].copy_from_slice(&self.checksum);
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, GenericJournalError> {
+        if bytes.len() != MANIFEST_LEN || &bytes[..MANIFEST_MAGIC.len()] != MANIFEST_MAGIC {
+            return Err(GenericJournalError::Corrupt);
+        }
+        let segment_id = u64::from_be_bytes(
+            bytes[MANIFEST_MAGIC.len()..MANIFEST_MAGIC.len() + 8]
+                .try_into()
+                .map_err(|_error| GenericJournalError::Corrupt)?,
+        );
+        let start_commit = u64::from_be_bytes(
+            bytes[MANIFEST_MAGIC.len() + 8..MANIFEST_MAGIC.len() + 16]
+                .try_into()
+                .map_err(|_error| GenericJournalError::Corrupt)?,
+        );
+        let end_commit = u64::from_be_bytes(
+            bytes[MANIFEST_MAGIC.len() + 16..MANIFEST_MAGIC.len() + 24]
+                .try_into()
+                .map_err(|_error| GenericJournalError::Corrupt)?,
+        );
+        let record_count = u64::from_be_bytes(
+            bytes[MANIFEST_MAGIC.len() + 24..MANIFEST_MAGIC.len() + 32]
+                .try_into()
+                .map_err(|_error| GenericJournalError::Corrupt)?,
+        );
+        if start_commit == 0
+            || end_commit < start_commit
+            || (end_commit - start_commit).saturating_add(1) != record_count
+        {
+            return Err(GenericJournalError::Corrupt);
+        }
+        let mut checksum = [0_u8; 32];
+        checksum.copy_from_slice(&bytes[MANIFEST_MAGIC.len() + 32..]);
+        Ok(Self {
+            segment_id,
+            start_commit,
+            end_commit,
+            record_count,
+            checksum,
+        })
+    }
 }

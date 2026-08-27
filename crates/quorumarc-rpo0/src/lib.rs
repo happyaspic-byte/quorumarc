@@ -28,6 +28,6 @@ pub use error::{ReplicaError, Rpo0Error, WalCorruption};
 pub use generic_journal::{
     DurableLocation, FileGenericReplica, GenericAcknowledgement, GenericJournal,
     GenericJournalError, GenericOperation, GenericProgress, GenericReplicaSink,
-    MemoryGenericReplica, ReplicatedGenericJournal,
+    GenericSegmentManifest, MemoryGenericReplica, ReplicatedGenericJournal, SealedSegment,
 };
 pub use replica::{DurableReceipt, Fault, FileReplica, MemoryReplica, ReplicaSink};
