@@ -7,6 +7,7 @@ use quorumarc_rpo0::{
     FileGenericReplica, GenericJournal, GenericJournalError, GenericOperation,
     MemoryGenericReplica, ReplicatedGenericJournal,
 };
+use sha2::{Digest, Sha256};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -278,4 +279,79 @@ fn generic_recovery_refuses_one_copy_divergence_and_corruption() {
         Err(GenericJournalError::Corrupt)
     ));
     let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn generic_journal_exact_retry_refuses_overflow_expected_commit() {
+    let mut journal = GenericJournal::new();
+    let op = GenericOperation::new([16; 16], 0, b"overflow").expect("op");
+    let ack = journal.apply(op).expect("first append");
+    assert_eq!(ack.commit_index, 1);
+
+    let overflow_retry = GenericOperation::new([16; 16], u64::MAX, b"overflow").expect("op");
+    assert!(matches!(
+        journal.apply(overflow_retry),
+        Err(GenericJournalError::ConflictingDuplicate)
+    ));
+}
+
+#[test]
+fn generic_recovery_refuses_oversized_file_and_zero_operation_id() {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-generic-oversized-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let left = directory.join("left.qgwl");
+    let right = directory.join("right.qgwl");
+
+    let huge = 70_000_000_u64;
+    for path in [&left, &right] {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .expect("create oversized");
+        file.set_len(huge).expect("sparse oversized");
+    }
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&left, &right),
+        Err(GenericJournalError::CapacityExceeded)
+    ));
+
+    let zero_id_record = encode_raw_record(1, [0; 16], 0, [0; 32], b"zero-id");
+    fs::write(&left, &zero_id_record).expect("write zero left");
+    fs::write(&right, &zero_id_record).expect("write zero right");
+    assert!(matches!(
+        ReplicatedGenericJournal::recover_from_files(&left, &right),
+        Err(GenericJournalError::ZeroOperationId)
+    ));
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+fn encode_raw_record(
+    commit_index: u64,
+    operation_id: [u8; 16],
+    expected_commit: u64,
+    previous_root: [u8; 32],
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"QGWL");
+    bytes.push(1);
+    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&commit_index.to_be_bytes());
+    bytes.extend_from_slice(&operation_id);
+    bytes.extend_from_slice(&expected_commit.to_be_bytes());
+    bytes.extend_from_slice(&previous_root);
+    bytes.extend_from_slice(payload);
+    let mut hasher = Sha256::new();
+    hasher.update(b"quorumarc/generic-journal/record/v1\0");
+    hasher.update(&bytes);
+    let checksum: [u8; 32] = hasher.finalize().into();
+    bytes.extend_from_slice(&checksum);
+    bytes
 }

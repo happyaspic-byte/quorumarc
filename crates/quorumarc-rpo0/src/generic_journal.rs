@@ -11,6 +11,8 @@ const VERSION: u8 = 1;
 const MAX_PAYLOAD: usize = 65_536;
 const HEADER_LEN: usize = 4 + 1 + 4 + 8 + 16 + 8 + 32;
 const CHECKSUM_LEN: usize = 32;
+const MAX_RECORD_LEN: usize = HEADER_LEN + MAX_PAYLOAD + CHECKSUM_LEN;
+const MAX_WAL_BYTES: usize = crate::MAX_WAL_RECORDS as usize * MAX_RECORD_LEN;
 const ROOT_DOMAIN: &[u8] = b"quorumarc/generic-journal/state-root/v1\0";
 const RECORD_DOMAIN: &[u8] = b"quorumarc/generic-journal/record/v1\0";
 
@@ -26,6 +28,13 @@ pub struct GenericAcknowledgement {
     pub operation_id: [u8; 16],
     pub commit_index: u64,
     pub state_root: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenericDurableReceipt {
+    acknowledgement: GenericAcknowledgement,
+    replica_id: String,
+    location: DurableLocation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,7 +108,10 @@ impl GenericJournal {
     ) -> Result<GenericAcknowledgement, GenericJournalError> {
         if let Some((payload, acknowledged)) = self.operations.get(&operation.operation_id) {
             if payload == &operation.payload
-                && operation.expected_commit + 1 == acknowledged.commit_index
+                && operation
+                    .expected_commit
+                    .checked_add(1)
+                    .is_some_and(|commit| commit == acknowledged.commit_index)
             {
                 return Ok(*acknowledged);
             }
@@ -192,7 +204,7 @@ impl MemoryGenericReplica {
         self.fail_next = true;
     }
 
-    fn append(&mut self, encoded: &[u8]) -> Result<GenericAcknowledgement, GenericJournalError> {
+    fn append(&mut self, encoded: &[u8]) -> Result<GenericDurableReceipt, GenericJournalError> {
         self.append_count = self.append_count.saturating_add(1);
         if self.fail_next {
             self.fail_next = false;
@@ -201,7 +213,11 @@ impl MemoryGenericReplica {
         if !self.bytes.ends_with(encoded) {
             self.bytes.extend_from_slice(encoded);
         }
-        receipt_from_encoded(&self.replica_id, encoded)
+        durable_receipt(
+            &self.replica_id,
+            DurableLocation::ProcessLocal(self.replica_id.clone()),
+            encoded,
+        )
     }
 }
 
@@ -217,7 +233,7 @@ impl GenericReplicaSink for MemoryGenericReplica {
     fn append_and_flush(
         &mut self,
         encoded: &[u8],
-    ) -> Result<GenericAcknowledgement, GenericJournalError> {
+    ) -> Result<GenericDurableReceipt, GenericJournalError> {
         self.append(encoded)
     }
 }
@@ -251,16 +267,24 @@ impl GenericReplicaSink for FileGenericReplica {
     fn append_and_flush(
         &mut self,
         encoded: &[u8],
-    ) -> Result<GenericAcknowledgement, GenericJournalError> {
+    ) -> Result<GenericDurableReceipt, GenericJournalError> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&self.path)
             .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
-        let mut existing = Vec::new();
-        file.read_to_end(&mut existing)
+        let metadata = file
+            .metadata()
             .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        if !metadata.is_file() {
+            return Err(GenericJournalError::ReplicaUnavailable);
+        }
+        let location = DurableLocation::Inode {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let existing = read_bounded_file(&mut file)?;
         let progress = recover_bytes(&existing)?;
         let parsed = parse_one_record(encoded)?;
         if existing.ends_with(encoded) {
@@ -272,7 +296,7 @@ impl GenericReplicaSink for FileGenericReplica {
             file.sync_all()
                 .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
             sync_parent_directory(&self.path)?;
-            return receipt_from_encoded(&self.replica_id, encoded);
+            return durable_receipt(&self.replica_id, location, encoded);
         }
         if parsed.commit_index != progress.commit_index.saturating_add(1)
             || parsed.expected_commit != progress.commit_index
@@ -285,8 +309,22 @@ impl GenericReplicaSink for FileGenericReplica {
         file.sync_all()
             .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
         sync_parent_directory(&self.path)?;
-        receipt_from_encoded(&self.replica_id, encoded)
+        durable_receipt(&self.replica_id, location, encoded)
     }
+}
+
+fn read_bounded_file(file: &mut File) -> Result<Vec<u8>, GenericJournalError> {
+    let limit = u64::try_from(MAX_WAL_BYTES)
+        .map_err(|_error| GenericJournalError::CapacityExceeded)?
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+    if bytes.len() > MAX_WAL_BYTES {
+        return Err(GenericJournalError::CapacityExceeded);
+    }
+    Ok(bytes)
 }
 
 fn sync_parent_directory(path: &Path) -> Result<(), GenericJournalError> {
@@ -379,18 +417,23 @@ fn parse_one_record_at(bytes: &[u8], cursor: usize) -> Result<ParsedRecord, Gene
     })
 }
 
-fn receipt_from_encoded(
+fn durable_receipt(
     replica_id: &str,
+    location: DurableLocation,
     encoded: &[u8],
-) -> Result<GenericAcknowledgement, GenericJournalError> {
+) -> Result<GenericDurableReceipt, GenericJournalError> {
     if replica_id.is_empty() {
         return Err(GenericJournalError::InvalidDurabilityReceipt);
     }
     let parsed = parse_one_record(encoded)?;
-    Ok(GenericAcknowledgement {
-        operation_id: parsed.operation_id,
-        commit_index: parsed.commit_index,
-        state_root: parsed.state_root,
+    Ok(GenericDurableReceipt {
+        acknowledgement: GenericAcknowledgement {
+            operation_id: parsed.operation_id,
+            commit_index: parsed.commit_index,
+            state_root: parsed.state_root,
+        },
+        replica_id: replica_id.to_owned(),
+        location,
     })
 }
 
@@ -401,7 +444,7 @@ pub trait GenericReplicaSink {
     fn append_and_flush(
         &mut self,
         encoded: &[u8],
-    ) -> Result<GenericAcknowledgement, GenericJournalError>;
+    ) -> Result<GenericDurableReceipt, GenericJournalError>;
 }
 
 /// Physical replica identity used to refuse one-copy aliases.
@@ -447,7 +490,10 @@ impl ReplicatedGenericJournal {
         if let Some((payload, acknowledged)) = self.journal.operations.get(&operation.operation_id)
         {
             if payload == &operation.payload
-                && operation.expected_commit + 1 == acknowledged.commit_index
+                && operation
+                    .expected_commit
+                    .checked_add(1)
+                    .is_some_and(|commit| commit == acknowledged.commit_index)
             {
                 return Ok(*acknowledged);
             }
@@ -468,12 +514,15 @@ impl ReplicatedGenericJournal {
                 return Err(error);
             }
         };
-        if left_receipt != right_receipt {
+        if left_receipt.acknowledgement != right_receipt.acknowledgement
+            || left_receipt.replica_id == right_receipt.replica_id
+            || left_receipt.location == right_receipt.location
+        {
             self.uncertain = true;
             return Err(GenericJournalError::InvalidDurabilityReceipt);
         }
         let acknowledgement = self.journal.apply(operation)?;
-        if acknowledgement != left_receipt {
+        if acknowledgement != left_receipt.acknowledgement {
             self.uncertain = true;
             return Err(GenericJournalError::InvalidDurabilityReceipt);
         }
@@ -485,33 +534,34 @@ impl ReplicatedGenericJournal {
         left: impl AsRef<Path>,
         right: impl AsRef<Path>,
     ) -> Result<Self, GenericJournalError> {
-        if file_location(left.as_ref())? == file_location(right.as_ref())? {
+        let mut left_file = match File::open(left.as_ref()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(GenericJournalError::ReplicaUnavailable);
+            }
+            Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
+        };
+        let mut right_file = match File::open(right.as_ref()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(GenericJournalError::ReplicaUnavailable);
+            }
+            Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
+        };
+        let left_meta = left_file
+            .metadata()
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        let right_meta = right_file
+            .metadata()
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        if !left_meta.is_file()
+            || !right_meta.is_file()
+            || (left_meta.dev(), left_meta.ino()) == (right_meta.dev(), right_meta.ino())
+        {
             return Err(GenericJournalError::ReplicaIdentityCollision);
         }
-        let left_bytes = match File::open(left.as_ref()) {
-            Ok(mut file) => {
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)
-                    .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
-                bytes
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(GenericJournalError::ReplicaUnavailable);
-            }
-            Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
-        };
-        let right_bytes = match File::open(right.as_ref()) {
-            Ok(mut file) => {
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)
-                    .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
-                bytes
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(GenericJournalError::ReplicaUnavailable);
-            }
-            Err(_error) => return Err(GenericJournalError::ReplicaUnavailable),
-        };
+        let left_bytes = read_bounded_file(&mut left_file)?;
+        let right_bytes = read_bounded_file(&mut right_file)?;
         if left_bytes != right_bytes {
             return Err(GenericJournalError::RecoveryMismatch);
         }
@@ -526,6 +576,14 @@ impl ReplicatedGenericJournal {
             },
         };
         replay_operations(&mut journal)?;
+        left_file
+            .sync_all()
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        right_file
+            .sync_all()
+            .map_err(|_error| GenericJournalError::ReplicaUnavailable)?;
+        sync_parent_directory(left.as_ref())?;
+        sync_parent_directory(right.as_ref())?;
         Ok(Self {
             journal,
             uncertain: false,
@@ -608,10 +666,15 @@ fn replay_operations(journal: &mut GenericJournal) -> Result<(), GenericJournalE
     let mut operations = BTreeMap::new();
     while cursor < bytes.len() {
         let parsed = parse_one_record_at(&bytes, cursor)?;
-        operations.insert(
-            parsed.operation_id,
-            (parsed.payload, parsed.acknowledgement),
-        );
+        if operations
+            .insert(
+                parsed.operation_id,
+                (parsed.payload, parsed.acknowledgement),
+            )
+            .is_some()
+        {
+            return Err(GenericJournalError::Corrupt);
+        }
         cursor = parsed.record_end;
     }
     journal.operations = operations;
@@ -714,6 +777,12 @@ fn recover_bytes(bytes: &[u8]) -> Result<GenericProgress, GenericJournalError> {
         );
         let mut operation_id = [0; 16];
         operation_id.copy_from_slice(&bytes[cursor + 17..cursor + 33]);
+        if operation_id.iter().all(|byte| *byte == 0) {
+            return Err(GenericJournalError::ZeroOperationId);
+        }
+        if commit_index > crate::MAX_WAL_RECORDS {
+            return Err(GenericJournalError::CapacityExceeded);
+        }
         let expected_commit = u64::from_be_bytes(
             bytes[cursor + 33..cursor + 41]
                 .try_into()
