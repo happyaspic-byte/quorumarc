@@ -1,8 +1,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use quorumarc_core::TrustedClock;
+use rustix::fs::OFlags;
 use rustix::time::{ClockId, clock_gettime};
 
 const BOOT_ID_LEN: usize = 36;
@@ -67,7 +69,12 @@ impl BootClock {
     /// Persists the first boot identity and refuses a different later boot.
     pub fn bind_store(&self, store: &Path) -> Result<(), BootClockError> {
         let path = store.join("boot.id");
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(self.boot_id.as_bytes())
                     .and_then(|()| file.write_all(b"\n"))
@@ -76,8 +83,17 @@ impl BootClock {
                 sync_directory(store)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut file =
-                    File::open(&path).map_err(|_error| BootClockError::SourceUnavailable)?;
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+                    .open(&path)
+                    .map_err(|_error| BootClockError::SourceUnavailable)?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|_error| BootClockError::SourceUnavailable)?;
+                if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+                    return Err(BootClockError::SourceUnavailable);
+                }
                 let mut value = String::new();
                 file.read_to_string(&mut value)
                     .map_err(|_error| BootClockError::SourceUnavailable)?;

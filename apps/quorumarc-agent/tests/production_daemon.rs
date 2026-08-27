@@ -324,10 +324,9 @@ fn production_daemon_refuses_stored_boot_identity_change() -> Result<(), Box<dyn
     fs::create_dir_all(&directory)?;
     let config = directory.join("agent.toml");
     fs::write(&config, production_config_with_prerequisites(&directory)?)?;
-    fs::write(
-        directory.join("store").join("boot.id"),
-        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n",
-    )?;
+    let boot_record = directory.join("store").join("boot.id");
+    fs::write(&boot_record, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n")?;
+    fs::set_permissions(&boot_record, fs::Permissions::from_mode(0o600))?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
         .args(["daemon", "--config"])

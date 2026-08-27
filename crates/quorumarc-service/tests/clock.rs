@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use quorumarc_service::clock::{BootClock, BootClockError};
@@ -78,5 +79,27 @@ fn persisted_boot_identity_accepts_same_boot_and_refuses_reboot() {
     let record = store.join("boot.id");
     fs::write(&record, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n").expect("stale boot");
     assert_eq!(clock.bind_store(&store), Err(BootClockError::BootChanged));
+    let metadata = fs::metadata(&record).expect("boot.id metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    fs::remove_dir_all(directory).expect("remove clock fixture");
+}
+
+#[test]
+fn persisted_boot_identity_refuses_symlink_record() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-service-boot-symlink-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create clock fixture");
+    let store = directory.join("store");
+    fs::create_dir(&store).expect("store");
+    let target = directory.join("elsewhere.id");
+    fs::write(&target, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n").expect("target");
+    std::os::unix::fs::symlink(&target, store.join("boot.id")).expect("symlink");
+    let clock = BootClock::open_system().expect("system clock");
+    assert_eq!(
+        clock.bind_store(&store),
+        Err(BootClockError::SourceUnavailable)
+    );
     fs::remove_dir_all(directory).expect("remove clock fixture");
 }

@@ -293,12 +293,14 @@ impl ProductionConfig {
             .read(true)
             .write(true)
             .truncate(false)
+            .mode(0o600)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
             .open(&path)
             .map_err(|_error| ConfigError::OwnerLockRefused)?;
         let metadata = file
             .metadata()
             .map_err(|_error| ConfigError::OwnerLockRefused)?;
-        if !metadata.is_file() {
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
             return Err(ConfigError::OwnerLockRefused);
         }
         flock(&file, FlockOperation::NonBlockingLockExclusive)

@@ -295,7 +295,19 @@ fn production_store_lock_refuses_second_holder_until_release() {
         Err(ConfigError::OwnerLockRefused)
     ));
     drop(first);
+    let lock_path = store.join(".quorumarc.owner");
+    let metadata = fs::metadata(&lock_path).expect("lock metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     let _second = config.acquire_store_lock().expect("released lock");
+
+    fs::remove_file(&lock_path).expect("remove lock");
+    let target = directory.join("elsewhere.owner");
+    fs::write(&target, b"hijack").expect("target");
+    symlink(&target, &lock_path).expect("symlink lock");
+    assert!(matches!(
+        config.acquire_store_lock(),
+        Err(ConfigError::OwnerLockRefused)
+    ));
     let _ = fs::remove_dir_all(directory);
 }
 
