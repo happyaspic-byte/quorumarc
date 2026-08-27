@@ -1,3 +1,10 @@
+use std::path::Path;
+
+use ed25519_dalek::VerifyingKey;
+
+use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
+use crate::protocol::{AdmissionError, AuthenticatedRequestJournal};
+
 /// One data-node role in a planned switch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SwitchRole {
@@ -106,5 +113,44 @@ const fn next_step(step: PlannedSwitchStep) -> Option<PlannedSwitchStep> {
         PlannedSwitchStep::Receipt | PlannedSwitchStep::Complete | PlannedSwitchStep::Halted => {
             None
         }
+    }
+}
+
+/// Restarts from a durable request journal without opening effects.
+#[derive(Debug)]
+pub struct DurableController {
+    admission: AuthenticatedRequestJournal,
+    switch: PlannedSwitch,
+}
+
+impl DurableController {
+    pub fn open(
+        directory: &Path,
+        identity: [u8; 16],
+        node_id: impl Into<String>,
+        key_id: impl Into<String>,
+        verifying_key: VerifyingKey,
+        from: SwitchRole,
+        to: SwitchRole,
+    ) -> Result<Self, JournalError> {
+        let journal = ManagementJournal::open(directory, identity)?;
+        Ok(Self {
+            admission: AuthenticatedRequestJournal::new(journal, node_id, key_id, verifying_key),
+            switch: PlannedSwitch::new(from, to),
+        })
+    }
+
+    pub fn accept(&mut self, bytes: &[u8]) -> Result<ManagementOutcome, AdmissionError> {
+        self.admission.admit(bytes)
+    }
+
+    #[must_use]
+    pub fn highest_sequence(&self) -> u64 {
+        self.admission.highest_sequence()
+    }
+
+    #[must_use]
+    pub const fn effects_open(&self) -> bool {
+        self.switch.effects_open()
     }
 }
