@@ -11,10 +11,23 @@ use quorumarc_service::witness::{
     CandidateCredential, ProductionVoteReply, ProductionWitnessOpenError, ProductionWitnessRuntime,
 };
 use quorumarc_store::{StoreIdentity, StoreRole};
-use quorumarc_wire::{CanonicalId, QuorumCertificate};
+use quorumarc_wire::{
+    CanonicalId, ProductionQuorumCertificate, VerificationKeyResolver, VerifyingKey,
+};
 
 fn id(value: &str) -> CanonicalId {
     CanonicalId::new(value).expect("id")
+}
+
+struct WitnessResolver {
+    key: VerifyingKey,
+}
+
+impl VerificationKeyResolver for WitnessResolver {
+    fn resolve(&self, principal: &CanonicalId, key_id: &CanonicalId) -> Option<VerifyingKey> {
+        (principal.as_str() == "witness-a" && key_id.as_str() == "witness-2026-01")
+            .then_some(self.key)
+    }
 }
 
 fn policy() -> WitnessPolicy {
@@ -127,6 +140,10 @@ fn production_vote_runtime_signs_only_after_durable_policy_checked_vote() {
     assert_eq!(granted.code(), VoteReasonCode::GrantedDurablyRecorded);
     assert_eq!(granted.durable_generation(), Some(1));
     let encoded_reply = granted.encode().expect("encode reply");
+    assert_eq!(&encoded_reply[..8], b"QARCVR03");
+    let mut legacy_version = encoded_reply.clone();
+    legacy_version[..8].copy_from_slice(b"QARCVR02");
+    assert!(ProductionVoteReply::decode(&legacy_version).is_err());
     let decoded_reply = ProductionVoteReply::decode(&encoded_reply).expect("decode reply");
     assert_eq!(decoded_reply, granted);
     assert_eq!(decoded_reply.cluster_id(), "prod-cluster");
@@ -141,7 +158,29 @@ fn production_vote_runtime_signs_only_after_durable_policy_checked_vote() {
             .is_err()
     );
     let signed_vote = decoded_reply.signed_vote().expect("signed vote").clone();
-    assert!(QuorumCertificate::new(decoded_reply.binding().clone(), 1, vec![signed_vote]).is_ok());
+    let certificate = ProductionQuorumCertificate::new(
+        id("prod-cluster"),
+        decoded_reply.binding().clone(),
+        1,
+        vec![signed_vote],
+    )
+    .expect("production certificate");
+    assert!(
+        certificate
+            .verify(&WitnessResolver {
+                key: witness.verifying_key(),
+            })
+            .is_ok()
+    );
+    assert!(
+        ProductionQuorumCertificate::new(
+            id("other-cluster"),
+            decoded_reply.binding().clone(),
+            1,
+            vec![decoded_reply.signed_vote().expect("signed vote").clone()],
+        )
+        .is_err()
+    );
     assert_eq!(runtime.highest_epoch(), 1);
     assert!(!runtime.effects_open());
     drop(runtime);

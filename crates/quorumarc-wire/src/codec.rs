@@ -2,13 +2,16 @@ use crate::EnvelopeError;
 use crate::crypto::SignedPromotionEnvelope;
 use crate::model::{
     CanonicalId, FenceMechanism, FenceReceipt, HealthAttestation, LeaseGrant, MessageId,
-    PROTOCOL_VERSION, PromotionEnvelope, QuorumBinding, QuorumCertificate, SignedVote,
+    PROTOCOL_VERSION, ProductionQuorumCertificate, ProductionSignedVote, PromotionEnvelope,
+    QuorumBinding, QuorumCertificate, SignedVote,
 };
 
 const ENVELOPE_MAGIC: &[u8; 8] = b"QARCENV\0";
 const SIGNED_MAGIC: &[u8; 8] = b"QARCSIG\0";
 const BINDING_MAGIC: &[u8; 8] = b"QARCBND\0";
 const VOTE_MAGIC: &[u8; 8] = b"QARCVOT\0";
+const PRODUCTION_VOTE_MAGIC: &[u8; 8] = b"QARCPV02";
+const PRODUCTION_CERTIFICATE_MAGIC: &[u8; 8] = b"QARCPQ02";
 
 impl QuorumBinding {
     /// Serializes one standalone quorum binding using the canonical production format.
@@ -57,6 +60,80 @@ impl SignedVote {
         };
         reader.finish()?;
         Ok(vote)
+    }
+}
+
+impl ProductionSignedVote {
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, EnvelopeError> {
+        let mut writer = Writer::new();
+        writer.put_bytes(PRODUCTION_VOTE_MAGIC);
+        writer.put_id(self.cluster_id())?;
+        writer.put_id(self.voter_id())?;
+        writer.put_id(self.key_id())?;
+        writer.put_bytes(self.signature_bytes());
+        writer.finish(MAX_ENVELOPE_SIZE)
+    }
+
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, EnvelopeError> {
+        enforce_size(bytes.len(), MAX_ENVELOPE_SIZE)?;
+        let mut reader = Reader::new(bytes);
+        if reader.read_array::<8>()? != *PRODUCTION_VOTE_MAGIC {
+            return Err(EnvelopeError::InvalidMagic);
+        }
+        let vote = Self {
+            cluster_id: reader.read_id()?,
+            voter_id: reader.read_id()?,
+            key_id: reader.read_id()?,
+            signature: reader.read_array::<64>()?,
+        };
+        reader.finish()?;
+        Ok(vote)
+    }
+}
+
+impl ProductionQuorumCertificate {
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, EnvelopeError> {
+        self.validate()?;
+        let mut writer = Writer::new();
+        writer.put_bytes(PRODUCTION_CERTIFICATE_MAGIC);
+        writer.put_id(self.cluster_id())?;
+        encode_binding(&mut writer, self.binding())?;
+        writer.put_u16(self.threshold());
+        writer
+            .put_u16(u16::try_from(self.votes().len()).map_err(|_| EnvelopeError::LengthOverflow)?);
+        for vote in self.votes() {
+            writer.put_id(vote.cluster_id())?;
+            writer.put_id(vote.voter_id())?;
+            writer.put_id(vote.key_id())?;
+            writer.put_bytes(vote.signature_bytes());
+        }
+        writer.finish(MAX_ENVELOPE_SIZE)
+    }
+
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, EnvelopeError> {
+        enforce_size(bytes.len(), MAX_ENVELOPE_SIZE)?;
+        let mut reader = Reader::new(bytes);
+        if reader.read_array::<8>()? != *PRODUCTION_CERTIFICATE_MAGIC {
+            return Err(EnvelopeError::InvalidMagic);
+        }
+        let cluster_id = reader.read_id()?;
+        let binding = decode_binding(&mut reader)?;
+        let threshold = reader.read_u16()?;
+        let count = usize::from(reader.read_u16()?);
+        if count > crate::model::MAX_VOTES {
+            return Err(EnvelopeError::TooManyVotes);
+        }
+        let mut votes = Vec::with_capacity(count);
+        for _ in 0..count {
+            votes.push(ProductionSignedVote {
+                cluster_id: reader.read_id()?,
+                voter_id: reader.read_id()?,
+                key_id: reader.read_id()?,
+                signature: reader.read_array::<64>()?,
+            });
+        }
+        reader.finish()?;
+        Self::new(cluster_id, binding, threshold, votes)
     }
 }
 
@@ -173,6 +250,21 @@ impl SignedPromotionEnvelope {
         signed.validate_structure()?;
         Ok(signed)
     }
+}
+
+pub(crate) fn encode_production_vote_statement(
+    cluster_id: &CanonicalId,
+    binding: &QuorumBinding,
+    voter_id: &CanonicalId,
+    key_id: &CanonicalId,
+) -> Result<Vec<u8>, EnvelopeError> {
+    binding.validate()?;
+    let mut writer = Writer::new();
+    writer.put_id(cluster_id)?;
+    encode_binding(&mut writer, binding)?;
+    writer.put_id(voter_id)?;
+    writer.put_id(key_id)?;
+    writer.finish(MAX_ENVELOPE_SIZE)
 }
 
 pub(crate) fn encode_vote_statement(

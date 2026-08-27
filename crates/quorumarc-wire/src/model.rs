@@ -145,6 +145,112 @@ impl SignedVote {
     }
 }
 
+/// Production vote whose signature directly binds the cluster namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProductionSignedVote {
+    pub(crate) cluster_id: CanonicalId,
+    pub(crate) voter_id: CanonicalId,
+    pub(crate) key_id: CanonicalId,
+    pub(crate) signature: [u8; 64],
+}
+
+impl ProductionSignedVote {
+    #[must_use]
+    pub const fn cluster_id(&self) -> &CanonicalId {
+        &self.cluster_id
+    }
+
+    #[must_use]
+    pub const fn voter_id(&self) -> &CanonicalId {
+        &self.voter_id
+    }
+
+    #[must_use]
+    pub const fn key_id(&self) -> &CanonicalId {
+        &self.key_id
+    }
+
+    #[must_use]
+    pub const fn signature_bytes(&self) -> &[u8; 64] {
+        &self.signature
+    }
+}
+
+/// Cluster-bound production voter signatures over one quorum binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProductionQuorumCertificate {
+    cluster_id: CanonicalId,
+    binding: QuorumBinding,
+    threshold: u16,
+    votes: Vec<ProductionSignedVote>,
+}
+
+impl ProductionQuorumCertificate {
+    pub fn new(
+        cluster_id: CanonicalId,
+        binding: QuorumBinding,
+        threshold: u16,
+        votes: Vec<ProductionSignedVote>,
+    ) -> Result<Self, EnvelopeError> {
+        let certificate = Self {
+            cluster_id,
+            binding,
+            threshold,
+            votes,
+        };
+        certificate.validate()?;
+        Ok(certificate)
+    }
+
+    #[must_use]
+    pub const fn cluster_id(&self) -> &CanonicalId {
+        &self.cluster_id
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &QuorumBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn threshold(&self) -> u16 {
+        self.threshold
+    }
+
+    #[must_use]
+    pub fn votes(&self) -> &[ProductionSignedVote] {
+        &self.votes
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), EnvelopeError> {
+        self.binding.validate()?;
+        if self.votes.len() > MAX_VOTES {
+            return Err(EnvelopeError::TooManyVotes);
+        }
+        if self.threshold == 0 || usize::from(self.threshold) > self.votes.len() {
+            return Err(EnvelopeError::InvalidQuorumThreshold);
+        }
+        if self
+            .votes
+            .iter()
+            .any(|vote| vote.cluster_id != self.cluster_id)
+        {
+            return Err(EnvelopeError::BindingMismatch("production vote cluster"));
+        }
+        for pair in self.votes.windows(2) {
+            let [first, second] = pair else {
+                return Err(EnvelopeError::NonCanonicalVoterOrder);
+            };
+            match first.voter_id.cmp(&second.voter_id) {
+                Ordering::Less => {}
+                Ordering::Equal => return Err(EnvelopeError::DuplicateVoter),
+                Ordering::Greater => return Err(EnvelopeError::NonCanonicalVoterOrder),
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Voter signatures and the complete statement to which they are bound.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuorumCertificate {

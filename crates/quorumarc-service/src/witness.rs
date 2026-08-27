@@ -11,7 +11,9 @@ use std::time::Duration;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use quorumarc_runtime::{VoteReasonCode, WitnessOpenError, WitnessPolicy, WitnessVoteActor};
 use quorumarc_store::{FileBackend, StoreIdentity};
-use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SignedVote};
+use quorumarc_wire::{
+    CanonicalId, MessageId, PROTOCOL_VERSION, ProductionSignedVote, QuorumBinding,
+};
 use rustix::fs::{FlockOperation, OFlags, flock};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use sha2::{Digest, Sha256};
@@ -142,8 +144,8 @@ const WITNESS_IO_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_WITNESS_CONNECTIONS: usize = 32;
 const MAX_WITNESS_FRAME: usize =
     8 + 2 + 1 + 4 * (1 + 128) + 16 + 8 + 8 + 8 + 8 + 32 + 4 + 65_536 + 64;
-const VOTE_REPLY_MAGIC: &[u8; 8] = b"QARCVR02";
-const VOTE_REPLY_ATTESTATION_DOMAIN: &[u8] = b"quorumarc/production-vote-reply/ed25519/v2\0";
+const VOTE_REPLY_MAGIC: &[u8; 8] = b"QARCVR03";
+const VOTE_REPLY_ATTESTATION_DOMAIN: &[u8] = b"quorumarc/production-vote-reply/ed25519/v3\0";
 const SIGNER_IDENTITY_MAGIC: &[u8; 8] = b"QARCSI01";
 
 #[derive(Clone, Debug)]
@@ -176,7 +178,7 @@ pub struct ProductionVoteReply {
     key_id: CanonicalId,
     binding: QuorumBinding,
     code: VoteReasonCode,
-    signed_vote: Option<SignedVote>,
+    signed_vote: Option<ProductionSignedVote>,
     durable_generation: Option<u64>,
     attestation: [u8; 64],
 }
@@ -214,7 +216,7 @@ impl ProductionVoteReply {
     }
 
     #[must_use]
-    pub const fn signed_vote(&self) -> Option<&SignedVote> {
+    pub const fn signed_vote(&self) -> Option<&ProductionSignedVote> {
         self.signed_vote.as_ref()
     }
 
@@ -242,7 +244,7 @@ impl ProductionVoteReply {
         let vote = self
             .signed_vote
             .as_ref()
-            .map(SignedVote::to_canonical_bytes)
+            .map(ProductionSignedVote::to_canonical_bytes)
             .transpose()
             .map_err(|_error| ProductionVoteError::Malformed)?;
         let cluster_len = u16::try_from(self.cluster_id.len())
@@ -307,8 +309,12 @@ impl ProductionVoteReply {
             None
         } else {
             Some(
-                SignedVote::from_canonical_bytes(vote_reply_take(bytes, &mut cursor, vote_len)?)
-                    .map_err(|_error| ProductionVoteError::Malformed)?,
+                ProductionSignedVote::from_canonical_bytes(vote_reply_take(
+                    bytes,
+                    &mut cursor,
+                    vote_len,
+                )?)
+                .map_err(|_error| ProductionVoteError::Malformed)?,
             )
         };
         let attestation: [u8; 64] = vote_reply_take(bytes, &mut cursor, 64)?
@@ -317,6 +323,11 @@ impl ProductionVoteReply {
         if cursor != bytes.len()
             || code.is_granted() != signed_vote.is_some()
             || code.is_granted() != (durable_generation != 0)
+            || signed_vote.as_ref().is_some_and(|vote| {
+                vote.cluster_id().as_str() != cluster_id
+                    || vote.voter_id() != &witness_id
+                    || vote.key_id() != &key_id
+            })
         {
             return Err(ProductionVoteError::Malformed);
         }
@@ -804,6 +815,21 @@ impl ProductionWitnessRuntime {
         }
         incarnations.record(&binding.candidate_node_id, binding.candidate_incarnation)?;
         let reply = actor.handle_vote(&binding);
+        let signed_vote = if reply.is_granted() {
+            Some(
+                ProductionSignedVote::sign(
+                    CanonicalId::new(cluster_id.clone())
+                        .map_err(|_error| ProductionVoteError::Malformed)?,
+                    &binding,
+                    witness_id.clone(),
+                    key_id.clone(),
+                    signing_key,
+                )
+                .map_err(|_error| ProductionVoteError::Malformed)?,
+            )
+        } else {
+            None
+        };
         attest_vote_reply(
             ProductionVoteReply {
                 cluster_id: cluster_id.clone(),
@@ -811,7 +837,7 @@ impl ProductionWitnessRuntime {
                 key_id: key_id.clone(),
                 binding,
                 code: reply.code(),
-                signed_vote: reply.signed_vote().cloned(),
+                signed_vote,
                 durable_generation: reply.durable_generation(),
                 attestation: [0; 64],
             },

@@ -24,7 +24,8 @@ pub use ed25519_dalek::{SigningKey, VerifyingKey};
 pub use error::EnvelopeError;
 pub use model::{
     CanonicalId, FenceMechanism, FenceReceipt, HealthAttestation, LeaseGrant, MAX_VOTES, MessageId,
-    PROTOCOL_VERSION, PromotionEnvelope, QuorumBinding, QuorumCertificate, SignedVote,
+    PROTOCOL_VERSION, ProductionQuorumCertificate, ProductionSignedVote, PromotionEnvelope,
+    QuorumBinding, QuorumCertificate, SignedVote,
 };
 
 #[cfg(test)]

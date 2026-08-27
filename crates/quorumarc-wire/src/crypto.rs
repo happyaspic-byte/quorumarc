@@ -3,14 +3,16 @@ use sha2::{Digest, Sha256};
 
 use crate::EnvelopeError;
 use crate::codec::{
-    encode_fence_statement, encode_outer_signature_statement, encode_quorum_binding_statement,
-    encode_vote_statement,
+    encode_fence_statement, encode_outer_signature_statement, encode_production_vote_statement,
+    encode_quorum_binding_statement, encode_vote_statement,
 };
 use crate::model::{
-    CanonicalId, FenceMechanism, FenceReceipt, PromotionEnvelope, QuorumBinding, SignedVote,
+    CanonicalId, FenceMechanism, FenceReceipt, ProductionQuorumCertificate, ProductionSignedVote,
+    PromotionEnvelope, QuorumBinding, SignedVote,
 };
 
 const VOTE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/quorum-vote/ed25519/v1\0";
+const PRODUCTION_VOTE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/production-quorum-vote/ed25519/v2\0";
 const PROPOSAL_DIGEST_DOMAIN: &[u8] = b"quorumarc/quorum-binding-proposal/sha256/v1\0";
 const FENCE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/fence-receipt/ed25519/v1\0";
 const ENVELOPE_SIGNATURE_DOMAIN: &[u8] = b"quorumarc/promotion-envelope/ed25519/v1\0";
@@ -75,6 +77,63 @@ impl SignedVote {
             &self.voter_id,
             &self.key_id,
         )
+    }
+}
+
+impl ProductionSignedVote {
+    pub fn sign(
+        cluster_id: CanonicalId,
+        binding: &QuorumBinding,
+        voter_id: CanonicalId,
+        key_id: CanonicalId,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<Self, EnvelopeError> {
+        let statement = encode_production_vote_statement(&cluster_id, binding, &voter_id, &key_id)?;
+        let signature = signing_key.sign(&domain_preimage(
+            PRODUCTION_VOTE_SIGNATURE_DOMAIN,
+            &statement,
+        ));
+        Ok(Self {
+            cluster_id,
+            voter_id,
+            key_id,
+            signature: signature.to_bytes(),
+        })
+    }
+
+    pub fn verify<R: VerificationKeyResolver>(
+        &self,
+        expected_cluster_id: &CanonicalId,
+        binding: &QuorumBinding,
+        resolver: &R,
+    ) -> Result<(), EnvelopeError> {
+        if &self.cluster_id != expected_cluster_id {
+            return Err(EnvelopeError::BindingMismatch("production vote cluster"));
+        }
+        let key = resolve_key(resolver, &self.voter_id, &self.key_id)?;
+        let statement = encode_production_vote_statement(
+            &self.cluster_id,
+            binding,
+            &self.voter_id,
+            &self.key_id,
+        )?;
+        verify_strict(
+            &key,
+            &domain_preimage(PRODUCTION_VOTE_SIGNATURE_DOMAIN, &statement),
+            &self.signature,
+            &self.voter_id,
+            &self.key_id,
+        )
+    }
+}
+
+impl ProductionQuorumCertificate {
+    pub fn verify<R: VerificationKeyResolver>(&self, resolver: &R) -> Result<(), EnvelopeError> {
+        self.validate()?;
+        for vote in self.votes() {
+            vote.verify(self.cluster_id(), self.binding(), resolver)?;
+        }
+        Ok(())
     }
 }
 
