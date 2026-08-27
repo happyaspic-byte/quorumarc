@@ -17,7 +17,9 @@ use rustls::{ClientConnection, StreamOwned};
 use quorumarc_service::protocol::{ProductionFrame, ProductionFrameKind, ProductionRequest};
 use quorumarc_service::signal::ShutdownToken;
 use quorumarc_service::tls::{client_mtls_config, server_mtls_config};
-use quorumarc_service::witness::{ProductionWitnessRuntime, ProductionWitnessServer};
+use quorumarc_service::witness::{
+    ProductionWitnessRuntime, ProductionWitnessServer, WitnessMembership,
+};
 
 struct IssuedIdentity {
     certificate: CertificateDer<'static>,
@@ -104,6 +106,21 @@ fn connect_retry(address: SocketAddr) -> std::io::Result<TcpStream> {
     TcpStream::connect(address)
 }
 
+fn membership() -> WitnessMembership {
+    WitnessMembership::new(
+        "node-a",
+        "127.0.0.2:7601".parse().expect("node a"),
+        "power-a",
+        "node-b",
+        "127.0.0.3:7601".parse().expect("node b"),
+        "power-b",
+        "witness-a",
+        "127.0.0.1:0".parse().expect("witness"),
+        "power-w",
+    )
+    .expect("membership")
+}
+
 fn write_frame(tls: &mut StreamOwned<ClientConnection, TcpStream>, frame: &[u8]) {
     let len = u32::try_from(frame.len()).expect("len");
     tls.write_all(&len.to_be_bytes()).expect("write len");
@@ -145,8 +162,7 @@ fn production_witness_server_serves_authenticated_votes_over_mtls() {
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
 
-    let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    let server = ProductionWitnessServer::bind(bind_addr, server_config, runtime).expect("bind");
+    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -223,8 +239,7 @@ fn production_witness_server_refuses_untrusted_client_certificate() {
     )
     .expect("client config");
 
-    let bind_addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    let server = ProductionWitnessServer::bind(bind_addr, server_config, runtime).expect("bind");
+    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -290,9 +305,7 @@ fn production_witness_server_commits_max_payload_signed_frame() {
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-    let server =
-        ProductionWitnessServer::bind("127.0.0.1:0".parse().expect("addr"), server_config, runtime)
-            .expect("bind");
+    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -353,9 +366,7 @@ fn production_witness_server_idle_peer_does_not_block_authenticated_vote() {
             .expect("server config");
     let client_config = client_mtls_config(vec![client_id.certificate], client_id.key, vec![ca])
         .expect("client config");
-    let server =
-        ProductionWitnessServer::bind("127.0.0.1:0".parse().expect("addr"), server_config, runtime)
-            .expect("bind");
+    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();
@@ -413,9 +424,7 @@ fn production_witness_server_shutdown_closes_and_joins_idle_workers() {
     let (ca, server_id, _) = issue_identities();
     let server_config = server_mtls_config(vec![server_id.certificate], server_id.key, vec![ca])
         .expect("server config");
-    let server =
-        ProductionWitnessServer::bind("127.0.0.1:0".parse().expect("addr"), server_config, runtime)
-            .expect("bind");
+    let server = ProductionWitnessServer::bind(membership(), server_config, runtime).expect("bind");
     let listen_addr = server.local_addr().expect("local addr");
     let shutdown = ShutdownToken::new();
     let shutdown_clone = shutdown.clone();

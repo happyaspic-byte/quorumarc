@@ -176,12 +176,12 @@ pub struct ProductionWitnessServer {
 
 impl ProductionWitnessServer {
     pub fn bind(
-        addr: SocketAddr,
+        membership: WitnessMembership,
         tls_config: MtlsServerConfig,
         runtime: ProductionWitnessRuntime,
     ) -> Result<Self, WitnessServerError> {
-        let listener =
-            TcpListener::bind(addr).map_err(|_error| WitnessServerError::SocketBindFailed)?;
+        let listener = TcpListener::bind(membership.witness_address())
+            .map_err(|_error| WitnessServerError::SocketBindFailed)?;
         Ok(Self {
             listener,
             tls_config: tls_config.into_arc(),
