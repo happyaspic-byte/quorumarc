@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use quorumarc_runtime::{VoteReasonCode, WitnessOpenError, WitnessPolicy, WitnessVoteActor};
 use quorumarc_store::{FileBackend, StoreIdentity};
 use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SignedVote};
 use rustix::fs::{FlockOperation, OFlags, flock};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use sha2::{Digest, Sha256};
 
 use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
 use crate::protocol::{
@@ -122,7 +123,9 @@ const WITNESS_IO_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_WITNESS_CONNECTIONS: usize = 32;
 const MAX_WITNESS_FRAME: usize =
     8 + 2 + 1 + 4 * (1 + 128) + 16 + 8 + 8 + 8 + 8 + 32 + 4 + 65_536 + 64;
-const VOTE_REPLY_MAGIC: &[u8; 8] = b"QARCVR01";
+const VOTE_REPLY_MAGIC: &[u8; 8] = b"QARCVR02";
+const VOTE_REPLY_ATTESTATION_DOMAIN: &[u8] = b"quorumarc/production-vote-reply/ed25519/v2\0";
+const SIGNER_IDENTITY_MAGIC: &[u8; 8] = b"QARCSI01";
 
 #[derive(Clone, Debug)]
 pub struct CandidateCredential {
@@ -149,13 +152,38 @@ impl CandidateCredential {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProductionVoteReply {
+    cluster_id: String,
+    witness_id: CanonicalId,
+    key_id: CanonicalId,
     binding: QuorumBinding,
     code: VoteReasonCode,
     signed_vote: Option<SignedVote>,
     durable_generation: Option<u64>,
+    attestation: [u8; 64],
 }
 
 impl ProductionVoteReply {
+    #[must_use]
+    pub fn cluster_id(&self) -> &str {
+        &self.cluster_id
+    }
+
+    pub fn verify_attestation(
+        &self,
+        expected_cluster_id: &str,
+        key: &VerifyingKey,
+    ) -> Result<(), ProductionVoteError> {
+        if self.cluster_id != expected_cluster_id {
+            return Err(ProductionVoteError::AuthenticationFailed);
+        }
+        let statement = self.encode_statement()?;
+        key.verify_strict(
+            &vote_reply_attestation_preimage(&statement),
+            &Signature::from_bytes(&self.attestation),
+        )
+        .map_err(|_error| ProductionVoteError::AuthenticationFailed)
+    }
+
     #[must_use]
     pub const fn binding(&self) -> &QuorumBinding {
         &self.binding
@@ -182,6 +210,12 @@ impl ProductionVoteReply {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, ProductionVoteError> {
+        let mut bytes = self.encode_statement()?;
+        bytes.extend_from_slice(&self.attestation);
+        Ok(bytes)
+    }
+
+    fn encode_statement(&self) -> Result<Vec<u8>, ProductionVoteError> {
         let binding = self
             .binding
             .to_canonical_bytes()
@@ -192,12 +226,24 @@ impl ProductionVoteReply {
             .map(SignedVote::to_canonical_bytes)
             .transpose()
             .map_err(|_error| ProductionVoteError::Malformed)?;
+        let cluster_len = u16::try_from(self.cluster_id.len())
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let witness_len = u16::try_from(self.witness_id.as_str().len())
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let key_len = u16::try_from(self.key_id.as_str().len())
+            .map_err(|_error| ProductionVoteError::Malformed)?;
         let binding_len =
             u32::try_from(binding.len()).map_err(|_error| ProductionVoteError::Malformed)?;
         let vote_len = u32::try_from(vote.as_ref().map_or(0, Vec::len))
             .map_err(|_error| ProductionVoteError::Malformed)?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(VOTE_REPLY_MAGIC);
+        bytes.extend_from_slice(&cluster_len.to_be_bytes());
+        bytes.extend_from_slice(self.cluster_id.as_bytes());
+        bytes.extend_from_slice(&witness_len.to_be_bytes());
+        bytes.extend_from_slice(self.witness_id.as_str().as_bytes());
+        bytes.extend_from_slice(&key_len.to_be_bytes());
+        bytes.extend_from_slice(self.key_id.as_str().as_bytes());
         bytes.push(vote_reason_tag(self.code));
         bytes.extend_from_slice(&self.durable_generation.unwrap_or(0).to_be_bytes());
         bytes.extend_from_slice(&binding_len.to_be_bytes());
@@ -214,6 +260,11 @@ impl ProductionVoteReply {
         if vote_reply_take(bytes, &mut cursor, VOTE_REPLY_MAGIC.len())? != VOTE_REPLY_MAGIC {
             return Err(ProductionVoteError::Malformed);
         }
+        let cluster_id = vote_reply_read_id(bytes, &mut cursor)?;
+        let witness_id = CanonicalId::new(vote_reply_read_id(bytes, &mut cursor)?)
+            .map_err(|_error| ProductionVoteError::Malformed)?;
+        let key_id = CanonicalId::new(vote_reply_read_id(bytes, &mut cursor)?)
+            .map_err(|_error| ProductionVoteError::Malformed)?;
         let code = vote_reason_from_tag(vote_reply_take(bytes, &mut cursor, 1)?[0])?;
         let durable_generation = u64::from_be_bytes(
             vote_reply_take(bytes, &mut cursor, 8)?
@@ -241,6 +292,9 @@ impl ProductionVoteReply {
                     .map_err(|_error| ProductionVoteError::Malformed)?,
             )
         };
+        let attestation: [u8; 64] = vote_reply_take(bytes, &mut cursor, 64)?
+            .try_into()
+            .map_err(|_error| ProductionVoteError::Malformed)?;
         if cursor != bytes.len()
             || code.is_granted() != signed_vote.is_some()
             || code.is_granted() != (durable_generation != 0)
@@ -248,10 +302,14 @@ impl ProductionVoteReply {
             return Err(ProductionVoteError::Malformed);
         }
         Ok(Self {
+            cluster_id,
+            witness_id,
+            key_id,
             binding,
             code,
             signed_vote,
             durable_generation: (durable_generation != 0).then_some(durable_generation),
+            attestation,
         })
     }
 }
@@ -297,6 +355,33 @@ fn vote_reason_from_tag(tag: u8) -> Result<VoteReasonCode, ProductionVoteError> 
     }
 }
 
+fn vote_reply_read_id(bytes: &[u8], cursor: &mut usize) -> Result<String, ProductionVoteError> {
+    let len = usize::from(u16::from_be_bytes(
+        vote_reply_take(bytes, cursor, 2)?
+            .try_into()
+            .map_err(|_error| ProductionVoteError::Malformed)?,
+    ));
+    if len == 0 || len > 128 {
+        return Err(ProductionVoteError::Malformed);
+    }
+    let text = std::str::from_utf8(vote_reply_take(bytes, cursor, len)?)
+        .map_err(|_error| ProductionVoteError::Malformed)?;
+    if !text
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(ProductionVoteError::Malformed);
+    }
+    Ok(text.to_owned())
+}
+
+fn vote_reply_attestation_preimage(statement: &[u8]) -> Vec<u8> {
+    let mut preimage = Vec::with_capacity(VOTE_REPLY_ATTESTATION_DOMAIN.len() + statement.len());
+    preimage.extend_from_slice(VOTE_REPLY_ATTESTATION_DOMAIN);
+    preimage.extend_from_slice(statement);
+    preimage
+}
+
 fn vote_reply_take<'a>(
     bytes: &'a [u8],
     cursor: &mut usize,
@@ -322,6 +407,7 @@ pub enum ProductionVoteError {
 #[derive(Debug)]
 pub enum ProductionWitnessOpenError {
     OwnerLockRefused,
+    SignerIdentityMismatch,
     Actor(WitnessOpenError),
 }
 
@@ -335,21 +421,26 @@ struct WitnessOwnerLock {
     _file: File,
 }
 
+struct ProductionVoteRuntimeState {
+    _owner_lock: WitnessOwnerLock,
+    cluster_id: String,
+    witness_id: CanonicalId,
+    key_id: CanonicalId,
+    signing_key: SigningKey,
+    credentials: Vec<CandidateCredential>,
+    actor: WitnessVoteActor<FileBackend>,
+}
+
 enum RuntimeMode {
     Management(Box<AuthenticatedRequestJournal>),
-    Vote {
-        _owner_lock: WitnessOwnerLock,
-        cluster_id: String,
-        credentials: Vec<CandidateCredential>,
-        actor: WitnessVoteActor<FileBackend>,
-    },
+    Vote(Box<ProductionVoteRuntimeState>),
 }
 
 impl std::fmt::Debug for RuntimeMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Management(_) => formatter.write_str("Management"),
-            Self::Vote { .. } => formatter.write_str("Vote"),
+            Self::Vote(_) => formatter.write_str("Vote"),
         }
     }
 }
@@ -392,22 +483,38 @@ impl ProductionWitnessRuntime {
     ) -> Result<Self, ProductionWitnessOpenError> {
         let owner_lock = acquire_witness_owner_lock(directory)?;
         let cluster_id = store_identity.cluster_id().to_owned();
-        let actor =
-            WitnessVoteActor::open(policy, signing_key, directory, store_identity, FileBackend)?;
+        let witness_id = policy.witness_id().clone();
+        let key_id = policy.key_id().clone();
+        pin_witness_signer_identity(
+            directory,
+            &witness_id,
+            &key_id,
+            &signing_key.verifying_key(),
+        )?;
+        let actor = WitnessVoteActor::open(
+            policy,
+            signing_key.clone(),
+            directory,
+            store_identity,
+            FileBackend,
+        )?;
         Ok(Self {
-            mode: RuntimeMode::Vote {
+            mode: RuntimeMode::Vote(Box::new(ProductionVoteRuntimeState {
                 _owner_lock: owner_lock,
                 cluster_id,
+                witness_id,
+                key_id,
+                signing_key,
                 credentials: credentials.into_iter().collect(),
                 actor,
-            },
+            })),
         })
     }
 
     pub fn admit_vote(&mut self, bytes: &[u8]) -> Result<ManagementOutcome, AdmissionError> {
         match &mut self.mode {
             RuntimeMode::Management(admission) => admission.admit(bytes),
-            RuntimeMode::Vote { .. } => Err(AdmissionError::Malformed),
+            RuntimeMode::Vote(_) => Err(AdmissionError::Malformed),
         }
     }
 
@@ -415,15 +522,18 @@ impl ProductionWitnessRuntime {
         &mut self,
         bytes: &[u8],
     ) -> Result<ProductionVoteReply, ProductionVoteError> {
-        let RuntimeMode::Vote {
+        let RuntimeMode::Vote(state) = &mut self.mode else {
+            return Err(ProductionVoteError::UnsupportedRuntime);
+        };
+        let ProductionVoteRuntimeState {
             cluster_id,
+            witness_id,
+            key_id,
+            signing_key,
             credentials,
             actor,
             ..
-        } = &mut self.mode
-        else {
-            return Err(ProductionVoteError::UnsupportedRuntime);
-        };
+        } = state.as_mut();
         let frame = ProductionFrame::decode(bytes).map_err(map_vote_frame_error)?;
         if frame.kind() != ProductionFrameKind::Request {
             return Err(ProductionVoteError::Malformed);
@@ -460,24 +570,33 @@ impl ProductionWitnessRuntime {
             lease_expires_at_ms: payload.lease_expires_at_ms(),
         };
         let reply = actor.handle_vote(&binding);
-        Ok(ProductionVoteReply {
+        let mut production_reply = ProductionVoteReply {
+            cluster_id: cluster_id.clone(),
+            witness_id: witness_id.clone(),
+            key_id: key_id.clone(),
             binding,
             code: reply.code(),
             signed_vote: reply.signed_vote().cloned(),
             durable_generation: reply.durable_generation(),
-        })
+            attestation: [0; 64],
+        };
+        let statement = production_reply.encode_statement()?;
+        production_reply.attestation = signing_key
+            .sign(&vote_reply_attestation_preimage(&statement))
+            .to_bytes();
+        Ok(production_reply)
     }
 
     #[must_use]
     pub const fn is_vote_mode(&self) -> bool {
-        matches!(self.mode, RuntimeMode::Vote { .. })
+        matches!(self.mode, RuntimeMode::Vote(_))
     }
 
     #[must_use]
     pub fn highest_sequence(&self) -> u64 {
         match &self.mode {
             RuntimeMode::Management(admission) => admission.highest_sequence(),
-            RuntimeMode::Vote { actor, .. } => actor.durable_generation(),
+            RuntimeMode::Vote(state) => state.actor.durable_generation(),
         }
     }
 
@@ -485,13 +604,84 @@ impl ProductionWitnessRuntime {
     pub fn highest_epoch(&self) -> u64 {
         match &self.mode {
             RuntimeMode::Management(_) => 0,
-            RuntimeMode::Vote { actor, .. } => actor.highest_durable_epoch(),
+            RuntimeMode::Vote(state) => state.actor.highest_durable_epoch(),
         }
     }
 
     #[must_use]
     pub const fn effects_open(&self) -> bool {
         false
+    }
+}
+
+fn pin_witness_signer_identity(
+    directory: &Path,
+    witness_id: &CanonicalId,
+    key_id: &CanonicalId,
+    verifying_key: &VerifyingKey,
+) -> Result<(), ProductionWitnessOpenError> {
+    let witness_len = u8::try_from(witness_id.as_str().len())
+        .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)?;
+    let key_len = u8::try_from(key_id.as_str().len())
+        .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)?;
+    let mut statement = Vec::new();
+    statement.extend_from_slice(SIGNER_IDENTITY_MAGIC);
+    statement.push(witness_len);
+    statement.extend_from_slice(witness_id.as_str().as_bytes());
+    statement.push(key_len);
+    statement.extend_from_slice(key_id.as_str().as_bytes());
+    statement.extend_from_slice(&verifying_key.to_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(b"quorumarc/witness-signer-identity/v1\0");
+    hasher.update(&statement);
+    statement.extend_from_slice(&hasher.finalize());
+    let path = directory.join("witness-signer.identity");
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(&statement)
+                .and_then(|()| file.sync_all())
+                .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)?;
+            File::open(directory)
+                .and_then(|parent| parent.sync_all())
+                .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+                .open(&path)
+                .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)?;
+            let metadata = file
+                .metadata()
+                .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)?;
+            if !metadata.is_file()
+                || metadata.permissions().mode() & 0o077 != 0
+                || metadata.len() != statement.len() as u64
+            {
+                return Err(ProductionWitnessOpenError::SignerIdentityMismatch);
+            }
+            let mut recovered = Vec::new();
+            (&mut file)
+                .take(1_024)
+                .read_to_end(&mut recovered)
+                .map_err(|_error| ProductionWitnessOpenError::SignerIdentityMismatch)?;
+            if recovered != statement {
+                return Err(ProductionWitnessOpenError::SignerIdentityMismatch);
+            }
+            Ok(())
+        }
+        Err(_error) => match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err(ProductionWitnessOpenError::SignerIdentityMismatch)
+            }
+            Ok(_) | Err(_) => Err(ProductionWitnessOpenError::SignerIdentityMismatch),
+        },
     }
 }
 
