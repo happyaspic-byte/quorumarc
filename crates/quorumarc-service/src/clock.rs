@@ -73,6 +73,7 @@ impl BootClock {
             .create_new(true)
             .write(true)
             .mode(0o600)
+            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
             .open(&path)
         {
             Ok(mut file) => {

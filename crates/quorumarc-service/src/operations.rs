@@ -1,10 +1,14 @@
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use rustix::net::sockopt::socket_peercred;
+
+use crate::management_journal::ManagementOutcome;
+use crate::protocol::{AdmissionError, AuthenticatedRequestJournal};
 use crate::signal::ShutdownToken;
 
 use sha2::{Digest, Sha256};
@@ -244,6 +248,122 @@ impl Drop for LocalStatusServer {
     }
 }
 
+const MAX_ADMIN_FRAME: usize = 65_536;
+const ADMIN_IO_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Root-authenticated local mutation socket with durable signed anti-replay.
+#[derive(Debug)]
+pub struct LocalAdminServer {
+    listener: UnixListener,
+    path: PathBuf,
+    inode: (u64, u64),
+    allowed_uid: u32,
+    admission: Mutex<AuthenticatedRequestJournal>,
+}
+
+impl LocalAdminServer {
+    /// Production binding requires root peer credentials.
+    pub fn bind(
+        path: &Path,
+        admission: AuthenticatedRequestJournal,
+    ) -> Result<Self, OperationsError> {
+        Self::bind_with_allowed_uid(path, admission, 0)
+    }
+
+    /// Explicit UID binding supports isolated tests without weakening production defaults.
+    pub fn bind_with_allowed_uid(
+        path: &Path,
+        admission: AuthenticatedRequestJournal,
+        allowed_uid: u32,
+    ) -> Result<Self, OperationsError> {
+        let listener =
+            UnixListener::bind(path).map_err(|_error| OperationsError::SocketBindFailed)?;
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|_error| OperationsError::SocketBindFailed)?;
+        Ok(Self {
+            listener,
+            path: path.to_path_buf(),
+            inode: (metadata.dev(), metadata.ino()),
+            allowed_uid,
+            admission: Mutex::new(admission),
+        })
+    }
+
+    pub fn serve_until(self, shutdown: &ShutdownToken) -> Result<(), OperationsError> {
+        self.listener
+            .set_nonblocking(true)
+            .map_err(|_error| OperationsError::SocketServeFailed)?;
+        while !shutdown.is_requested() {
+            match self.listener.accept() {
+                Ok((stream, _addr)) => {
+                    let _ = self.serve_stream(stream);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    shutdown.wait_timeout(Duration::from_millis(20));
+                }
+                Err(_error) => return Err(OperationsError::SocketServeFailed),
+            }
+        }
+        Ok(())
+    }
+
+    fn serve_stream(&self, mut stream: UnixStream) -> Result<(), OperationsError> {
+        stream
+            .set_read_timeout(Some(ADMIN_IO_TIMEOUT))
+            .and_then(|()| stream.set_write_timeout(Some(ADMIN_IO_TIMEOUT)))
+            .map_err(|_error| OperationsError::SocketServeFailed)?;
+        let peer = socket_peercred(&stream).map_err(|_error| OperationsError::SocketServeFailed)?;
+        let mut length = [0_u8; 4];
+        stream
+            .read_exact(&mut length)
+            .map_err(|_error| OperationsError::SocketServeFailed)?;
+        let frame_len = u32::from_be_bytes(length) as usize;
+        if frame_len == 0 || frame_len > MAX_ADMIN_FRAME {
+            return write_admin_response(&mut stream, b"MALFORMED\n");
+        }
+        let mut frame = vec![0_u8; frame_len];
+        stream
+            .read_exact(&mut frame)
+            .map_err(|_error| OperationsError::SocketServeFailed)?;
+        if peer.uid.as_raw() != self.allowed_uid {
+            return write_admin_response(&mut stream, b"UNAUTHORIZED\n");
+        }
+        let mut admission = self
+            .admission
+            .lock()
+            .map_err(|_error| OperationsError::StatusUnavailable)?;
+        let response = match admission.admit(&frame) {
+            Ok(ManagementOutcome::Committed) => b"COMMITTED\n".as_slice(),
+            Ok(ManagementOutcome::AlreadyDurable) => b"ALREADY_DURABLE\n".as_slice(),
+            Err(AdmissionError::Malformed) => b"MALFORMED\n".as_slice(),
+            Err(AdmissionError::AuthenticationFailed) => b"AUTHENTICATION_FAILED\n".as_slice(),
+            Err(AdmissionError::ReplayRefused) => b"REPLAY_REFUSED\n".as_slice(),
+        };
+        write_admin_response(&mut stream, response)
+    }
+}
+
+impl Drop for LocalAdminServer {
+    fn drop(&mut self) {
+        unlink_if_still_ours(&self.path, self.inode);
+    }
+}
+
+fn write_admin_response(stream: &mut UnixStream, response: &[u8]) -> Result<(), OperationsError> {
+    let length =
+        u32::try_from(response.len()).map_err(|_error| OperationsError::SocketServeFailed)?;
+    stream
+        .write_all(&length.to_be_bytes())
+        .and_then(|()| stream.write_all(response))
+        .and_then(|()| stream.flush())
+        .map_err(|_error| OperationsError::SocketServeFailed)
+}
+
 fn write_shared_status(
     stream: std::os::unix::net::UnixStream,
     status: &StatusHandle,
@@ -260,7 +380,10 @@ fn write_status(
     mut stream: std::os::unix::net::UnixStream,
     status: &NodeStatusReport,
 ) -> Result<(), OperationsError> {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+    stream
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .and_then(|()| stream.set_write_timeout(Some(Duration::from_millis(20))))
+        .map_err(|_error| OperationsError::SocketServeFailed)?;
     let mut discarded = [0_u8; 4_096];
     match stream.read(&mut discarded) {
         Ok(_) => {}
