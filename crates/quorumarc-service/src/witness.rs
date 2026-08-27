@@ -1,5 +1,7 @@
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -9,6 +11,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use quorumarc_runtime::{VoteReasonCode, WitnessOpenError, WitnessPolicy, WitnessVoteActor};
 use quorumarc_store::{FileBackend, StoreIdentity};
 use quorumarc_wire::{CanonicalId, MessageId, PROTOCOL_VERSION, QuorumBinding, SignedVote};
+use rustix::fs::{FlockOperation, OFlags, flock};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use crate::management_journal::{JournalError, ManagementJournal, ManagementOutcome};
@@ -316,9 +319,26 @@ pub enum ProductionVoteError {
     UnsupportedRuntime,
 }
 
+#[derive(Debug)]
+pub enum ProductionWitnessOpenError {
+    OwnerLockRefused,
+    Actor(WitnessOpenError),
+}
+
+impl From<WitnessOpenError> for ProductionWitnessOpenError {
+    fn from(error: WitnessOpenError) -> Self {
+        Self::Actor(error)
+    }
+}
+
+struct WitnessOwnerLock {
+    _file: File,
+}
+
 enum RuntimeMode {
     Management(Box<AuthenticatedRequestJournal>),
     Vote {
+        _owner_lock: WitnessOwnerLock,
         cluster_id: String,
         credentials: Vec<CandidateCredential>,
         actor: WitnessVoteActor<FileBackend>,
@@ -369,12 +389,14 @@ impl ProductionWitnessRuntime {
         policy: WitnessPolicy,
         signing_key: SigningKey,
         credentials: impl IntoIterator<Item = CandidateCredential>,
-    ) -> Result<Self, WitnessOpenError> {
+    ) -> Result<Self, ProductionWitnessOpenError> {
+        let owner_lock = acquire_witness_owner_lock(directory)?;
         let cluster_id = store_identity.cluster_id().to_owned();
         let actor =
             WitnessVoteActor::open(policy, signing_key, directory, store_identity, FileBackend)?;
         Ok(Self {
             mode: RuntimeMode::Vote {
+                _owner_lock: owner_lock,
                 cluster_id,
                 credentials: credentials.into_iter().collect(),
                 actor,
@@ -397,6 +419,7 @@ impl ProductionWitnessRuntime {
             cluster_id,
             credentials,
             actor,
+            ..
         } = &mut self.mode
         else {
             return Err(ProductionVoteError::UnsupportedRuntime);
@@ -470,6 +493,30 @@ impl ProductionWitnessRuntime {
     pub const fn effects_open(&self) -> bool {
         false
     }
+}
+
+fn acquire_witness_owner_lock(
+    directory: &Path,
+) -> Result<WitnessOwnerLock, ProductionWitnessOpenError> {
+    let path = directory.join(".production-witness.owner");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(|_error| ProductionWitnessOpenError::OwnerLockRefused)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_error| ProductionWitnessOpenError::OwnerLockRefused)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(ProductionWitnessOpenError::OwnerLockRefused);
+    }
+    flock(&file, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_error| ProductionWitnessOpenError::OwnerLockRefused)?;
+    Ok(WitnessOwnerLock { _file: file })
 }
 
 fn map_vote_frame_error(error: ProductionFrameError) -> ProductionVoteError {

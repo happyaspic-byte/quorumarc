@@ -8,7 +8,7 @@ use quorumarc_service::protocol::{
     ProductionFrame, ProductionFrameKind, ProductionRequest, ProductionVotePayload,
 };
 use quorumarc_service::witness::{
-    CandidateCredential, ProductionVoteReply, ProductionWitnessRuntime,
+    CandidateCredential, ProductionVoteReply, ProductionWitnessOpenError, ProductionWitnessRuntime,
 };
 use quorumarc_store::{StoreIdentity, StoreRole};
 use quorumarc_wire::{CanonicalId, QuorumCertificate};
@@ -124,6 +124,53 @@ fn production_vote_runtime_signs_only_after_durable_policy_checked_vote() {
     assert_eq!(retried.durable_generation(), Some(1));
     assert_eq!(retried.signed_vote(), granted.signed_vote());
     assert_eq!(resumed.highest_epoch(), 4);
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn production_vote_runtime_refuses_second_writer_on_same_store() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-vote-owner-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let node_a = SigningKey::from_bytes(&[7; 32]);
+    let node_b = SigningKey::from_bytes(&[9; 32]);
+    let credentials = [
+        CandidateCredential::new("node-a", "node-a-2026-01", node_a.verifying_key())
+            .expect("node a credential"),
+        CandidateCredential::new("node-b", "node-b-2026-01", node_b.verifying_key())
+            .expect("node b credential"),
+    ];
+    let first = ProductionWitnessRuntime::open_vote_actor(
+        &directory,
+        identity(),
+        policy(),
+        SigningKey::from_bytes(&[29; 32]),
+        credentials.clone(),
+    )
+    .expect("first");
+    assert!(matches!(
+        ProductionWitnessRuntime::open_vote_actor(
+            &directory,
+            identity(),
+            policy(),
+            SigningKey::from_bytes(&[29; 32]),
+            credentials.clone(),
+        ),
+        Err(ProductionWitnessOpenError::OwnerLockRefused)
+    ));
+    drop(first);
+    assert!(
+        ProductionWitnessRuntime::open_vote_actor(
+            &directory,
+            identity(),
+            policy(),
+            SigningKey::from_bytes(&[29; 32]),
+            credentials,
+        )
+        .is_ok()
+    );
     let _ = fs::remove_dir_all(directory);
 }
 
