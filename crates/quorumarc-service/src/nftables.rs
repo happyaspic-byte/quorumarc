@@ -92,6 +92,18 @@ impl<B: NftBackend> LinuxNftablesEffectAdapter<B> {
     pub fn ownership_tag(&self) -> String {
         format!("{QUORUMARC_NFT_COMMENT_PREFIX}{}", self.node_id)
     }
+
+    /// Verifies that no nftables rule exists for this table/chain on daemon boot.
+    pub fn verify_kernel_closed(&mut self) -> Result<(), AdapterError> {
+        let observation = self
+            .backend
+            .observe(&self.table, &self.chain)
+            .map_err(|_error| AdapterError::EffectNotClosed)?;
+        if observation.is_some() {
+            return Err(AdapterError::ReadBackMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl<B: NftBackend> EffectAdapter for LinuxNftablesEffectAdapter<B> {

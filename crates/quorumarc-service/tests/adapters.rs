@@ -578,3 +578,35 @@ fn redfish_fence_fails_closed_without_https_or_when_observation_is_uncertain() {
     );
     assert_eq!(fence.backend().commands, 0);
 }
+
+use quorumarc_service::adapters::CompositeEffectAdapter;
+
+#[test]
+fn composite_effect_adapter_verifies_both_closed_and_rolls_back_partial_open() {
+    let first = MockEffectAdapter::closed();
+    let second = MockEffectAdapter::closed();
+    let mut composite = CompositeEffectAdapter::new(first, second);
+    assert!(composite.verify_closed().is_ok());
+
+    composite
+        .open_with_receipt("orders-api", 2, [11; 32])
+        .expect("open both");
+    assert_eq!(
+        composite.verify_closed(),
+        Err(AdapterError::EffectNotClosed)
+    );
+
+    composite
+        .close(CloseReason::LeaseExpired)
+        .expect("close both");
+    assert!(composite.verify_closed().is_ok());
+
+    let closed_only = ClosedOnlyEffectAdapter;
+    let mock = MockEffectAdapter::closed();
+    let mut failing_composite = CompositeEffectAdapter::new(mock, closed_only);
+    assert_eq!(
+        failing_composite.open_with_receipt("orders-api", 2, [11; 32]),
+        Err(AdapterError::ReceiptRequired)
+    );
+    assert!(failing_composite.verify_closed().is_ok());
+}

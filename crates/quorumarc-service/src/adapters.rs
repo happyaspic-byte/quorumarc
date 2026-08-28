@@ -309,6 +309,112 @@ impl EffectAdapter for ClosedOnlyEffectAdapter {
     }
 }
 
+/// Combines two production effect adapters into one fail-closed gate.
+#[derive(Debug)]
+pub struct CompositeEffectAdapter<A, B> {
+    first: A,
+    second: B,
+}
+
+impl<A, B> CompositeEffectAdapter<A, B> {
+    #[must_use]
+    pub const fn new(first: A, second: B) -> Self {
+        Self { first, second }
+    }
+
+    #[must_use]
+    pub const fn first(&self) -> &A {
+        &self.first
+    }
+
+    #[must_use]
+    pub const fn second(&self) -> &B {
+        &self.second
+    }
+}
+
+impl<A: EffectAdapter, B: EffectAdapter> EffectAdapter for CompositeEffectAdapter<A, B> {
+    fn verify_closed(&self) -> Result<(), AdapterError> {
+        self.first.verify_closed()?;
+        self.second.verify_closed()
+    }
+
+    fn open(&mut self, workload: &str, epoch: u64) -> Result<(), AdapterError> {
+        self.first.open(workload, epoch)?;
+        if let Err(error) = self.second.open(workload, epoch) {
+            let _ = self.first.close(CloseReason::ExplicitClose);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn open_with_receipt(
+        &mut self,
+        workload: &str,
+        epoch: u64,
+        receipt_digest: [u8; 32],
+    ) -> Result<(), AdapterError> {
+        self.first
+            .open_with_receipt(workload, epoch, receipt_digest)?;
+        if let Err(error) = self
+            .second
+            .open_with_receipt(workload, epoch, receipt_digest)
+        {
+            let _ = self.first.close(CloseReason::ExplicitClose);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, reason: CloseReason) -> Result<(), AdapterError> {
+        let first = self.first.close(reason);
+        let second = self.second.close(reason);
+        first.and(second)
+    }
+}
+
+/// Dynamic wrapper for an optional second effect adapter.
+#[derive(Debug)]
+pub enum OptionalEffectAdapter<T> {
+    None,
+    Some(T),
+}
+
+impl<T: EffectAdapter> EffectAdapter for OptionalEffectAdapter<T> {
+    fn verify_closed(&self) -> Result<(), AdapterError> {
+        match self {
+            Self::None => Ok(()),
+            Self::Some(adapter) => adapter.verify_closed(),
+        }
+    }
+
+    fn open(&mut self, workload: &str, epoch: u64) -> Result<(), AdapterError> {
+        match self {
+            Self::None => Ok(()),
+            Self::Some(adapter) => adapter.open(workload, epoch),
+        }
+    }
+
+    fn open_with_receipt(
+        &mut self,
+        workload: &str,
+        epoch: u64,
+        receipt_digest: [u8; 32],
+    ) -> Result<(), AdapterError> {
+        match self {
+            Self::None => Ok(()),
+            Self::Some(adapter) => adapter.open_with_receipt(workload, epoch, receipt_digest),
+        }
+    }
+
+    fn close(&mut self, reason: CloseReason) -> Result<(), AdapterError> {
+        match self {
+            Self::None => Ok(()),
+            Self::Some(adapter) => adapter.close(reason),
+        }
+    }
+}
+
 /// Observable VIP ownership state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VipState {

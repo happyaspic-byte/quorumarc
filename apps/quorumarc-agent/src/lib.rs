@@ -784,9 +784,36 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
-            if let Some((table, chain)) = config.effect_nftables() {
-                let nft_backend =
-                    match quorumarc_service::nftables::NativeNftBackend::new(config.node_id()) {
+            let mut vip_adapter = match quorumarc_service::linux_vip::LinuxVipEffectAdapter::new(
+                config.workload_id(),
+                config.node_id(),
+                config.effect_vip(),
+                config.effect_interface(),
+                backend,
+            ) {
+                Ok(adapter) => adapter,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "EFFECT_ADAPTER_CONFIG_INVALID",
+                        "cannot bind the configured Linux VIP target",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
+            if vip_adapter.verify_kernel_closed().is_err() {
+                return CliReport::refusal(
+                    "daemon",
+                    "EFFECT_ADAPTER_NOT_CLOSED",
+                    "configured VIP is already present or could not be verified absent",
+                    EXIT_CONFIG,
+                );
+            }
+            let nft_adapter = match config.effect_nftables() {
+                Some((table, chain)) => {
+                    let nft_backend = match quorumarc_service::nftables::NativeNftBackend::new(
+                        config.node_id(),
+                    ) {
                         Ok(backend) => backend,
                         Err(_error) => {
                             return CliReport::refusal(
@@ -797,33 +824,36 @@ fn daemon(options: DaemonOptions) -> CliReport {
                             );
                         }
                     };
-                let nft_adapter = match quorumarc_service::nftables::LinuxNftablesEffectAdapter::new(
-                    config.workload_id(),
-                    config.node_id(),
-                    table,
-                    chain,
-                    nft_backend,
-                ) {
-                    Ok(adapter) => adapter,
-                    Err(_error) => {
+                    let mut nft_adapter =
+                        match quorumarc_service::nftables::LinuxNftablesEffectAdapter::new(
+                            config.workload_id(),
+                            config.node_id(),
+                            table,
+                            chain,
+                            nft_backend,
+                        ) {
+                            Ok(adapter) => adapter,
+                            Err(_error) => {
+                                return CliReport::refusal(
+                                    "daemon",
+                                    "NFTABLES_ADAPTER_CONFIG_INVALID",
+                                    "cannot bind configured nftables table/chain",
+                                    EXIT_CONFIG,
+                                );
+                            }
+                        };
+                    if nft_adapter.verify_kernel_closed().is_err() {
                         return CliReport::refusal(
                             "daemon",
-                            "NFTABLES_ADAPTER_CONFIG_INVALID",
-                            "cannot bind configured nftables table/chain",
+                            "NFTABLES_ADAPTER_NOT_CLOSED",
+                            "configured nftables rule is already present or could not be verified absent",
                             EXIT_CONFIG,
                         );
                     }
-                };
-                use quorumarc_service::adapters::EffectAdapter as _;
-                if nft_adapter.verify_closed().is_err() {
-                    return CliReport::refusal(
-                        "daemon",
-                        "NFTABLES_ADAPTER_NOT_CLOSED",
-                        "configured nftables rule did not verify closed",
-                        EXIT_CONFIG,
-                    );
+                    quorumarc_service::adapters::OptionalEffectAdapter::Some(nft_adapter)
                 }
-            }
+                None => quorumarc_service::adapters::OptionalEffectAdapter::None,
+            };
             if let Some((system_url, ca_cert, auth_config, timeout_secs)) = config.fence_redfish() {
                 let redfish_backend = match quorumarc_service::redfish::NativeRedfishBackend::new(
                     system_url,
@@ -841,48 +871,23 @@ fn daemon(options: DaemonOptions) -> CliReport {
                         );
                     }
                 };
-                let _redfish_adapter =
-                    match quorumarc_service::redfish::LinuxRedfishFenceAdapter::new(
-                        config.node_id(),
-                        system_url,
-                        redfish_backend,
-                    ) {
-                        Ok(adapter) => adapter,
-                        Err(_error) => {
-                            return CliReport::refusal(
-                                "daemon",
-                                "REDFISH_ADAPTER_CONFIG_INVALID",
-                                "cannot bind configured Redfish system URL",
-                                EXIT_CONFIG,
-                            );
-                        }
-                    };
-            }
-            let mut adapter = match quorumarc_service::linux_vip::LinuxVipEffectAdapter::new(
-                config.workload_id(),
-                config.node_id(),
-                config.effect_vip(),
-                config.effect_interface(),
-                backend,
-            ) {
-                Ok(adapter) => adapter,
-                Err(_error) => {
+                if quorumarc_service::redfish::LinuxRedfishFenceAdapter::new(
+                    config.node_id(),
+                    system_url,
+                    redfish_backend,
+                )
+                .is_err()
+                {
                     return CliReport::refusal(
                         "daemon",
-                        "EFFECT_ADAPTER_CONFIG_INVALID",
-                        "cannot bind the configured Linux VIP target",
+                        "REDFISH_ADAPTER_CONFIG_INVALID",
+                        "cannot bind configured Redfish system URL",
                         EXIT_CONFIG,
                     );
                 }
-            };
-            if adapter.verify_kernel_closed().is_err() {
-                return CliReport::refusal(
-                    "daemon",
-                    "EFFECT_ADAPTER_NOT_CLOSED",
-                    "configured VIP is already present or could not be verified absent",
-                    EXIT_CONFIG,
-                );
             }
+            let adapter =
+                quorumarc_service::adapters::CompositeEffectAdapter::new(vip_adapter, nft_adapter);
             let mut node =
                 match quorumarc_service::node::ProductionNode::from_effect_adapter(adapter) {
                     Ok(node) => node,
