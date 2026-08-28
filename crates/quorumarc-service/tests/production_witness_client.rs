@@ -751,6 +751,9 @@ fn production_witness_client_refuses_cross_cluster_vote_reply_replay() {
     let result = client.request_vote(request, &candidate, &witness_identity);
     assert_eq!(result, Err(WitnessClientError::AuthenticationFailed));
     assert!(!WitnessClientError::AuthenticationFailed.is_node_failure_suspicion());
+    assert!(!WitnessClientError::Malformed.is_node_failure_suspicion());
+    assert!(!WitnessClientError::InvalidConfiguration.is_node_failure_suspicion());
+    assert!(WitnessClientError::Transport.is_node_failure_suspicion());
     server_handle.join().expect("server handle");
 }
 

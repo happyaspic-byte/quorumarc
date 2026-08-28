@@ -36,7 +36,7 @@ pub enum WitnessClientError {
 impl WitnessClientError {
     #[must_use]
     pub const fn is_node_failure_suspicion(self) -> bool {
-        false
+        matches!(self, Self::Transport)
     }
 }
 
