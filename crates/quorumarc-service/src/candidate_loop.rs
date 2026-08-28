@@ -45,6 +45,26 @@ impl CandidateControlState {
     }
 }
 
+pub trait DurableCertificateSink: Send {
+    fn persist(
+        &mut self,
+        certificate: &ProductionQuorumCertificate,
+    ) -> Result<(), CandidateControlError>;
+}
+
+/// No-op memory sink for testing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryCertificateSink;
+
+impl DurableCertificateSink for MemoryCertificateSink {
+    fn persist(
+        &mut self,
+        _certificate: &ProductionQuorumCertificate,
+    ) -> Result<(), CandidateControlError> {
+        Ok(())
+    }
+}
+
 pub trait CandidateAttempt {
     fn request_certificate(
         &mut self,
@@ -62,13 +82,15 @@ impl CandidateAttempt for ProductionCandidateControl {
 }
 
 #[derive(Debug)]
-pub struct CandidateControlLoop<C> {
+pub struct CandidateControlLoop<C, S = MemoryCertificateSink> {
     control: C,
+    sink: S,
     state: CandidateControlState,
     status: Option<StatusHandle>,
+    certificate: Option<ProductionQuorumCertificate>,
 }
 
-impl<C> CandidateControlLoop<C>
+impl<C> CandidateControlLoop<C, MemoryCertificateSink>
 where
     C: CandidateAttempt,
 {
@@ -78,8 +100,10 @@ where
     pub const fn new(control: C) -> Self {
         Self {
             control,
+            sink: MemoryCertificateSink,
             state: CandidateControlState::EffectClosed,
             status: None,
+            certificate: None,
         }
     }
 
@@ -87,9 +111,32 @@ where
     pub fn with_status(control: C, status: StatusHandle) -> Self {
         Self {
             control,
+            sink: MemoryCertificateSink,
             state: CandidateControlState::EffectClosed,
             status: Some(status),
+            certificate: None,
         }
+    }
+}
+
+impl<C, S> CandidateControlLoop<C, S>
+where
+    C: CandidateAttempt,
+    S: DurableCertificateSink,
+{
+    #[must_use]
+    pub fn with_sink(control: C, sink: S, status: Option<StatusHandle>) -> Self {
+        Self {
+            control,
+            sink,
+            state: CandidateControlState::EffectClosed,
+            status,
+            certificate: None,
+        }
+    }
+
+    pub fn take_certificate(&mut self) -> Option<ProductionQuorumCertificate> {
+        self.certificate.take()
     }
 
     #[must_use]
@@ -136,7 +183,7 @@ where
             return self.state;
         }
         self.transition(CandidateControlState::SuspicionEffectClosed);
-        for attempt in 0..Self::MAX_ATTEMPTS {
+        for attempt in 0..CandidateControlLoop::<C>::MAX_ATTEMPTS {
             if shutdown.is_requested() {
                 self.transition(CandidateControlState::StoppedEffectClosed);
                 return self.state;
@@ -149,7 +196,7 @@ where
                 ))
             );
             let state = self.apply_result(result);
-            if !retry || attempt.saturating_add(1) >= Self::MAX_ATTEMPTS {
+            if !retry || attempt.saturating_add(1) >= CandidateControlLoop::<C>::MAX_ATTEMPTS {
                 return state;
             }
             shutdown.wait_timeout(RETRY_DELAY);
@@ -173,11 +220,27 @@ where
         result: Result<ProductionQuorumCertificate, CandidateControlError>,
     ) -> CandidateControlState {
         match result {
-            Ok(_certificate) => self.transition(CandidateControlState::CertifiedEffectClosed),
+            Ok(certificate) if certificate.votes().len() >= 2 => {
+                if self.sink.persist(&certificate).is_ok() {
+                    self.certificate = Some(certificate);
+                    self.transition(CandidateControlState::CertifiedEffectClosed)
+                } else {
+                    self.certificate = None;
+                    self.transition(CandidateControlState::EffectClosed)
+                }
+            }
+            Ok(_certificate) => {
+                self.certificate = None;
+                self.transition(CandidateControlState::EffectClosed)
+            }
             Err(error) if error.is_node_failure_suspicion() => {
+                self.certificate = None;
                 self.transition(CandidateControlState::SuspicionEffectClosed)
             }
-            Err(_error) => self.transition(CandidateControlState::EffectClosed),
+            Err(_error) => {
+                self.certificate = None;
+                self.transition(CandidateControlState::EffectClosed)
+            }
         }
         self.state
     }
