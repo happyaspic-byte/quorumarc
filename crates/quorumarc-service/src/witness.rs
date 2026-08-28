@@ -1202,7 +1202,7 @@ fn read_private_seed(path: &Path) -> Result<[u8; 32], ProductionWitnessOpenError
     Ok(seed)
 }
 
-fn read_public_key(path: &Path) -> Result<VerifyingKey, ProductionWitnessOpenError> {
+pub(crate) fn read_public_key(path: &Path) -> Result<VerifyingKey, ProductionWitnessOpenError> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(OFlags::NOFOLLOW.bits() as i32)

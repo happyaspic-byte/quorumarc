@@ -21,3 +21,4 @@ pub mod signal;
 pub mod tls;
 pub mod watchdog;
 pub mod witness;
+pub mod witness_client;
