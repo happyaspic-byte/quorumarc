@@ -281,14 +281,19 @@ impl DurableProgressLease {
             return Err(ProgressLeaseError::ProgressNotAdvanced);
         }
         let encoded = encode_progress_record(self.identity, progress_commit, expires_at_ms);
-        let mut file = OpenOptions::new()
-            .append(true)
-            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
-            .open(&self.path)
-            .map_err(|_error| ProgressLeaseError::Io)?;
-        file.write_all(&encoded)
-            .and_then(|()| file.sync_all())
-            .map_err(|_error| ProgressLeaseError::Io)?;
+        let metadata = fs::metadata(&self.path).map_err(|_error| ProgressLeaseError::Io)?;
+        if metadata.len().saturating_add(PROGRESS_RECORD_LEN as u64) > MAX_PROGRESS_LEASE_SIZE {
+            compact_progress_lease(&self.path, self.identity, progress_commit, expires_at_ms)?;
+        } else {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+                .open(&self.path)
+                .map_err(|_error| ProgressLeaseError::Io)?;
+            file.write_all(&encoded)
+                .and_then(|()| file.sync_all())
+                .map_err(|_error| ProgressLeaseError::Io)?;
+        }
         self.progress_commit = progress_commit;
         self.expires_at_ms = Some(expires_at_ms);
         Ok(expires_at_ms)
@@ -350,6 +355,37 @@ fn recover_progress_lease(
         expires_at_ms = Some(expiry);
     }
     Ok((identity, progress_commit, expires_at_ms))
+}
+
+fn compact_progress_lease(
+    path: &Path,
+    identity: [u8; PROGRESS_IDENTITY_LEN],
+    progress_commit: u64,
+    expires_at_ms: u64,
+) -> Result<(), ProgressLeaseError> {
+    let directory = path.parent().ok_or(ProgressLeaseError::Io)?;
+    let staging = directory.join("progress.lease.staging");
+    let _ = fs::remove_file(&staging);
+    let mut header = [0_u8; PROGRESS_HEADER_LEN];
+    header[..PROGRESS_LEASE_MAGIC.len()].copy_from_slice(PROGRESS_LEASE_MAGIC);
+    header[PROGRESS_LEASE_MAGIC.len()..].copy_from_slice(&identity);
+    let encoded = encode_progress_record(identity, progress_commit, expires_at_ms);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(&staging)
+        .map_err(|_error| ProgressLeaseError::Io)?;
+    file.write_all(&header)
+        .and_then(|()| file.write_all(&encoded))
+        .and_then(|()| file.sync_all())
+        .map_err(|_error| ProgressLeaseError::Io)?;
+    fs::rename(&staging, path).map_err(|_error| ProgressLeaseError::Io)?;
+    File::open(directory)
+        .and_then(|parent| parent.sync_all())
+        .map_err(|_error| ProgressLeaseError::Io)?;
+    Ok(())
 }
 
 fn encode_progress_record(

@@ -157,6 +157,27 @@ fn progress_lease_renews_only_after_new_durable_progress_and_survives_restart() 
 }
 
 #[test]
+fn progress_lease_compacts_before_its_own_recovery_limit() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-progress-compaction-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let mut lease = DurableProgressLease::open(&directory, [36; 16]).expect("open");
+    for commit in 1..=2_000 {
+        lease
+            .record_progress(commit, commit * 10, 10)
+            .expect("record");
+    }
+    drop(lease);
+
+    let resumed = DurableProgressLease::open(&directory, [36; 16]).expect("resume");
+    assert_eq!(resumed.highest_progress_commit(), 2_000);
+    assert_eq!(resumed.expires_at_ms(), Some(20_010));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn progress_lease_refuses_clock_overflow_and_copied_identity() {
     let directory = std::env::temp_dir().join(format!(
         "quorumarc-progress-overflow-{}",
