@@ -14,6 +14,7 @@ pub enum AdapterError {
     AlreadyClosed,
     UnknownOutlet,
     EffectNotClosed,
+    StaleEpoch,
 }
 
 /// Observed power state of one mapped outlet.

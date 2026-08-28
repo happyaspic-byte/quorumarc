@@ -146,6 +146,8 @@ struct FakeVipBackend {
     adds: usize,
     deletes: usize,
     fail_add: bool,
+    fail_observe: bool,
+    fail_delete: bool,
 }
 
 impl VipBackend for FakeVipBackend {
@@ -155,6 +157,9 @@ impl VipBackend for FakeVipBackend {
         _address: std::net::IpAddr,
         _prefix_len: u8,
     ) -> Result<Option<VipObservation>, VipBackendError> {
+        if self.fail_observe {
+            return Err(VipBackendError::Io);
+        }
         Ok(self.observation.clone())
     }
 
@@ -169,6 +174,9 @@ impl VipBackend for FakeVipBackend {
 
     fn delete(&mut self, observation: &VipObservation) -> Result<(), VipBackendError> {
         self.deletes += 1;
+        if self.fail_delete {
+            return Err(VipBackendError::Io);
+        }
         if self.observation.as_ref() == Some(observation) {
             self.observation = None;
         }
@@ -246,6 +254,87 @@ fn linux_vip_rolls_back_when_add_read_back_is_not_owned() {
         Err(AdapterError::EffectNotClosed)
     );
     assert_eq!(adapter.state(), VipState::Detached);
+}
+
+#[test]
+fn linux_vip_adopts_pre_existing_owned_address_without_re_adding_or_deleting() {
+    let backend = FakeVipBackend {
+        observation: Some(VipObservation::owned(
+            "enp1s0",
+            "172.30.1.100".parse().expect("ip"),
+            24,
+        )),
+        ..FakeVipBackend::default()
+    };
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+
+    adapter
+        .attach(&authorization(3))
+        .expect("adopt pre-existing owned");
+    assert_eq!(adapter.state(), VipState::Attached(3));
+    assert_eq!(adapter.backend().adds, 0);
+    assert_eq!(adapter.backend().deletes, 0);
+}
+
+#[test]
+fn linux_vip_same_epoch_attach_verifies_kernel_presence_before_success() {
+    let backend = FakeVipBackend::default();
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+    adapter.attach(&authorization(2)).expect("first attach");
+    assert_eq!(adapter.state(), VipState::Attached(2));
+
+    // External removal of VIP while in Attached state
+    adapter.backend_mut().observation = None;
+    assert_eq!(
+        adapter.attach(&authorization(2)),
+        Err(AdapterError::EffectNotClosed)
+    );
+    assert_eq!(adapter.state(), VipState::Detached);
+}
+
+#[test]
+fn linux_vip_rejects_stale_epoch_after_detach() {
+    let backend = FakeVipBackend::default();
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+    adapter.attach(&authorization(3)).expect("attach epoch 3");
+    adapter
+        .detach(CloseReason::LeaseExpired)
+        .expect("detach epoch 3");
+
+    assert_eq!(
+        adapter.attach(&authorization(2)),
+        Err(AdapterError::StaleEpoch)
+    );
+    assert_eq!(adapter.backend().adds, 1);
+}
+
+#[test]
+fn linux_vip_detach_fails_closed_on_observe_error_and_requires_read_back_absence() {
+    let backend = FakeVipBackend::default();
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+    adapter.attach(&authorization(2)).expect("attach");
+
+    adapter.backend_mut().fail_observe = true;
+    assert_eq!(
+        adapter.detach(CloseReason::LeaseExpired),
+        Err(AdapterError::EffectNotClosed)
+    );
+
+    adapter.backend_mut().fail_observe = false;
+    adapter.backend_mut().fail_delete = true;
+    assert_eq!(
+        adapter.detach(CloseReason::LeaseExpired),
+        Err(AdapterError::EffectNotClosed)
+    );
+    assert_ne!(adapter.state(), VipState::Detached);
 }
 
 #[test]

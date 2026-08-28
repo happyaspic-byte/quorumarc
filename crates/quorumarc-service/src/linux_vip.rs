@@ -246,10 +246,9 @@ impl VipBackend for NetlinkVipBackend {
         let handle = self.handle.clone();
         self.runtime.block_on(async move {
             let backend = NetlinkLookup { handle: &handle };
-            let message = backend
-                .find_owned(&interface, address, prefix_len)
-                .await?
-                .ok_or(VipBackendError::ReadBackFailed)?;
+            let Some(message) = backend.find_owned(&interface, address, prefix_len).await? else {
+                return Ok(());
+            };
             handle
                 .address()
                 .del(message)
@@ -332,6 +331,7 @@ pub struct LinuxVipEffectAdapter<B> {
     address: IpAddr,
     prefix_len: u8,
     state: VipState,
+    last_epoch: u64,
     backend: B,
 }
 
@@ -355,6 +355,7 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
             address,
             prefix_len,
             state: VipState::Detached,
+            last_epoch: 0,
             backend,
         })
     }
@@ -400,8 +401,12 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
         if authorization.epoch() == 0 {
             return Err(AdapterError::ReceiptRequired);
         }
+        if authorization.epoch() < self.last_epoch {
+            return Err(AdapterError::StaleEpoch);
+        }
         if let VipState::Attached(epoch) = self.state {
             if epoch == authorization.epoch() {
+                self.verify_attached()?;
                 return Ok(());
             }
             return Err(AdapterError::EffectNotClosed);
@@ -411,27 +416,37 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
             .observe(&self.interface, self.address, self.prefix_len)
             .map_err(|_error| AdapterError::EffectNotClosed)?;
         if let Some(existing) = pre_existing {
-            if !existing.is_owned() {
-                return Err(AdapterError::ReadBackMismatch);
+            if existing.is_owned() {
+                self.state = VipState::Attached(authorization.epoch());
+                self.last_epoch = authorization.epoch();
+                return Ok(());
             }
+            return Err(AdapterError::ReadBackMismatch);
         }
         let target = VipObservation::owned(&self.interface, self.address, self.prefix_len);
         if self.backend.add(&target).is_err() {
-            let _ = self.backend.delete(&target);
             self.state = VipState::Detached;
             return Err(AdapterError::EffectNotClosed);
         }
+        self.state = VipState::Attached(authorization.epoch());
         match self
             .backend
             .observe(&self.interface, self.address, self.prefix_len)
         {
             Ok(Some(observation)) if observation.is_owned() => {
-                self.state = VipState::Attached(authorization.epoch());
+                self.last_epoch = authorization.epoch();
                 Ok(())
             }
             _ => {
-                let _ = self.backend.delete(&target);
-                self.state = VipState::Detached;
+                if self.backend.delete(&target).is_ok()
+                    && matches!(
+                        self.backend
+                            .observe(&self.interface, self.address, self.prefix_len),
+                        Ok(None)
+                    )
+                {
+                    self.state = VipState::Detached;
+                }
                 Err(AdapterError::EffectNotClosed)
             }
         }
@@ -439,14 +454,24 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
 
     pub fn detach(&mut self, _reason: CloseReason) -> Result<(), AdapterError> {
         let target = VipObservation::owned(&self.interface, self.address, self.prefix_len);
-        if let Ok(Some(observation)) =
-            self.backend
-                .observe(&self.interface, self.address, self.prefix_len)
-        {
-            if observation.is_owned() {
+        let observation = self
+            .backend
+            .observe(&self.interface, self.address, self.prefix_len)
+            .map_err(|_error| AdapterError::EffectNotClosed)?;
+        if let Some(existing) = observation {
+            if existing.is_owned() {
                 self.backend
                     .delete(&target)
                     .map_err(|_error| AdapterError::EffectNotClosed)?;
+                match self
+                    .backend
+                    .observe(&self.interface, self.address, self.prefix_len)
+                {
+                    Ok(None) => {}
+                    _ => return Err(AdapterError::EffectNotClosed),
+                }
+            } else {
+                return Err(AdapterError::ReadBackMismatch);
             }
         }
         self.state = VipState::Detached;
