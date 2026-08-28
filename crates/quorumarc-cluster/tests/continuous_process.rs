@@ -295,6 +295,63 @@ fn reachable_lagging_replica_prevents_primary_append() {
 }
 
 #[test]
+fn exact_prefix_replica_catches_up_before_primary_readiness_and_resumes_ack() {
+    let fixture = Fixture::new("prefix-catchup");
+    let first = quorumarc_rpo0::WalEntry {
+        commit_index: 1,
+        operation_id: quorumarc_rpo0::OperationId::new([91; 16]),
+        previous_value: 0,
+        increment: 2,
+        value: 2,
+    };
+    let second = quorumarc_rpo0::WalEntry {
+        commit_index: 2,
+        operation_id: quorumarc_rpo0::OperationId::new([92; 16]),
+        previous_value: 2,
+        increment: 3,
+        value: 5,
+    };
+    let mut primary_seed = first.encode();
+    primary_seed.extend_from_slice(&second.encode());
+    fs::write(&fixture.primary_wal, &primary_seed).expect("seed primary WAL");
+    fs::write(&fixture.replica_wal, first.encode()).expect("seed replica prefix");
+
+    let replica_ready = fixture.root.join("replica.ready");
+    let primary_ready = fixture.root.join("primary.ready");
+    let mut replica = spawn_replica(&fixture, &replica_ready, 2);
+    let replica_address = wait_ready(&replica_ready, &mut replica);
+    let mut primary = spawn_primary(&fixture, &primary_ready, replica_address, 1);
+    let primary_address = wait_ready(&primary_ready, &mut primary);
+
+    assert_eq!(
+        fs::read(&fixture.replica_wal).expect("read repaired replica WAL"),
+        primary_seed
+    );
+    let ack_index = fixture.root.join("catchup-client-acks.index");
+    let third = submit(&fixture, primary_address, &ack_index, 93, 2, 4);
+    assert_success("post-catchup submit", &third);
+    assert!(String::from_utf8_lossy(&third.stdout).contains("commit_index=3"));
+    assert!(String::from_utf8_lossy(&third.stdout).contains("value=9"));
+
+    assert_success(
+        "prefix-catchup primary",
+        &primary
+            .wait_with_output()
+            .expect("collect repaired primary"),
+    );
+    assert_success(
+        "prefix-catchup replica",
+        &replica
+            .wait_with_output()
+            .expect("collect repaired replica"),
+    );
+    assert_eq!(
+        fs::read(&fixture.primary_wal).expect("read final primary WAL"),
+        fs::read(&fixture.replica_wal).expect("read final replica WAL")
+    );
+}
+
+#[test]
 fn equal_wal_restart_rebuilds_exact_retry_without_duplicate_append() {
     let fixture = Fixture::new("restart-dedupe");
     let replica_ready = fixture.root.join("replica.ready");

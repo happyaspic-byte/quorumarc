@@ -76,12 +76,27 @@ pub fn serve_continuous_primary(config: ContinuousPrimaryConfig) -> Result<(), C
         replica_key,
         config.policy_hash,
     );
-    let (local_recovered, _) = local
+    let (local_recovered, local_bytes) = local
         .recover_and_sync()
         .map_err(|error| err("CONTINUOUS_PRIMARY_WAL_REFUSED", error.to_string()))?;
-    let remote_recovered = remote
+    let mut remote_recovered = remote
         .query_progress()
         .map_err(|error| err("CONTINUOUS_PRIMARY_RECOVERY_REFUSED", error.to_string()))?;
+    if remote_recovered.commit_index < local_recovered.commit_index {
+        let entries = quorumarc_rpo0::decode_wal_records(&local_bytes)
+            .map_err(|error| err("CONTINUOUS_PRIMARY_WAL_REFUSED", error.to_string()))?;
+        for (entry, record) in entries {
+            if entry.commit_index <= remote_recovered.commit_index {
+                continue;
+            }
+            remote
+                .append_and_flush(&entry, &record)
+                .map_err(|error| err("CONTINUOUS_PRIMARY_RECOVERY_REFUSED", error.to_string()))?;
+        }
+        remote_recovered = remote
+            .query_progress()
+            .map_err(|error| err("CONTINUOUS_PRIMARY_RECOVERY_REFUSED", error.to_string()))?;
+    }
     let counter = ReplicatedCounter::from_recovered_with_replica_ids(
         local_recovered,
         remote_recovered,

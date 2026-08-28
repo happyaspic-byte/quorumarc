@@ -131,6 +131,53 @@ impl RecoveredCounter {
     }
 }
 
+pub fn decode_wal_records(bytes: &[u8]) -> Result<Vec<(WalEntry, Vec<u8>)>, WalCorruption> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = bytes.chunks_exact(RECORD_LENGTH);
+    if !records.remainder().is_empty() {
+        return Err(WalCorruption::Truncated);
+    }
+    let mut entries = Vec::with_capacity(records.len());
+    let mut current = RecoveredCounter::empty();
+    for record in records {
+        let entry = decode_record(record)?;
+        if entry.commit_index != current.commit_index.saturating_add(1) {
+            return Err(WalCorruption::NonContiguousCommitIndex);
+        }
+        if entry.previous_value != current.value {
+            return Err(WalCorruption::PreviousValueMismatch);
+        }
+        let calculated = entry
+            .previous_value
+            .checked_add(entry.increment)
+            .ok_or(WalCorruption::ValueMismatch)?;
+        if entry.increment == 0 || calculated != entry.value {
+            return Err(WalCorruption::ValueMismatch);
+        }
+        if current.operations.contains_key(&entry.operation_id) {
+            return Err(WalCorruption::DuplicateOperationId);
+        }
+        current.state_root = next_state_root(current.state_root, record);
+        current.commit_index = entry.commit_index;
+        current.value = entry.value;
+        current.operations.insert(
+            entry.operation_id,
+            RecoveredOperation {
+                commit_index: entry.commit_index,
+                expected_commit_index: entry.commit_index.saturating_sub(1),
+                increment: entry.increment,
+                value: entry.value,
+                state_root: current.state_root,
+                record_checksum: recorded_checksum(record)?,
+            },
+        );
+        entries.push((entry, record.to_vec()));
+    }
+    Ok(entries)
+}
+
 pub fn recover_wal(bytes: &[u8]) -> Result<RecoveredCounter, WalCorruption> {
     if bytes.is_empty() {
         return Ok(RecoveredCounter::empty());
