@@ -294,9 +294,11 @@ dependencies = [
 name = "quorumarc-agent"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "quorumarc-service",
  "quorumarc-store",
  "quorumarc-wire",
+ "rcgen",
 ]
 
 [[package]]

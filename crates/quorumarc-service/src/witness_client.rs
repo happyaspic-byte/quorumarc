@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -16,7 +17,9 @@ use crate::protocol::{
     ProductionFrame, ProductionFrameKind, ProductionRequest, ProductionVotePayload,
 };
 use crate::tls::load_mtls_client_config;
-use crate::witness::{ProductionVoteError, ProductionVoteReply, read_public_key};
+use crate::witness::{
+    ProductionVoteError, ProductionVoteReply, read_private_seed, read_public_key,
+};
 
 const MAX_WITNESS_REPLY: usize = 8_192;
 const MIN_IO_TIMEOUT: Duration = Duration::from_secs(1);
@@ -72,6 +75,91 @@ impl WitnessIdentity {
     #[must_use]
     pub const fn verifying_key(&self) -> &VerifyingKey {
         &self.verifying_key
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CandidateControlError {
+    InvalidConfiguration,
+    KeyMaterial,
+    Witness(WitnessClientError),
+}
+
+#[derive(Debug)]
+pub struct ProductionCandidateControl {
+    client: ProductionWitnessClient,
+    witness: WitnessIdentity,
+    signing_key: SigningKey,
+    cluster_id: String,
+    workload_id: String,
+    node_id: String,
+    key_id: String,
+    policy_hash: [u8; 32],
+}
+
+impl ProductionCandidateControl {
+    pub fn from_config(config: &ProductionConfig) -> Result<Self, CandidateControlError> {
+        if config.role() != "data" {
+            return Err(CandidateControlError::InvalidConfiguration);
+        }
+        let local_member = config
+            .members()
+            .iter()
+            .find(|member| member.id == config.node_id())
+            .ok_or(CandidateControlError::InvalidConfiguration)?;
+        let seed = read_private_seed(config.signing_key())
+            .map_err(|_error| CandidateControlError::KeyMaterial)?;
+        let signing_key = SigningKey::from_bytes(&seed);
+        let local_public_key = read_public_key(&local_member.public_key)
+            .map_err(|_error| CandidateControlError::KeyMaterial)?;
+        if signing_key.verifying_key() != local_public_key {
+            return Err(CandidateControlError::KeyMaterial);
+        }
+        let (client, witness) =
+            ProductionWitnessClient::from_config(config).map_err(CandidateControlError::Witness)?;
+        let mut member_keys = BTreeSet::new();
+        for member in config.members() {
+            let key = read_public_key(&member.public_key)
+                .map_err(|_error| CandidateControlError::KeyMaterial)?;
+            if !member_keys.insert(key.to_bytes()) {
+                return Err(CandidateControlError::KeyMaterial);
+            }
+        }
+        if signing_key.verifying_key() == witness.verifying_key {
+            return Err(CandidateControlError::KeyMaterial);
+        }
+        Ok(Self {
+            client,
+            witness,
+            signing_key,
+            cluster_id: config.cluster_id().to_owned(),
+            workload_id: config.workload_id().to_owned(),
+            node_id: config.node_id().to_owned(),
+            key_id: config.key_id().to_owned(),
+            policy_hash: config.policy_hash(),
+        })
+    }
+
+    pub fn request_certificate(
+        &self,
+        request: ProductionRequest,
+    ) -> Result<ProductionQuorumCertificate, CandidateControlError> {
+        if request.cluster_id != self.cluster_id
+            || request.workload_id != self.workload_id
+            || request.node_id != self.node_id
+            || request.key_id != self.key_id
+            || request.policy_hash != self.policy_hash
+        {
+            return Err(CandidateControlError::Witness(
+                WitnessClientError::AuthenticationFailed,
+            ));
+        }
+        let reply = self
+            .client
+            .request_vote(request.clone(), &self.signing_key, &self.witness)
+            .map_err(CandidateControlError::Witness)?;
+        assemble_production_certificate(&request, &self.signing_key, &self.witness, reply)
+            .map_err(CandidateControlError::Witness)
     }
 }
 

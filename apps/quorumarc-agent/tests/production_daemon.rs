@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use ed25519_dalek::SigningKey;
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+};
+
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 const PRODUCTION_CONFIG: &str = r#"
@@ -360,6 +365,37 @@ fn production_daemon_refuses_stored_boot_identity_change() -> Result<(), Box<dyn
 }
 
 #[test]
+fn production_daemon_refuses_declared_public_key_mismatch() -> Result<(), Box<dyn Error>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-key-mismatch-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let config = directory.join("agent.toml");
+    let config_text = production_config_with_prerequisites(&directory)?;
+    let wrong_key = SigningKey::from_bytes(&[8_u8; 32]);
+    fs::write(
+        directory.join("node-a.pub"),
+        wrong_key.verifying_key().to_bytes(),
+    )?;
+    fs::write(&config, &config_text)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_quorumarc-agent"))
+        .args(["daemon", "--config"])
+        .arg(&config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(!output.status.success());
+    assert!(stderr.contains("CANDIDATE_KEY_MATERIAL_INVALID"));
+    assert!(stderr.contains("\"effect_gate\":\"closed\""));
+    let _ = fs::remove_dir_all(directory);
+    Ok(())
+}
+
+#[test]
 fn production_daemon_refuses_all_zero_signing_key() -> Result<(), Box<dyn Error>> {
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
@@ -396,8 +432,23 @@ fn production_config_with_prerequisites(
     let key = directory.join("node.seed");
     fs::create_dir(&store)?;
     fs::set_permissions(&store, fs::Permissions::from_mode(0o700))?;
-    fs::write(&key, [7_u8; 32])?;
-    fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
+    let node_a = SigningKey::from_bytes(&[7_u8; 32]);
+    let node_b = SigningKey::from_bytes(&[9_u8; 32]);
+    let witness = SigningKey::from_bytes(&[29_u8; 32]);
+    write_private_file(&key, &node_a.to_bytes())?;
+    let node_a_public = directory.join("node-a.pub");
+    let node_b_public = directory.join("node-b.pub");
+    let witness_public = directory.join("witness.pub");
+    fs::write(&node_a_public, node_a.verifying_key().to_bytes())?;
+    fs::write(&node_b_public, node_b.verifying_key().to_bytes())?;
+    fs::write(&witness_public, witness.verifying_key().to_bytes())?;
+    let material = issue_tls_material()?;
+    let certificate = directory.join("node-a.crt");
+    let tls_key = directory.join("node-a.key");
+    let roots = directory.join("ca.crt");
+    fs::write(&certificate, material.client_cert)?;
+    write_private_file(&tls_key, material.client_key.as_bytes())?;
+    fs::write(&roots, material.ca_cert)?;
     Ok(PRODUCTION_CONFIG
         .replace(
             "/var/lib/quorumarc/authority",
@@ -406,7 +457,61 @@ fn production_config_with_prerequisites(
         .replace(
             "/etc/quorumarc/secrets/node-a.seed",
             key.to_str().ok_or("utf8")?,
-        ))
+        )
+        .replace(
+            "/etc/quorumarc/keys/node-a.pub",
+            node_a_public.to_str().ok_or("utf8")?,
+        )
+        .replace(
+            "/etc/quorumarc/keys/node-b.pub",
+            node_b_public.to_str().ok_or("utf8")?,
+        )
+        .replace(
+            "/etc/quorumarc/keys/witness-a.pub",
+            witness_public.to_str().ok_or("utf8")?,
+        )
+        .replace(
+            "/etc/quorumarc/tls/node-a.crt",
+            certificate.to_str().ok_or("utf8")?,
+        )
+        .replace(
+            "/etc/quorumarc/tls/node-a.key",
+            tls_key.to_str().ok_or("utf8")?,
+        )
+        .replace("/etc/quorumarc/tls/ca.crt", roots.to_str().ok_or("utf8")?))
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    fs::write(path, bytes)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+struct TlsFixtureMaterial {
+    client_cert: String,
+    client_key: String,
+    ca_cert: String,
+}
+
+fn issue_tls_material() -> Result<TlsFixtureMaterial, Box<dyn Error>> {
+    let mut ca_params = CertificateParams::new(vec!["quorumarc-ca".to_owned()])?;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca_key = KeyPair::generate()?;
+    let ca = ca_params.self_signed(&ca_key)?;
+    let mut client_params = CertificateParams::new(vec!["node-a.test".to_owned()])?;
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_key = KeyPair::generate()?;
+    let client = client_params.signed_by(&client_key, &ca, &ca_key)?;
+    Ok(TlsFixtureMaterial {
+        client_cert: client.pem(),
+        client_key: client_key.serialize_pem(),
+        ca_cert: ca.pem(),
+    })
 }
 
 fn send_signal(pid: u32, signal: &str) -> Result<(), Box<dyn Error>> {

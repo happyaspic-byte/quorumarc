@@ -719,6 +719,22 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
+            if let Err(error) =
+                quorumarc_service::witness_client::ProductionCandidateControl::from_config(&config)
+            {
+                let reason = match error {
+                    quorumarc_service::witness_client::CandidateControlError::KeyMaterial => {
+                        "CANDIDATE_KEY_MATERIAL_INVALID"
+                    }
+                    _ => "WITNESS_CONFIG_INVALID",
+                };
+                return CliReport::refusal(
+                    "daemon",
+                    reason,
+                    "candidate key material or declared Witness configuration is invalid",
+                    EXIT_CONFIG,
+                );
+            }
             let clock = match quorumarc_service::clock::BootClock::open_system() {
                 Ok(clock) => clock,
                 Err(_error) => {

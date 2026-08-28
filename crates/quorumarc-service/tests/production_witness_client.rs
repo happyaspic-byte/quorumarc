@@ -18,7 +18,8 @@ use quorumarc_service::witness::{
     CandidateCredential, ProductionWitnessRuntime, ProductionWitnessServer, WitnessMembership,
 };
 use quorumarc_service::witness_client::{
-    ProductionWitnessClient, WitnessClientError, WitnessIdentity, assemble_production_certificate,
+    CandidateControlError, ProductionCandidateControl, ProductionWitnessClient, WitnessClientError,
+    WitnessIdentity, assemble_production_certificate,
 };
 use quorumarc_store::{StoreIdentity, StoreRole};
 use quorumarc_wire::{CanonicalId, VerificationKeyResolver};
@@ -56,6 +57,312 @@ impl VerificationKeyResolver for TwoKeyResolver {
             None
         }
     }
+}
+
+#[test]
+fn production_candidate_control_requests_and_assembles_verified_certificate() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-candidate-live-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let candidate = SigningKey::from_bytes(&[7; 32]);
+    let other_candidate = SigningKey::from_bytes(&[9; 32]);
+    let witness = SigningKey::from_bytes(&[29; 32]);
+    let candidate_seed = directory.join("node-a.seed");
+    let candidate_public = directory.join("node-a.pub");
+    let other_public = directory.join("node-b.pub");
+    let witness_public = directory.join("witness.pub");
+    write_private(&candidate_seed, &candidate.to_bytes());
+    fs::write(&candidate_public, candidate.verifying_key().to_bytes()).expect("candidate public");
+    fs::write(&other_public, other_candidate.verifying_key().to_bytes()).expect("other public");
+    fs::write(&witness_public, witness.verifying_key().to_bytes()).expect("witness public");
+    let (ca, server_identity, client_identity) = issue_identities();
+    let client_certificate = directory.join("node-a.crt");
+    let client_private_key = directory.join("node-a.key");
+    let trusted_roots = directory.join("ca.crt");
+    fs::write(
+        &client_certificate,
+        pem("CERTIFICATE", client_identity.certificate.as_ref()),
+    )
+    .expect("client cert");
+    write_private(
+        &client_private_key,
+        pem("PRIVATE KEY", client_identity.key.secret_der()).as_bytes(),
+    );
+    fs::write(&trusted_roots, pem("CERTIFICATE", ca.as_ref())).expect("ca");
+
+    let server_store = directory.join("witness-store");
+    fs::create_dir(&server_store).expect("witness store");
+    fs::set_permissions(&server_store, fs::Permissions::from_mode(0o700))
+        .expect("witness store mode");
+    let runtime = vote_runtime(&server_store, &candidate, &other_candidate, witness.clone());
+    let server_tls = server_mtls_config(
+        vec![server_identity.certificate],
+        server_identity.key,
+        vec![ca],
+    )
+    .expect("server TLS");
+    let server =
+        ProductionWitnessServer::bind(membership(), server_tls, runtime, Duration::from_secs(1))
+            .expect("bind");
+    let witness_address = server.local_addr().expect("address");
+    let shutdown = ShutdownToken::new();
+    let server_shutdown = shutdown.clone();
+    let server_thread = thread::spawn(move || server.serve_until(&server_shutdown));
+
+    let candidate_store = directory.join("store");
+    fs::create_dir(&candidate_store).expect("candidate store");
+    fs::set_permissions(&candidate_store, fs::Permissions::from_mode(0o700))
+        .expect("candidate store mode");
+    let config = ProductionConfig::parse(&data_node_config(
+        &directory,
+        witness_address,
+        &candidate_seed,
+        &candidate_public,
+        &other_public,
+        &witness_public,
+        &client_certificate,
+        &client_private_key,
+        &trusted_roots,
+    ))
+    .expect("config");
+
+    let control = ProductionCandidateControl::from_config(&config).expect("candidate control");
+    let request = ProductionRequest {
+        cluster_id: "prod-cluster".to_owned(),
+        workload_id: "orders-api".to_owned(),
+        node_id: "node-a".to_owned(),
+        key_id: "node-a-2026-01".to_owned(),
+        request_id: [61; 16],
+        sequence: 1,
+        incarnation: 1,
+        epoch: 1,
+        progress_commit: 12,
+        policy_hash: [23; 32],
+        payload: ProductionVotePayload::new([31; 32], 12, 10_000, 14_000)
+            .expect("payload")
+            .encode(),
+    };
+    let cert = control
+        .request_certificate(request)
+        .expect("certificate from control");
+    assert_eq!(cert.cluster_id().as_str(), "prod-cluster");
+    assert_eq!(cert.threshold(), 2);
+    assert_eq!(cert.votes().len(), 2);
+
+    shutdown.request();
+    server_thread.join().expect("server thread").expect("serve");
+    fs::remove_dir_all(directory).expect("cleanup");
+}
+
+#[test]
+fn production_candidate_control_refuses_foreign_request_identity() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-candidate-foreign-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let store = directory.join("store");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    let candidate = SigningKey::from_bytes(&[7; 32]);
+    let other_candidate = SigningKey::from_bytes(&[9; 32]);
+    let witness = SigningKey::from_bytes(&[29; 32]);
+    let candidate_seed = directory.join("node-a.seed");
+    let candidate_public = directory.join("node-a.pub");
+    let other_public = directory.join("node-b.pub");
+    let witness_public = directory.join("witness.pub");
+    write_private(&candidate_seed, &candidate.to_bytes());
+    fs::write(&candidate_public, candidate.verifying_key().to_bytes()).expect("candidate public");
+    fs::write(&other_public, other_candidate.verifying_key().to_bytes()).expect("other public");
+    fs::write(&witness_public, witness.verifying_key().to_bytes()).expect("witness public");
+    let (ca, _server_identity, client_identity) = issue_identities();
+    let client_certificate = directory.join("node-a.crt");
+    let client_private_key = directory.join("node-a.key");
+    let trusted_roots = directory.join("ca.crt");
+    fs::write(
+        &client_certificate,
+        pem("CERTIFICATE", client_identity.certificate.as_ref()),
+    )
+    .expect("client cert");
+    write_private(
+        &client_private_key,
+        pem("PRIVATE KEY", client_identity.key.secret_der()).as_bytes(),
+    );
+    fs::write(&trusted_roots, pem("CERTIFICATE", ca.as_ref())).expect("ca");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let witness_address = listener.local_addr().expect("address");
+    drop(listener);
+    let config = ProductionConfig::parse(&data_node_config(
+        &directory,
+        witness_address,
+        &candidate_seed,
+        &candidate_public,
+        &other_public,
+        &witness_public,
+        &client_certificate,
+        &client_private_key,
+        &trusted_roots,
+    ))
+    .expect("config");
+    let control = ProductionCandidateControl::from_config(&config).expect("candidate control");
+
+    let mut request = ProductionRequest {
+        cluster_id: "prod-cluster".to_owned(),
+        workload_id: "orders-api".to_owned(),
+        node_id: "node-a".to_owned(),
+        key_id: "node-a-2026-01".to_owned(),
+        request_id: [61; 16],
+        sequence: 1,
+        incarnation: 1,
+        epoch: 1,
+        progress_commit: 12,
+        policy_hash: [23; 32],
+        payload: ProductionVotePayload::new([31; 32], 12, 10_000, 14_000)
+            .expect("payload")
+            .encode(),
+    };
+    request.cluster_id = "foreign-cluster".to_owned();
+    assert_eq!(
+        control.request_certificate(request.clone()),
+        Err(CandidateControlError::Witness(
+            WitnessClientError::AuthenticationFailed
+        ))
+    );
+    request.cluster_id = "prod-cluster".to_owned();
+    request.policy_hash = [99; 32];
+    assert_eq!(
+        control.request_certificate(request),
+        Err(CandidateControlError::Witness(
+            WitnessClientError::AuthenticationFailed
+        ))
+    );
+    fs::remove_dir_all(directory).expect("cleanup");
+}
+
+#[test]
+fn production_candidate_control_refuses_member_key_reuse() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-candidate-key-reuse-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let store = directory.join("store");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    let candidate = SigningKey::from_bytes(&[7; 32]);
+    let witness = SigningKey::from_bytes(&[29; 32]);
+    let candidate_seed = directory.join("node-a.seed");
+    let candidate_public = directory.join("node-a.pub");
+    let other_public = directory.join("node-b.pub");
+    let witness_public = directory.join("witness.pub");
+    write_private(&candidate_seed, &candidate.to_bytes());
+    fs::write(&candidate_public, candidate.verifying_key().to_bytes()).expect("candidate public");
+    fs::write(&other_public, candidate.verifying_key().to_bytes()).expect("reused public");
+    fs::write(&witness_public, witness.verifying_key().to_bytes()).expect("witness public");
+    let (ca, _server_identity, client_identity) = issue_identities();
+    let client_certificate = directory.join("node-a.crt");
+    let client_private_key = directory.join("node-a.key");
+    let trusted_roots = directory.join("ca.crt");
+    fs::write(
+        &client_certificate,
+        pem("CERTIFICATE", client_identity.certificate.as_ref()),
+    )
+    .expect("client cert");
+    write_private(
+        &client_private_key,
+        pem("PRIVATE KEY", client_identity.key.secret_der()).as_bytes(),
+    );
+    fs::write(&trusted_roots, pem("CERTIFICATE", ca.as_ref())).expect("ca");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let witness_address = listener.local_addr().expect("address");
+    drop(listener);
+    let config = ProductionConfig::parse(&data_node_config(
+        &directory,
+        witness_address,
+        &candidate_seed,
+        &candidate_public,
+        &other_public,
+        &witness_public,
+        &client_certificate,
+        &client_private_key,
+        &trusted_roots,
+    ))
+    .expect("config");
+
+    assert!(matches!(
+        ProductionCandidateControl::from_config(&config),
+        Err(CandidateControlError::KeyMaterial)
+    ));
+    fs::remove_dir_all(directory).expect("cleanup");
+}
+
+#[test]
+fn production_candidate_control_refuses_local_signing_key_mismatch() {
+    let directory = std::env::temp_dir().join(format!(
+        "quorumarc-production-candidate-key-mismatch-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("directory");
+    let store = directory.join("store");
+    fs::create_dir(&store).expect("store");
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).expect("store mode");
+    let candidate = SigningKey::from_bytes(&[7; 32]);
+    let wrong_candidate = SigningKey::from_bytes(&[8; 32]);
+    let other_candidate = SigningKey::from_bytes(&[9; 32]);
+    let witness = SigningKey::from_bytes(&[29; 32]);
+    let candidate_seed = directory.join("node-a.seed");
+    let candidate_public = directory.join("node-a.pub");
+    let other_public = directory.join("node-b.pub");
+    let witness_public = directory.join("witness.pub");
+    write_private(&candidate_seed, &candidate.to_bytes());
+    fs::write(
+        &candidate_public,
+        wrong_candidate.verifying_key().to_bytes(),
+    )
+    .expect("wrong candidate public");
+    fs::write(&other_public, other_candidate.verifying_key().to_bytes()).expect("other public");
+    fs::write(&witness_public, witness.verifying_key().to_bytes()).expect("witness public");
+    let (ca, _server_identity, client_identity) = issue_identities();
+    let client_certificate = directory.join("node-a.crt");
+    let client_private_key = directory.join("node-a.key");
+    let trusted_roots = directory.join("ca.crt");
+    fs::write(
+        &client_certificate,
+        pem("CERTIFICATE", client_identity.certificate.as_ref()),
+    )
+    .expect("client cert");
+    write_private(
+        &client_private_key,
+        pem("PRIVATE KEY", client_identity.key.secret_der()).as_bytes(),
+    );
+    fs::write(&trusted_roots, pem("CERTIFICATE", ca.as_ref())).expect("ca");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let witness_address = listener.local_addr().expect("address");
+    drop(listener);
+    let config = ProductionConfig::parse(&data_node_config(
+        &directory,
+        witness_address,
+        &candidate_seed,
+        &candidate_public,
+        &other_public,
+        &witness_public,
+        &client_certificate,
+        &client_private_key,
+        &trusted_roots,
+    ))
+    .expect("config");
+
+    assert!(matches!(
+        ProductionCandidateControl::from_config(&config),
+        Err(CandidateControlError::KeyMaterial)
+    ));
+    fs::remove_dir_all(directory).expect("cleanup");
 }
 
 #[test]

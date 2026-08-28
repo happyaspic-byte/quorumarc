@@ -1181,7 +1181,7 @@ impl ProductionWitnessServer {
     }
 }
 
-fn read_private_seed(path: &Path) -> Result<[u8; 32], ProductionWitnessOpenError> {
+pub(crate) fn read_private_seed(path: &Path) -> Result<[u8; 32], ProductionWitnessOpenError> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(OFlags::NOFOLLOW.bits() as i32)
