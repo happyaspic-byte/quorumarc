@@ -338,6 +338,37 @@ fn linux_vip_detach_fails_closed_on_observe_error_and_requires_read_back_absence
 }
 
 #[test]
+fn linux_vip_implements_effect_adapter_contract() {
+    let backend = FakeVipBackend::default();
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+
+    assert!(adapter.verify_closed().is_ok());
+    assert_eq!(
+        adapter.open("orders-api", 2),
+        Err(AdapterError::ReceiptRequired)
+    );
+    assert_eq!(
+        adapter.open_with_receipt("orders-api", 2, [0; 32]),
+        Err(AdapterError::ReceiptRequired)
+    );
+    assert_eq!(adapter.state(), VipState::Detached);
+
+    adapter
+        .open_with_receipt("orders-api", 2, [11; 32])
+        .expect("open with receipt");
+    assert_eq!(adapter.state(), VipState::Attached(2));
+    assert_eq!(adapter.verify_closed(), Err(AdapterError::EffectNotClosed));
+
+    adapter
+        .close(CloseReason::LeaseExpired)
+        .expect("close effect");
+    assert_eq!(adapter.state(), VipState::Detached);
+    assert!(adapter.verify_closed().is_ok());
+}
+
+#[test]
 fn systemd_workload_adapter_demands_health_and_closes_before_drain() {
     let mut workload = SystemdWorkloadAdapter::new("orders-api.service");
     assert_eq!(workload.health(), WorkloadHealth::Stopped);

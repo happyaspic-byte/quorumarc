@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use futures::TryStreamExt;
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressProtocol};
 
-use crate::adapters::{AdapterError, CloseReason, VipState};
+use crate::adapters::{AdapterError, CloseReason, EffectAdapter, VipState};
 
 pub const QUORUMARC_ADDR_PROTOCOL: u8 = 188;
 
@@ -476,6 +476,34 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
         }
         self.state = VipState::Detached;
         Ok(())
+    }
+}
+
+impl<B: VipBackend> EffectAdapter for LinuxVipEffectAdapter<B> {
+    fn verify_closed(&self) -> Result<(), AdapterError> {
+        match self.state {
+            VipState::Detached => Ok(()),
+            VipState::Attached(_) => Err(AdapterError::EffectNotClosed),
+        }
+    }
+
+    fn open(&mut self, _workload: &str, _epoch: u64) -> Result<(), AdapterError> {
+        Err(AdapterError::ReceiptRequired)
+    }
+
+    fn open_with_receipt(
+        &mut self,
+        workload: &str,
+        epoch: u64,
+        receipt_digest: [u8; 32],
+    ) -> Result<(), AdapterError> {
+        let authorization =
+            EffectOpenAuthorization::new(workload, &self.node_id, epoch, receipt_digest)?;
+        self.attach(&authorization)
+    }
+
+    fn close(&mut self, reason: CloseReason) -> Result<(), AdapterError> {
+        self.detach(reason)
     }
 }
 
