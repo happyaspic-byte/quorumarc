@@ -90,6 +90,34 @@ fn production_config_accepts_exact_three_member_hardware_fenced_profile() {
         std::path::Path::new("/etc/quorumarc/keys/node-b.pub")
     );
     assert_eq!(config.effect_gate_state(), "closed");
+    assert_eq!(config.effect_vip(), "172.30.1.100/24");
+    assert_eq!(config.effect_interface(), "enp1s0");
+}
+
+#[test]
+fn production_config_rejects_invalid_vip_and_interface() {
+    for invalid_vip in [
+        "172.30.1.100",
+        "172.30.1.100/33",
+        "2001:db8::100/129",
+        "not-an-address/24",
+    ] {
+        let invalid = VALID.replace("172.30.1.100/24", invalid_vip);
+        assert!(matches!(
+            ProductionConfig::parse(&invalid),
+            Err(ConfigError::InvalidValue(field)) if field == "effect.vip"
+        ));
+    }
+
+    for invalid_interface in ["", "interface-name-is-too-long", "eth0/1", "eth0\0bad"] {
+        let invalid = VALID.replace("enp1s0", invalid_interface);
+        let refused = match ProductionConfig::parse(&invalid) {
+            Err(ConfigError::InvalidValue(field)) => field == "effect.interface",
+            Err(ConfigError::TomlError(_)) => true,
+            _ => false,
+        };
+        assert!(refused);
+    }
 }
 
 #[test]

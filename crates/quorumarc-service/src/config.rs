@@ -206,6 +206,12 @@ impl ProductionConfig {
         {
             return Err(ConfigError::InvalidValue("tls.server_name".to_owned()));
         }
+        if !valid_effect_vip(&config.effect.vip) {
+            return Err(ConfigError::InvalidValue("effect.vip".to_owned()));
+        }
+        if !valid_interface_name(&config.effect.interface) {
+            return Err(ConfigError::InvalidValue("effect.interface".to_owned()));
+        }
         if config.members.len() != 3 {
             return Err(ConfigError::InvalidValue(
                 "cluster must declare exactly 3 members".to_owned(),
@@ -525,6 +531,16 @@ impl ProductionConfig {
         self.fence.read_back
     }
 
+    #[must_use]
+    pub fn effect_vip(&self) -> &str {
+        &self.effect.vip
+    }
+
+    #[must_use]
+    pub fn effect_interface(&self) -> &str {
+        &self.effect.interface
+    }
+
     /// External effects remain closed until later milestones.
     #[must_use]
     pub const fn effect_gate_state(&self) -> &'static str {
@@ -547,6 +563,30 @@ fn canonical_ip(address: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
         IpAddr::V4(_) => address,
     }
+}
+
+fn valid_effect_vip(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return false;
+    };
+    match address {
+        IpAddr::V4(_) => prefix <= 32,
+        IpAddr::V6(_) => prefix <= 128,
+    }
+}
+
+fn valid_interface_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 15
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn valid_identifier(value: &str) -> bool {
