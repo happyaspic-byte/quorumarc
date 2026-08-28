@@ -15,6 +15,7 @@ pub mod controller;
 pub mod linux_vip;
 pub mod management_journal;
 pub mod metrics;
+pub mod nftables;
 pub mod node;
 pub mod operations;
 pub mod protocol;

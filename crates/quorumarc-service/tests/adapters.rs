@@ -385,3 +385,86 @@ fn systemd_workload_adapter_demands_health_and_closes_before_drain() {
     workload.drain().expect("drain");
     assert_eq!(workload.active_epoch(), None);
 }
+
+use quorumarc_service::nftables::{
+    LinuxNftablesEffectAdapter, NftBackend, NftBackendError, NftRuleObservation, NftRuleOwnership,
+};
+
+#[derive(Debug, Default)]
+struct FakeNftBackend {
+    observation: Option<NftRuleObservation>,
+    adds: usize,
+    deletes: usize,
+    fail_add: bool,
+    fail_observe: bool,
+    fail_delete: bool,
+}
+
+impl NftBackend for FakeNftBackend {
+    fn observe(
+        &mut self,
+        _table: &str,
+        _chain: &str,
+    ) -> Result<Option<NftRuleObservation>, NftBackendError> {
+        if self.fail_observe {
+            return Err(NftBackendError::Io);
+        }
+        Ok(self.observation.clone())
+    }
+
+    fn add(&mut self, observation: &NftRuleObservation) -> Result<(), NftBackendError> {
+        self.adds += 1;
+        if self.fail_add {
+            return Err(NftBackendError::PermissionDenied);
+        }
+        self.observation = Some(observation.clone());
+        Ok(())
+    }
+
+    fn delete(&mut self, observation: &NftRuleObservation) -> Result<(), NftBackendError> {
+        self.deletes += 1;
+        if self.fail_delete {
+            return Err(NftBackendError::Io);
+        }
+        if self.observation.as_ref() == Some(observation) {
+            self.observation = None;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn nftables_adapter_demands_receipt_and_refuses_foreign_rules() {
+    let backend = FakeNftBackend {
+        observation: Some(NftRuleObservation {
+            table: "quorumarc".to_owned(),
+            chain: "forward".to_owned(),
+            handle: 42,
+            ownership: NftRuleOwnership::Foreign,
+        }),
+        ..FakeNftBackend::default()
+    };
+    let mut adapter =
+        LinuxNftablesEffectAdapter::new("orders-api", "node-a", "quorumarc", "forward", backend)
+            .expect("adapter");
+
+    assert!(adapter.verify_closed().is_ok());
+    assert_eq!(
+        adapter.open_with_receipt("orders-api", 2, [11; 32]),
+        Err(AdapterError::ReadBackMismatch)
+    );
+    assert_eq!(adapter.backend().adds, 0);
+    assert_eq!(adapter.backend().deletes, 0);
+
+    adapter.backend_mut().observation = None;
+    adapter
+        .open_with_receipt("orders-api", 2, [11; 32])
+        .expect("open owned rule");
+    assert_eq!(adapter.verify_closed(), Err(AdapterError::EffectNotClosed));
+
+    adapter
+        .close(CloseReason::LeaseExpired)
+        .expect("close effect");
+    assert!(adapter.verify_closed().is_ok());
+    assert_eq!(adapter.backend().deletes, 1);
+}
