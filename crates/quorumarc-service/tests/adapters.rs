@@ -6,6 +6,9 @@ use quorumarc_service::adapters::{
     MockEffectAdapter, MockPduFence, NodePowerState, SystemdWorkloadAdapter, VipAdapter, VipState,
     WorkloadHealth,
 };
+use quorumarc_service::linux_vip::{
+    EffectOpenAuthorization, LinuxVipEffectAdapter, VipBackend, VipBackendError, VipObservation,
+};
 
 #[test]
 fn mock_pdu_refuses_wrong_target_and_requires_independent_read_back() {
@@ -135,6 +138,114 @@ fn vip_adapter_attaches_only_with_receipt_and_detaches_on_expiry() {
 
     vip.detach(CloseReason::LeaseExpired).expect("detach");
     assert_eq!(vip.state(), VipState::Detached);
+}
+
+#[derive(Debug, Default)]
+struct FakeVipBackend {
+    observation: Option<VipObservation>,
+    adds: usize,
+    deletes: usize,
+    fail_add: bool,
+}
+
+impl VipBackend for FakeVipBackend {
+    fn observe(
+        &mut self,
+        _interface: &str,
+        _address: std::net::IpAddr,
+        _prefix_len: u8,
+    ) -> Result<Option<VipObservation>, VipBackendError> {
+        Ok(self.observation.clone())
+    }
+
+    fn add(&mut self, observation: &VipObservation) -> Result<(), VipBackendError> {
+        self.adds += 1;
+        if self.fail_add {
+            return Err(VipBackendError::PermissionDenied);
+        }
+        self.observation = Some(observation.clone());
+        Ok(())
+    }
+
+    fn delete(&mut self, observation: &VipObservation) -> Result<(), VipBackendError> {
+        self.deletes += 1;
+        if self.observation.as_ref() == Some(observation) {
+            self.observation = None;
+        }
+        Ok(())
+    }
+}
+
+fn authorization(epoch: u64) -> EffectOpenAuthorization {
+    EffectOpenAuthorization::new("orders-api", "node-a", epoch, [11; 32]).expect("authorization")
+}
+
+#[test]
+fn linux_vip_requires_bound_authorization_and_kernel_read_back() {
+    let backend = FakeVipBackend::default();
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+
+    let wrong =
+        EffectOpenAuthorization::new("other", "node-a", 2, [11; 32]).expect("wrong authorization");
+    assert_eq!(adapter.attach(&wrong), Err(AdapterError::WrongTarget));
+    assert_eq!(adapter.backend().adds, 0);
+
+    adapter.attach(&authorization(2)).expect("attach");
+    assert_eq!(adapter.state(), VipState::Attached(2));
+    assert_eq!(adapter.backend().adds, 1);
+    assert!(adapter.verify_attached().is_ok());
+}
+
+#[test]
+fn linux_vip_refuses_foreign_address_and_deletes_owned_address_only() {
+    let backend = FakeVipBackend {
+        observation: Some(VipObservation::foreign(
+            "enp1s0",
+            "172.30.1.100".parse().expect("ip"),
+            24,
+        )),
+        ..FakeVipBackend::default()
+    };
+    let mut adapter =
+        LinuxVipEffectAdapter::new("orders-api", "node-a", "172.30.1.100/24", "enp1s0", backend)
+            .expect("adapter");
+
+    assert_eq!(
+        adapter.attach(&authorization(2)),
+        Err(AdapterError::ReadBackMismatch)
+    );
+    assert_eq!(adapter.backend().adds, 0);
+    assert_eq!(adapter.backend().deletes, 0);
+
+    adapter.backend_mut().observation = None;
+    adapter.attach(&authorization(2)).expect("attach owned");
+    adapter
+        .detach(CloseReason::LeaseExpired)
+        .expect("detach owned");
+    assert_eq!(adapter.state(), VipState::Detached);
+    assert_eq!(adapter.backend().deletes, 1);
+}
+
+#[test]
+fn linux_vip_rolls_back_when_add_read_back_is_not_owned() {
+    let backend = FakeVipBackend::default();
+    let mut adapter = LinuxVipEffectAdapter::new(
+        "orders-api",
+        "node-a",
+        "2001:db8::100/64",
+        "enp1s0",
+        backend,
+    )
+    .expect("adapter");
+    adapter.backend_mut().fail_add = true;
+
+    assert_eq!(
+        adapter.attach(&authorization(2)),
+        Err(AdapterError::EffectNotClosed)
+    );
+    assert_eq!(adapter.state(), VipState::Detached);
 }
 
 #[test]

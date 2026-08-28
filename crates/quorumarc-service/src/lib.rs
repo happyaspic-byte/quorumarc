@@ -12,6 +12,7 @@ pub mod candidate_loop;
 pub mod clock;
 pub mod config;
 pub mod controller;
+pub mod linux_vip;
 pub mod management_journal;
 pub mod metrics;
 pub mod node;
