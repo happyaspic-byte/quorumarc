@@ -124,6 +124,7 @@ fn production_daemon_stays_effect_closed_until_sigterm_drain() -> Result<(), Box
         let mut body = String::new();
         client.read_to_string(&mut body)?;
         assert!(body.contains("\"effect_gate\":\"closed\""));
+        assert!(body.contains("\"candidate_control_state\":\"effect-closed\""));
         assert!(body.contains("\"authority_enabled\":false"));
         assert!(!body.contains("PROMOTE"));
     }

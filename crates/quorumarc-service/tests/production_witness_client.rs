@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use quorumarc_runtime::{VoteReasonCode, WitnessPolicy};
+use quorumarc_service::candidate_loop::{
+    CandidateControlLoop, CandidateControlState, CandidateFailure,
+};
 use quorumarc_service::config::ProductionConfig;
 use quorumarc_service::protocol::{ProductionRequest, ProductionVotePayload};
 use quorumarc_service::signal::ShutdownToken;
@@ -148,12 +151,13 @@ fn production_candidate_control_requests_and_assembles_verified_certificate() {
             .expect("payload")
             .encode(),
     };
-    let cert = control
-        .request_certificate(request)
-        .expect("certificate from control");
-    assert_eq!(cert.cluster_id().as_str(), "prod-cluster");
-    assert_eq!(cert.threshold(), 2);
-    assert_eq!(cert.votes().len(), 2);
+    let mut candidate_loop = CandidateControlLoop::new(control);
+    assert_eq!(
+        candidate_loop.handle(CandidateFailure::NodeFailureSuspicion, request),
+        CandidateControlState::CertifiedEffectClosed
+    );
+    assert_eq!(candidate_loop.state_label(), "certified/effect-closed");
+    assert_eq!(candidate_loop.effect_gate_state(), "closed");
 
     shutdown.request();
     server_thread.join().expect("server thread").expect("serve");

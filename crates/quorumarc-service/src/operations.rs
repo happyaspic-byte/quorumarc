@@ -24,6 +24,7 @@ pub struct NodeStatusReport {
     node_id: String,
     effect_gate: &'static str,
     authority_enabled: bool,
+    candidate_control_state: String,
     boot_id: String,
     uptime_ms: u64,
     last_committed_index: Option<u64>,
@@ -44,6 +45,7 @@ impl NodeStatusReport {
             node_id: config.node_id().to_owned(),
             effect_gate: config.effect_gate_state(),
             authority_enabled: false,
+            candidate_control_state: "effect-closed".to_owned(),
             boot_id: boot_id.into(),
             uptime_ms,
             last_committed_index,
@@ -69,6 +71,11 @@ impl NodeStatusReport {
     #[must_use]
     pub const fn authority_enabled(&self) -> bool {
         self.authority_enabled
+    }
+
+    #[must_use]
+    pub fn candidate_control_state(&self) -> &str {
+        &self.candidate_control_state
     }
 
     #[must_use]
@@ -99,6 +106,15 @@ pub struct StatusHandle {
 }
 
 impl StatusHandle {
+    pub fn set_candidate_control_state(&self, state: &str) -> Result<(), OperationsError> {
+        let mut current = self
+            .status
+            .write()
+            .map_err(|_error| OperationsError::StatusUnavailable)?;
+        current.candidate_control_state = state.to_owned();
+        Ok(())
+    }
+
     #[must_use]
     pub fn new(status: NodeStatusReport) -> Self {
         Self {
@@ -395,10 +411,11 @@ fn write_status(
         Err(_error) => return Err(OperationsError::SocketServeFailed),
     }
     let payload = format!(
-        "{{\"cluster_id\":\"{}\",\"node_id\":\"{}\",\"effect_gate\":\"{}\",\"authority_enabled\":{},\"boot_id\":\"{}\",\"uptime_ms\":{},\"last_committed_index\":{},\"log_level\":\"{}\"}}",
+        "{{\"cluster_id\":\"{}\",\"node_id\":\"{}\",\"effect_gate\":\"{}\",\"candidate_control_state\":\"{}\",\"authority_enabled\":{},\"boot_id\":\"{}\",\"uptime_ms\":{},\"last_committed_index\":{},\"log_level\":\"{}\"}}",
         json_escape(status.cluster_id()),
         json_escape(status.node_id()),
         status.effect_gate(),
+        json_escape(status.candidate_control_state()),
         status.authority_enabled(),
         json_escape(status.boot_id()),
         status.uptime_ms(),
@@ -435,10 +452,11 @@ pub fn export_support_bundle(
     let fence_read_back = config.fence_read_back();
 
     let manifest = format!(
-        "{{\"cluster_id\":\"{}\",\"members_count\":{},\"effect_gate\":\"{}\",\"authority_enabled\":{},\"signing_key_path\":\"<REDACTED_PRIVATE_KEY_PATH>\",\"fence_mechanism\":\"{}\",\"fence_profile\":\"{}\",\"fence_read_back\":{},\"boot_id\":\"{}\",\"uptime_ms\":{},\"last_committed_index\":{}}}",
+        "{{\"cluster_id\":\"{}\",\"members_count\":{},\"effect_gate\":\"{}\",\"candidate_control_state\":\"{}\",\"authority_enabled\":{},\"signing_key_path\":\"<REDACTED_PRIVATE_KEY_PATH>\",\"fence_mechanism\":\"{}\",\"fence_profile\":\"{}\",\"fence_read_back\":{},\"boot_id\":\"{}\",\"uptime_ms\":{},\"last_committed_index\":{}}}",
         json_escape(status.cluster_id()),
         members_count,
         status.effect_gate(),
+        status.candidate_control_state(),
         status.authority_enabled(),
         json_escape(&fence_mechanism),
         json_escape(&fence_profile),

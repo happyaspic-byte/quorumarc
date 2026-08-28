@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod candidate_loop;
 pub mod clock;
 pub mod config;
 pub mod controller;

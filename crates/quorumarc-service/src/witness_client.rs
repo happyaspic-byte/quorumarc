@@ -85,6 +85,13 @@ pub enum CandidateControlError {
     Witness(WitnessClientError),
 }
 
+impl CandidateControlError {
+    #[must_use]
+    pub const fn is_node_failure_suspicion(self) -> bool {
+        matches!(self, Self::Witness(error) if error.is_node_failure_suspicion())
+    }
+}
+
 #[derive(Debug)]
 pub struct ProductionCandidateControl {
     client: ProductionWitnessClient,

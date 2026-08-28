@@ -1,18 +1,25 @@
 #![allow(clippy::expect_used)]
 
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use quorumarc_service::adapters::{
     AdapterError, ClosedOnlyEffectAdapter, EffectAdapter, MockEffectAdapter,
 };
+use quorumarc_service::candidate_loop::{
+    CandidateAttempt, CandidateControlLoop, CandidateControlState, CandidateFailure,
+};
 use quorumarc_service::config::ProductionConfig;
 use quorumarc_service::node::{DaemonReadiness, ProductionNode};
 use quorumarc_service::operations::{NodeStatusReport, StatusHandle};
+use quorumarc_service::protocol::{ProductionRequest, ProductionVotePayload};
 use quorumarc_service::reload::run_reload_loop;
 use quorumarc_service::signal::ShutdownToken;
+use quorumarc_service::witness_client::{CandidateControlError, WitnessClientError};
+use quorumarc_wire::ProductionQuorumCertificate;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -69,6 +76,117 @@ failure_domain = "power-w"
 key_id = "witness-2026-01"
 public_key = "/etc/quorumarc/keys/witness-a.pub"
 "#;
+
+struct RecordingCandidate {
+    results: Vec<Result<ProductionQuorumCertificate, CandidateControlError>>,
+    requests: Arc<AtomicUsize>,
+}
+
+impl CandidateAttempt for RecordingCandidate {
+    fn request_certificate(
+        &mut self,
+        _request: ProductionRequest,
+    ) -> Result<ProductionQuorumCertificate, CandidateControlError> {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.results.pop().map_or_else(
+            || {
+                Err(CandidateControlError::Witness(
+                    WitnessClientError::Malformed,
+                ))
+            },
+            |result| result,
+        )
+    }
+}
+
+fn candidate_request() -> ProductionRequest {
+    ProductionRequest {
+        cluster_id: "prod-cluster".to_owned(),
+        workload_id: "orders-api".to_owned(),
+        node_id: "node-a".to_owned(),
+        key_id: "node-a-2026-01".to_owned(),
+        request_id: [61; 16],
+        sequence: 1,
+        incarnation: 1,
+        epoch: 1,
+        progress_commit: 12,
+        policy_hash: [23; 32],
+        payload: ProductionVotePayload::new([31; 32], 12, 10_000, 14_000)
+            .expect("payload")
+            .encode(),
+    }
+}
+
+#[test]
+fn candidate_loop_requests_certificate_only_for_explicit_suspicion() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let control = RecordingCandidate {
+        results: vec![Err(CandidateControlError::Witness(
+            WitnessClientError::Transport,
+        ))],
+        requests: Arc::clone(&requests),
+    };
+    let mut candidate = CandidateControlLoop::new(control);
+
+    assert_eq!(
+        candidate.handle(CandidateFailure::Malformed, candidate_request()),
+        CandidateControlState::EffectClosed
+    );
+    assert_eq!(
+        candidate.handle(CandidateFailure::AuthenticationFailed, candidate_request()),
+        CandidateControlState::EffectClosed
+    );
+    assert_eq!(requests.load(Ordering::Relaxed), 0);
+
+    assert_eq!(
+        candidate.handle(CandidateFailure::NodeFailureSuspicion, candidate_request()),
+        CandidateControlState::SuspicionEffectClosed
+    );
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert_eq!(candidate.effect_gate_state(), "closed");
+}
+
+#[test]
+fn candidate_loop_bounds_transport_retry_and_obeys_shutdown() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let control = RecordingCandidate {
+        results: vec![
+            Err(CandidateControlError::Witness(
+                WitnessClientError::Transport,
+            )),
+            Err(CandidateControlError::Witness(
+                WitnessClientError::Transport,
+            )),
+            Err(CandidateControlError::Witness(
+                WitnessClientError::Transport,
+            )),
+        ],
+        requests: Arc::clone(&requests),
+    };
+    let mut candidate = CandidateControlLoop::new(control);
+    let shutdown = ShutdownToken::new();
+
+    let state = candidate.run_bounded(
+        CandidateFailure::NodeFailureSuspicion,
+        candidate_request(),
+        &shutdown,
+    );
+    assert_eq!(state, CandidateControlState::SuspicionEffectClosed);
+    assert_eq!(
+        requests.load(Ordering::Relaxed),
+        CandidateControlLoop::<RecordingCandidate>::MAX_ATTEMPTS
+    );
+
+    shutdown.request();
+    let before_shutdown = requests.load(Ordering::Relaxed);
+    let state = candidate.run_bounded(
+        CandidateFailure::NodeFailureSuspicion,
+        candidate_request(),
+        &shutdown,
+    );
+    assert_eq!(state, CandidateControlState::StoppedEffectClosed);
+    assert_eq!(requests.load(Ordering::Relaxed), before_shutdown);
+}
 
 #[test]
 fn incomplete_production_node_never_reports_ready_or_opens_effects() {

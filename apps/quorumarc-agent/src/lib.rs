@@ -719,22 +719,26 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
-            if let Err(error) =
-                quorumarc_service::witness_client::ProductionCandidateControl::from_config(&config)
-            {
-                let reason = match error {
-                    quorumarc_service::witness_client::CandidateControlError::KeyMaterial => {
-                        "CANDIDATE_KEY_MATERIAL_INVALID"
+            let candidate_control =
+                match quorumarc_service::witness_client::ProductionCandidateControl::from_config(
+                    &config,
+                ) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        let reason = match error {
+                        quorumarc_service::witness_client::CandidateControlError::KeyMaterial => {
+                            "CANDIDATE_KEY_MATERIAL_INVALID"
+                        }
+                        _ => "WITNESS_CONFIG_INVALID",
+                    };
+                        return CliReport::refusal(
+                            "daemon",
+                            reason,
+                            "candidate key material or declared Witness configuration is invalid",
+                            EXIT_CONFIG,
+                        );
                     }
-                    _ => "WITNESS_CONFIG_INVALID",
                 };
-                return CliReport::refusal(
-                    "daemon",
-                    reason,
-                    "candidate key material or declared Witness configuration is invalid",
-                    EXIT_CONFIG,
-                );
-            }
             let clock = match quorumarc_service::clock::BootClock::open_system() {
                 Ok(clock) => clock,
                 Err(_error) => {
@@ -901,7 +905,38 @@ fn daemon(options: DaemonOptions) -> CliReport {
                 }
                 None => None,
             };
+            let candidate_status = status.clone();
+            let candidate_shutdown = shutdown.clone();
+            let candidate_worker = match std::thread::Builder::new()
+                .name("quorumarc-agent-candidate".to_owned())
+                .spawn(move || {
+                    let mut candidate =
+                        quorumarc_service::candidate_loop::CandidateControlLoop::with_status(
+                            candidate_control,
+                            candidate_status,
+                        );
+                    candidate.wait_until_shutdown(&candidate_shutdown);
+                }) {
+                Ok(worker) => worker,
+                Err(_error) => {
+                    shutdown.request();
+                    if let Some(worker) = status_worker {
+                        let _ = worker.join();
+                    }
+                    if let Some(worker) = watchdog_worker {
+                        let _ = worker.join();
+                    }
+                    let _ = reload_worker.join();
+                    return CliReport::refusal(
+                        "daemon",
+                        "CANDIDATE_WORKER_START_FAILED",
+                        "cannot start bounded candidate control worker",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
             let report = node.run_until_shutdown(&shutdown);
+            let _ = candidate_worker.join();
             if let Some(worker) = status_worker {
                 let _ = worker.join();
             }
