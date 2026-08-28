@@ -118,14 +118,14 @@ impl<B: NftBackend> EffectAdapter for LinuxNftablesEffectAdapter<B> {
         if epoch == 0 || receipt_digest.iter().all(|byte| *byte == 0) {
             return Err(AdapterError::ReceiptRequired);
         }
-        if epoch < self.last_epoch {
-            return Err(AdapterError::StaleEpoch);
-        }
         if let Some(active) = self.active_epoch {
             if active == epoch {
                 return Ok(());
             }
             return Err(AdapterError::EffectNotClosed);
+        }
+        if epoch <= self.last_epoch {
+            return Err(AdapterError::StaleEpoch);
         }
 
         let existing = self

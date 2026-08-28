@@ -539,8 +539,9 @@ mod tests {
     fn directory() -> PathBuf {
         let value = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "quorumarc-cluster-path-{}-{value}",
-            std::process::id()
+            "quorumarc-cluster-path-{}-{:?}-{value}",
+            std::process::id(),
+            std::thread::current().id()
         ));
         fs::create_dir_all(&path).expect("create path test directory");
         path

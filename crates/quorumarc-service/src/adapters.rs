@@ -100,6 +100,14 @@ impl SignedFenceReceipt {
     }
 
     pub fn verify(&self, key: &VerifyingKey) -> Result<(), AdapterError> {
+        let expected = fence_receipt_digest(&FenceEvidence {
+            target: self.target.clone(),
+            outlet: self.outlet.clone(),
+            challenge: self.challenge,
+        });
+        if self.digest != expected {
+            return Err(AdapterError::ReceiptRequired);
+        }
         let signature = Signature::from_bytes(&self.signature);
         key.verify_strict(&self.digest, &signature)
             .map_err(|_error| AdapterError::ReceiptRequired)

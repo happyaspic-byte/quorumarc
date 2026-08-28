@@ -801,16 +801,11 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     );
                 }
             };
-            if quorumarc_service::adapters::EffectAdapter::close(
-                &mut adapter,
-                quorumarc_service::adapters::CloseReason::ExplicitClose,
-            )
-            .is_err()
-            {
+            if adapter.verify_kernel_closed().is_err() {
                 return CliReport::refusal(
                     "daemon",
                     "EFFECT_ADAPTER_NOT_CLOSED",
-                    "production VIP is foreign or could not be verified absent",
+                    "configured VIP is already present or could not be verified absent",
                     EXIT_CONFIG,
                 );
             }

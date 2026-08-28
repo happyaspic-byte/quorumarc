@@ -375,6 +375,20 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
         &mut self.backend
     }
 
+    pub fn verify_kernel_closed(&mut self) -> Result<(), AdapterError> {
+        match self
+            .backend
+            .observe(&self.interface, self.address, self.prefix_len)
+        {
+            Ok(None) => {
+                self.state = VipState::Detached;
+                Ok(())
+            }
+            Ok(Some(_)) => Err(AdapterError::ReadBackMismatch),
+            Err(_error) => Err(AdapterError::EffectNotClosed),
+        }
+    }
+
     pub fn verify_attached(&mut self) -> Result<(), AdapterError> {
         match self.state {
             VipState::Attached(_) => {
@@ -402,15 +416,15 @@ impl<B: VipBackend> LinuxVipEffectAdapter<B> {
         if authorization.epoch() == 0 {
             return Err(AdapterError::ReceiptRequired);
         }
-        if authorization.epoch() < self.last_epoch {
-            return Err(AdapterError::StaleEpoch);
-        }
         if let VipState::Attached(epoch) = self.state {
             if epoch == authorization.epoch() {
                 self.verify_attached()?;
                 return Ok(());
             }
             return Err(AdapterError::EffectNotClosed);
+        }
+        if authorization.epoch() <= self.last_epoch {
+            return Err(AdapterError::StaleEpoch);
         }
         let pre_existing = self
             .backend
