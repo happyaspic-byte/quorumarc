@@ -406,13 +406,13 @@ fn production_node_refuses_open_effect_adapter() {
         .open_with_receipt("orders-api", 2, [11; 32])
         .expect("open");
     assert!(matches!(
-        ProductionNode::from_effect_adapter(&adapter),
+        ProductionNode::from_effect_adapter(adapter),
         Err(AdapterError::EffectNotClosed)
     ));
     ClosedOnlyEffectAdapter
         .verify_closed()
         .expect("production default remains closed");
-    ProductionNode::from_effect_adapter(&ClosedOnlyEffectAdapter)
+    ProductionNode::from_effect_adapter(ClosedOnlyEffectAdapter)
         .expect("closed-only adapter may start");
 }
 
@@ -421,7 +421,7 @@ fn effect_closed_daemon_stops_without_ever_becoming_ready() {
     let mut node = ProductionNode::effect_closed();
     let shutdown = ShutdownToken::new();
     shutdown.request();
-    let report = node.run_until_shutdown(&shutdown);
+    let report = node.run_until_shutdown(&shutdown).expect("clean shutdown");
     assert_eq!(report.initial, DaemonReadiness::EffectClosed);
     assert_eq!(report.final_state, DaemonReadiness::Stopped);
     assert!(!report.ever_ready);

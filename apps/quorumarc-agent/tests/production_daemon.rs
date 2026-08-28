@@ -46,8 +46,8 @@ read_back = true
 [workload]
 unit = "orders-api.service"
 [effect]
-vip = "172.30.1.100/24"
-interface = "enp1s0"
+vip = "192.0.2.100/32"
+interface = "lo"
 [[members]]
 id = "node-a"
 role = "data"
@@ -548,7 +548,11 @@ fn wait_for_status(socket: &std::path::Path, needle: &str) -> Result<String, Box
 fn wait_for_socket(path: &std::path::Path, child: &mut Child) -> Result<(), Box<dyn Error>> {
     for _ in 0..50 {
         if child.try_wait()?.is_some() {
-            return Err("daemon exited before status socket".into());
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr)?;
+            }
+            return Err(format!("daemon exited before status socket: {stderr}").into());
         }
         if UnixStream::connect(path).is_ok() {
             return Ok(());

@@ -140,6 +140,7 @@ impl NetlinkVipBackend {
             .enable_io()
             .build()
             .map_err(|_error| VipBackendError::Io)?;
+        let _guard = runtime.enter();
         let (connection, handle, _) = rtnetlink::new_connection().map_err(map_io_error)?;
         runtime.spawn(connection);
         Ok(Self { runtime, handle })

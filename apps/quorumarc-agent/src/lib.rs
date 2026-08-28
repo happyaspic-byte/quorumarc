@@ -773,19 +773,59 @@ fn daemon(options: DaemonOptions) -> CliReport {
                     None,
                 ),
             );
-            let mut node = match quorumarc_service::node::ProductionNode::from_effect_adapter(
-                &quorumarc_service::adapters::ClosedOnlyEffectAdapter,
-            ) {
-                Ok(node) => node,
+            let backend = match quorumarc_service::linux_vip::NetlinkVipBackend::connect() {
+                Ok(backend) => backend,
                 Err(_error) => {
                     return CliReport::refusal(
                         "daemon",
-                        "EFFECT_ADAPTER_NOT_CLOSED",
-                        "production effect adapter did not verify closed",
+                        "EFFECT_ADAPTER_UNAVAILABLE",
+                        "cannot connect the production Netlink VIP adapter",
                         EXIT_CONFIG,
                     );
                 }
             };
+            let mut adapter = match quorumarc_service::linux_vip::LinuxVipEffectAdapter::new(
+                config.workload_id(),
+                config.node_id(),
+                config.effect_vip(),
+                config.effect_interface(),
+                backend,
+            ) {
+                Ok(adapter) => adapter,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "EFFECT_ADAPTER_CONFIG_INVALID",
+                        "cannot bind the configured Linux VIP target",
+                        EXIT_CONFIG,
+                    );
+                }
+            };
+            if quorumarc_service::adapters::EffectAdapter::close(
+                &mut adapter,
+                quorumarc_service::adapters::CloseReason::ExplicitClose,
+            )
+            .is_err()
+            {
+                return CliReport::refusal(
+                    "daemon",
+                    "EFFECT_ADAPTER_NOT_CLOSED",
+                    "production VIP is foreign or could not be verified absent",
+                    EXIT_CONFIG,
+                );
+            }
+            let mut node =
+                match quorumarc_service::node::ProductionNode::from_effect_adapter(adapter) {
+                    Ok(node) => node,
+                    Err(_error) => {
+                        return CliReport::refusal(
+                            "daemon",
+                            "EFFECT_ADAPTER_NOT_CLOSED",
+                            "production effect adapter did not verify closed",
+                            EXIT_CONFIG,
+                        );
+                    }
+                };
             let shutdown = quorumarc_service::signal::ShutdownToken::new();
             let reload = shutdown.reload_token();
             let _signal_guard = match shutdown.register_process_signals() {
@@ -944,6 +984,17 @@ fn daemon(options: DaemonOptions) -> CliReport {
                 let _ = worker.join();
             }
             let _ = reload_worker.join();
+            let report = match report {
+                Ok(report) => report,
+                Err(_error) => {
+                    return CliReport::refusal(
+                        "daemon",
+                        "EFFECT_ADAPTER_CLOSE_UNVERIFIED",
+                        "shutdown could not verify that the production VIP is absent",
+                        EXIT_IO,
+                    );
+                }
+            };
             let fields = [
                 ("event", "daemon".to_owned()),
                 ("status", "stopped-effect-closed".to_owned()),

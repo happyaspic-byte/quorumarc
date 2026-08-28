@@ -1,10 +1,11 @@
-use crate::adapters::{AdapterError, EffectAdapter};
+use crate::adapters::{AdapterError, CloseReason, ClosedOnlyEffectAdapter, EffectAdapter};
 use crate::signal::ShutdownToken;
 
-/// Production node daemon that cannot open effects until later milestones.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProductionNode {
+/// Production node daemon holding an active fail-closed effect adapter.
+#[derive(Debug)]
+pub struct ProductionNode<A = ClosedOnlyEffectAdapter> {
     readiness: DaemonReadiness,
+    adapter: A,
 }
 
 /// Observable daemon readiness.
@@ -22,19 +23,31 @@ pub struct DaemonReport {
     pub ever_ready: bool,
 }
 
-impl ProductionNode {
+impl Default for ProductionNode<ClosedOnlyEffectAdapter> {
+    fn default() -> Self {
+        Self::effect_closed()
+    }
+}
+
+impl ProductionNode<ClosedOnlyEffectAdapter> {
     /// Constructs a node whose EffectGate remains closed.
     #[must_use]
     pub const fn effect_closed() -> Self {
         Self {
             readiness: DaemonReadiness::EffectClosed,
+            adapter: ClosedOnlyEffectAdapter,
         }
     }
+}
 
+impl<A: EffectAdapter> ProductionNode<A> {
     /// Starts only when the bound adapter is independently verified closed.
-    pub fn from_effect_adapter(adapter: &impl EffectAdapter) -> Result<Self, AdapterError> {
+    pub fn from_effect_adapter(adapter: A) -> Result<Self, AdapterError> {
         adapter.verify_closed()?;
-        Ok(Self::effect_closed())
+        Ok(Self {
+            readiness: DaemonReadiness::EffectClosed,
+            adapter,
+        })
     }
 
     /// Current readiness.
@@ -43,18 +56,29 @@ impl ProductionNode {
         self.readiness
     }
 
-    /// Runs the closed-gate daemon loop until shutdown.
-    pub fn run_until_shutdown(&mut self, shutdown: &ShutdownToken) -> DaemonReport {
+    /// Access to the underlying effect adapter.
+    #[must_use]
+    pub const fn adapter(&self) -> &A {
+        &self.adapter
+    }
+
+    /// Runs the closed-gate daemon loop until shutdown, then closes and verifies the adapter.
+    pub fn run_until_shutdown(
+        &mut self,
+        shutdown: &ShutdownToken,
+    ) -> Result<DaemonReport, AdapterError> {
         let initial = self.readiness;
         if !shutdown.is_requested() {
             shutdown.wait();
         }
+        self.adapter.close(CloseReason::ExplicitClose)?;
+        self.adapter.verify_closed()?;
         self.readiness = DaemonReadiness::Stopped;
-        DaemonReport {
+        Ok(DaemonReport {
             initial,
             final_state: self.readiness,
             ever_ready: false,
-        }
+        })
     }
 
     /// External-effect state.
