@@ -942,6 +942,11 @@ fn daemon(options: DaemonOptions) -> CliReport {
             };
             let candidate_status = status.clone();
             let candidate_shutdown = shutdown.clone();
+            let (suspicion_sender, suspicion_receiver) = std::sync::mpsc::sync_channel::<(
+                quorumarc_service::candidate_loop::CandidateFailure,
+                quorumarc_service::protocol::ProductionRequest,
+            )>(16);
+            let _suspicion_trigger = suspicion_sender;
             let candidate_worker = match std::thread::Builder::new()
                 .name("quorumarc-agent-candidate".to_owned())
                 .spawn(move || {
@@ -950,6 +955,20 @@ fn daemon(options: DaemonOptions) -> CliReport {
                             candidate_control,
                             candidate_status,
                         );
+                    while !candidate_shutdown.is_requested() {
+                        match suspicion_receiver.recv_timeout(std::time::Duration::from_millis(100))
+                        {
+                            Ok((failure, request)) => {
+                                let _ =
+                                    candidate.run_bounded(failure, request, &candidate_shutdown);
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                candidate.wait_until_shutdown(&candidate_shutdown);
+                                break;
+                            }
+                        }
+                    }
                     candidate.wait_until_shutdown(&candidate_shutdown);
                 }) {
                 Ok(worker) => worker,

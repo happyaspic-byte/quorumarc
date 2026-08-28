@@ -58,6 +58,55 @@ fn send_and_receive(stream: &mut UnixStream, frame: &[u8]) -> String {
 }
 
 #[test]
+fn local_admin_socket_triggers_suspicion_sink_on_committed_mutation() {
+    let directory =
+        std::env::temp_dir().join(format!("quorumarc-admin-trigger-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("directory");
+    let sequence = NEXT_SOCKET.fetch_add(1, Ordering::Relaxed);
+    let socket = directory.join(format!("admin-trigger-{sequence}.sock"));
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let journal = ManagementJournal::open(&directory, [9; 16]).expect("journal");
+    let admission = AuthenticatedRequestJournal::new(
+        journal,
+        "prod-cluster",
+        "orders-api",
+        "node-a",
+        "node-a-2026-01",
+        key.verifying_key(),
+    );
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let current_uid = rustix::process::getuid().as_raw();
+    let server = LocalAdminServer::bind_with_allowed_uid(&socket, admission, current_uid)
+        .expect("bind admin")
+        .with_suspicion_sink(move |failure, request| {
+            let _ = sender.send((failure, request.sequence));
+        });
+
+    let shutdown = quorumarc_service::signal::ShutdownToken::new();
+    let worker_shutdown = shutdown.clone();
+    let handle = thread::spawn(move || server.serve_until(&worker_shutdown));
+    thread::sleep(Duration::from_millis(20));
+
+    let first = encoded(1, b"node-failure-suspicion", &key);
+    let mut client = UnixStream::connect(&socket).expect("connect");
+    assert_eq!(send_and_receive(&mut client, &first), "COMMITTED\n");
+
+    let received = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("received suspicion event");
+    assert_eq!(
+        received.0,
+        quorumarc_service::candidate_loop::CandidateFailure::NodeFailureSuspicion
+    );
+    assert_eq!(received.1, 1);
+
+    shutdown.request();
+    handle.join().expect("join").expect("serve");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn local_admin_socket_records_authenticated_mutation_and_exact_retry() {
     let directory =
         std::env::temp_dir().join(format!("quorumarc-admin-socket-{}", std::process::id()));

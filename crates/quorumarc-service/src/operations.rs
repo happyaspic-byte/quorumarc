@@ -267,14 +267,31 @@ impl Drop for LocalStatusServer {
 const MAX_ADMIN_FRAME: usize = 65_536;
 const ADMIN_IO_TIMEOUT: Duration = Duration::from_millis(250);
 
+type SuspicionCallback = Box<
+    dyn Fn(crate::candidate_loop::CandidateFailure, crate::protocol::ProductionRequest)
+        + Send
+        + Sync
+        + 'static,
+>;
+
 /// Root-authenticated local mutation socket with durable signed anti-replay.
-#[derive(Debug)]
 pub struct LocalAdminServer {
     listener: UnixListener,
     path: PathBuf,
     inode: (u64, u64),
     allowed_uid: u32,
     admission: Mutex<AuthenticatedRequestJournal>,
+    suspicion_sink: Option<Arc<SuspicionCallback>>,
+}
+
+impl std::fmt::Debug for LocalAdminServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalAdminServer")
+            .field("path", &self.path)
+            .field("allowed_uid", &self.allowed_uid)
+            .finish()
+    }
 }
 
 impl LocalAdminServer {
@@ -302,7 +319,20 @@ impl LocalAdminServer {
             inode: (metadata.dev(), metadata.ino()),
             allowed_uid,
             admission: Mutex::new(admission),
+            suspicion_sink: None,
         })
+    }
+
+    /// Registers a callback triggered when an authentic mutation commits.
+    pub fn with_suspicion_sink<F>(mut self, sink: F) -> Self
+    where
+        F: Fn(crate::candidate_loop::CandidateFailure, crate::protocol::ProductionRequest)
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.suspicion_sink = Some(Arc::new(Box::new(sink)));
+        self
     }
 
     pub fn serve_until(self, shutdown: &ShutdownToken) -> Result<(), OperationsError> {
@@ -353,8 +383,19 @@ impl LocalAdminServer {
             .admission
             .lock()
             .map_err(|_error| OperationsError::StatusUnavailable)?;
-        let response = match admission.admit(&frame) {
-            Ok(ManagementOutcome::Committed) => b"COMMITTED\n".as_slice(),
+        let outcome = admission.admit(&frame);
+        let response = match &outcome {
+            Ok(ManagementOutcome::Committed) => {
+                if let Some(sink) = &self.suspicion_sink {
+                    if let Ok(frame_obj) = crate::protocol::ProductionFrame::decode(&frame) {
+                        sink(
+                            crate::candidate_loop::CandidateFailure::NodeFailureSuspicion,
+                            frame_obj.request().clone(),
+                        );
+                    }
+                }
+                b"COMMITTED\n".as_slice()
+            }
             Ok(ManagementOutcome::AlreadyDurable) => b"ALREADY_DURABLE\n".as_slice(),
             Err(AdmissionError::Malformed) => b"MALFORMED\n".as_slice(),
             Err(AdmissionError::AuthenticationFailed) => b"AUTHENTICATION_FAILED\n".as_slice(),
