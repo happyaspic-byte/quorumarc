@@ -1,7 +1,7 @@
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-use quorumarc_rpo0::{CounterOperation, OperationId, WalEntry};
+use quorumarc_rpo0::{AcknowledgedWrite, CounterOperation, DurableReceipt, WalEntry};
 use quorumarc_runtime::FrameCodec;
 use quorumarc_wire::{SigningKey, VerifyingKey};
 
@@ -11,12 +11,7 @@ use crate::{ClusterError, err};
 
 #[derive(Debug)]
 pub enum ContinuousSubmitOutcome {
-    Acknowledged {
-        operation_id: OperationId,
-        commit_index: u64,
-        value: u64,
-        state_root: [u8; 32],
-    },
+    Acknowledged(AcknowledgedWrite),
     Refused(ClusterError),
     Unknown(ClusterError),
     NotSubmitted(ClusterError),
@@ -160,12 +155,24 @@ impl ContinuousClient {
         }
         match response.decision {
             ClientDecision::Acknowledged => match validate_ack(&request, &response) {
-                Ok(()) => ContinuousSubmitOutcome::Acknowledged {
+                Ok(()) => ContinuousSubmitOutcome::Acknowledged(AcknowledgedWrite {
                     operation_id: response.operation_id,
                     commit_index: response.commit_index,
                     value: response.value,
                     state_root: response.state_root,
-                },
+                    replica_receipts: [
+                        DurableReceipt {
+                            replica_id: "continuous-primary".to_owned(),
+                            commit_index: response.commit_index,
+                            record_checksum: response.left_checksum,
+                        },
+                        DurableReceipt {
+                            replica_id: "continuous-replica".to_owned(),
+                            commit_index: response.commit_index,
+                            record_checksum: response.right_checksum,
+                        },
+                    ],
+                }),
                 Err(error) => ContinuousSubmitOutcome::Unknown(error),
             },
             ClientDecision::Refused => ContinuousSubmitOutcome::Refused(err(

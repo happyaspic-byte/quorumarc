@@ -15,7 +15,7 @@ use quorumarc_cluster::{
     serve_continuous_replica, serve_fault_proxy, serve_lifecycle_node, serve_lifecycle_witness,
     serve_peer, serve_witness,
 };
-use quorumarc_rpo0::{CounterOperation, OperationId};
+use quorumarc_rpo0::{AckPreflight, CounterOperation, DurableAckIndex, OperationId};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -427,6 +427,7 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                     "--primary",
                     "--primary-public-key",
                     "--client-signing-key",
+                    "--ack-index",
                     "--operation-byte",
                     "--expected-commit",
                     "--increment",
@@ -454,35 +455,72 @@ fn run(arguments: Vec<String>) -> Result<(), ClusterError> {
                 expected_commit_index: options.u64_any("--expected-commit")?,
                 increment: options.u64_any("--increment")?,
             };
-            match client.apply(operation) {
-                ContinuousSubmitOutcome::Acknowledged {
-                    operation_id,
-                    commit_index,
-                    value,
-                    state_root,
-                } => {
-                    println!(
-                        "code=CONTINUOUS_ACKNOWLEDGED operation_id={operation_id} commit_index={commit_index} value={value} state_root={}",
-                        encode_hex(&state_root)
-                    );
+            let mut ack_index =
+                DurableAckIndex::open(options.path("--ack-index")?).map_err(|error| {
+                    ClusterError::new(
+                        "CONTINUOUS_ACK_INDEX_REFUSED",
+                        format!("cannot recover durable client ACK history: {error:?}"),
+                    )
+                })?;
+            match ack_index.preflight(operation).map_err(|error| {
+                ClusterError::new(
+                    "CONTINUOUS_ACK_HISTORY_CONFLICT",
+                    format!("operation conflicts with durable client ACK history: {error:?}"),
+                )
+            })? {
+                AckPreflight::Exact(acknowledgement) => {
+                    ack_index
+                        .record(operation, &acknowledgement)
+                        .map_err(|error| {
+                            ClusterError::new(
+                                "CONTINUOUS_ACK_DURABILITY_UNKNOWN",
+                                format!("cannot resync durable client ACK: {error:?}"),
+                            )
+                        })?;
+                    println!("event=CONTINUOUS_ACK_RECOVERED_LOCALLY");
+                    print_acknowledgement(&acknowledgement);
                     Ok(())
                 }
-                ContinuousSubmitOutcome::Refused(error) => {
-                    println!("code=CONTINUOUS_REFUSED");
-                    Err(error)
-                }
-                ContinuousSubmitOutcome::Unknown(error) => {
-                    println!("code=CONTINUOUS_UNKNOWN");
-                    Err(error)
-                }
-                ContinuousSubmitOutcome::NotSubmitted(error) => {
-                    println!("code=CONTINUOUS_NOT_SUBMITTED");
-                    Err(error)
-                }
+                AckPreflight::Fresh => match client.apply(operation) {
+                    ContinuousSubmitOutcome::Acknowledged(acknowledgement) => {
+                        ack_index
+                            .record(operation, &acknowledgement)
+                            .map_err(|error| {
+                                ClusterError::new(
+                                    "CONTINUOUS_ACK_DURABILITY_UNKNOWN",
+                                    format!("cannot persist authenticated client ACK: {error:?}"),
+                                )
+                            })?;
+                        print_acknowledgement(&acknowledgement);
+                        Ok(())
+                    }
+                    ContinuousSubmitOutcome::Refused(error) => {
+                        println!("code=CONTINUOUS_REFUSED");
+                        Err(error)
+                    }
+                    ContinuousSubmitOutcome::Unknown(error) => {
+                        println!("code=CONTINUOUS_UNKNOWN");
+                        Err(error)
+                    }
+                    ContinuousSubmitOutcome::NotSubmitted(error) => {
+                        println!("code=CONTINUOUS_NOT_SUBMITTED");
+                        Err(error)
+                    }
+                },
             }
         }
         _ => Err(cli_error("unknown mode")),
     }
+}
+
+fn print_acknowledgement(acknowledgement: &quorumarc_rpo0::AcknowledgedWrite) {
+    println!(
+        "code=CONTINUOUS_ACKNOWLEDGED operation_id={} commit_index={} value={} state_root={}",
+        acknowledgement.operation_id,
+        acknowledgement.commit_index,
+        acknowledgement.value,
+        encode_hex(&acknowledgement.state_root)
+    );
 }
 
 fn print_help() {

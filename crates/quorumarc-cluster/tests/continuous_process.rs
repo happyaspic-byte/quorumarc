@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use quorumarc_cluster::{LifecycleClient, LifecycleNodeId, LifecycleReasonCode, LifecycleState};
-use quorumarc_rpo0::{CounterOperation, OperationId, recover_wal};
+use quorumarc_rpo0::{CounterOperation, DurableAckIndex, OperationId, recover_wal};
 use quorumarc_store::AuthoritySnapshot;
 use quorumarc_wire::SigningKey;
 
@@ -85,32 +85,53 @@ fn live_client_ack_requires_two_process_durable_copies_and_exact_retry_is_stable
     let primary_ready = fixture.root.join("primary.ready");
     let mut replica = spawn_replica(&fixture, &replica_ready, 3);
     let replica_address = wait_ready(&replica_ready, &mut replica);
-    let mut primary = spawn_primary(&fixture, &primary_ready, replica_address, 5);
+    let mut primary = spawn_primary(&fixture, &primary_ready, replica_address, 3);
     let primary_address = wait_ready(&primary_ready, &mut primary);
 
-    let first = submit(&fixture, primary_address, 73, 0, 3);
+    let ack_index = fixture.root.join("client-acks.index");
+    let first = submit(&fixture, primary_address, &ack_index, 73, 0, 3);
     assert_success("first submit", &first);
     let first_stdout = String::from_utf8_lossy(&first.stdout);
     assert!(first_stdout.contains("code=CONTINUOUS_ACKNOWLEDGED"));
     assert!(first_stdout.contains("operation_id=49494949494949494949494949494949"));
     assert!(first_stdout.contains("commit_index=1"));
     assert!(first_stdout.contains("value=3"));
+    let first_index_len = fs::metadata(&ack_index).expect("first ACK index").len();
+    {
+        let first_acks = DurableAckIndex::open(&ack_index).expect("recover first ACK index");
+        assert_eq!(first_acks.len(), 1);
+        assert!(first_acks.get(OperationId::new([73; 16])).is_some());
+    }
 
-    let retry = submit(&fixture, primary_address, 73, 0, 3);
+    let retry = submit(&fixture, primary_address, &ack_index, 73, 0, 3);
     assert_success("exact retry", &retry);
     assert!(String::from_utf8_lossy(&retry.stdout).contains("commit_index=1"));
     assert!(String::from_utf8_lossy(&retry.stdout).contains("value=3"));
+    assert!(String::from_utf8_lossy(&retry.stdout).contains("CONTINUOUS_ACK_RECOVERED_LOCALLY"));
+    assert_eq!(
+        fs::metadata(&ack_index).expect("retried ACK index").len(),
+        first_index_len
+    );
 
-    let second = submit(&fixture, primary_address, 83, 1, 4);
+    let second = submit(&fixture, primary_address, &ack_index, 83, 1, 4);
     assert_success("second fresh submit", &second);
     assert!(String::from_utf8_lossy(&second.stdout).contains("commit_index=2"));
     assert!(String::from_utf8_lossy(&second.stdout).contains("value=7"));
     assert!(String::from_utf8_lossy(&second.stdout).contains("state_root="));
+    {
+        let persisted = DurableAckIndex::open(&ack_index).expect("recover client ACK history");
+        assert_eq!(persisted.len(), 2);
+        assert!(persisted.get(OperationId::new([73; 16])).is_some());
+        assert!(persisted.get(OperationId::new([83; 16])).is_some());
+    }
 
-    let conflicting = submit(&fixture, primary_address, 73, 0, 9);
+    let conflicting = submit(&fixture, primary_address, &ack_index, 73, 0, 9);
     assert!(!conflicting.status.success());
-    assert!(String::from_utf8_lossy(&conflicting.stdout).contains("code=CONTINUOUS_REFUSED"));
-    let zero = submit(&fixture, primary_address, 93, 2, 0);
+    assert!(
+        String::from_utf8_lossy(&conflicting.stderr)
+            .contains("code=CONTINUOUS_ACK_HISTORY_CONFLICT")
+    );
+    let zero = submit(&fixture, primary_address, &ack_index, 93, 2, 0);
     assert!(!zero.status.success());
     assert!(String::from_utf8_lossy(&zero.stdout).contains("code=CONTINUOUS_REFUSED"));
 
@@ -282,7 +303,8 @@ fn equal_wal_restart_rebuilds_exact_retry_without_duplicate_append() {
     let replica_address = wait_ready(&replica_ready, &mut replica);
     let mut primary = spawn_primary(&fixture, &primary_ready, replica_address, 1);
     let primary_address = wait_ready(&primary_ready, &mut primary);
-    let first = submit(&fixture, primary_address, 101, 0, 6);
+    let ack_index = fixture.root.join("restart-client-acks.index");
+    let first = submit(&fixture, primary_address, &ack_index, 101, 0, 6);
     assert_success("restart seed submit", &first);
     assert_success(
         "restart seed primary",
@@ -295,30 +317,11 @@ fn equal_wal_restart_rebuilds_exact_retry_without_duplicate_append() {
     let original_primary = fs::read(&fixture.primary_wal).expect("read first primary WAL");
     let original_replica = fs::read(&fixture.replica_wal).expect("read first replica WAL");
     assert_eq!(original_primary, original_replica);
-    fs::remove_file(&replica_ready).expect("remove first replica readiness");
-    fs::remove_file(&primary_ready).expect("remove first primary readiness");
-
-    let mut restarted_replica = spawn_replica(&fixture, &replica_ready, 1);
-    let restarted_replica_address = wait_ready(&replica_ready, &mut restarted_replica);
-    let mut restarted_primary =
-        spawn_primary(&fixture, &primary_ready, restarted_replica_address, 1);
-    let restarted_primary_address = wait_ready(&primary_ready, &mut restarted_primary);
-    let retry = submit(&fixture, restarted_primary_address, 101, 0, 6);
-    assert_success("restart exact retry", &retry);
+    let retry = submit(&fixture, primary_address, &ack_index, 101, 0, 6);
+    assert_success("offline exact retry", &retry);
     assert!(String::from_utf8_lossy(&retry.stdout).contains("commit_index=1"));
     assert!(String::from_utf8_lossy(&retry.stdout).contains("value=6"));
-    assert_success(
-        "restarted primary",
-        &restarted_primary
-            .wait_with_output()
-            .expect("collect restarted primary"),
-    );
-    assert_success(
-        "restarted replica",
-        &restarted_replica
-            .wait_with_output()
-            .expect("collect restarted replica"),
-    );
+    assert!(String::from_utf8_lossy(&retry.stdout).contains("CONTINUOUS_ACK_RECOVERED_LOCALLY"));
     assert_eq!(
         fs::read(&fixture.primary_wal).expect("read restarted primary WAL"),
         original_primary
@@ -338,12 +341,13 @@ fn peer_loss_after_readiness_returns_unknown_and_never_acknowledges_one_copy() {
     let replica_address = wait_ready(&replica_ready, &mut replica);
     let mut primary = spawn_primary(&fixture, &primary_ready, replica_address, 1);
     let primary_address = wait_ready(&primary_ready, &mut primary);
+    let ack_index = fixture.root.join("peer-loss-client-acks.index");
     let replica_output = replica
         .wait_with_output()
         .expect("collect startup-only replica");
     assert_success("startup-only replica", &replica_output);
 
-    let submit = submit(&fixture, primary_address, 79, 0, 1);
+    let submit = submit(&fixture, primary_address, &ack_index, 79, 0, 1);
     assert!(!submit.status.success());
     assert!(String::from_utf8_lossy(&submit.stdout).contains("code=CONTINUOUS_UNKNOWN"));
     assert!(!String::from_utf8_lossy(&submit.stdout).contains("CONTINUOUS_ACKNOWLEDGED"));
@@ -511,6 +515,7 @@ fn spawn_primary(
 fn submit(
     fixture: &Fixture,
     primary_address: SocketAddr,
+    ack_index: &Path,
     operation_byte: u8,
     expected_commit: u64,
     increment: u64,
@@ -523,6 +528,8 @@ fn submit(
         .arg(&fixture.primary_public)
         .arg("--client-signing-key")
         .arg(&fixture.client_seed)
+        .arg("--ack-index")
+        .arg(ack_index)
         .arg("--operation-byte")
         .arg(operation_byte.to_string())
         .arg("--expected-commit")

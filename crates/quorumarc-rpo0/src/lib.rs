@@ -20,7 +20,7 @@ mod replica;
 
 pub const MAX_WAL_RECORDS: u64 = 1_024;
 
-pub use ack_index::{AckIndexError, DurableAckIndex};
+pub use ack_index::{AckIndexError, AckPreflight, DurableAckIndex};
 pub use codec::{RecoveredCounter, RecoveredWrite, StateRoot, WalEntry, recover_wal};
 pub use counter::{
     AcknowledgedWrite, CounterOperation, OperationId, OperationPreflight, ReplicatedCounter,
