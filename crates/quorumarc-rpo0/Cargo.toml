@@ -10,6 +10,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
 sha2 = "=0.10.8"
 
 [lints]
