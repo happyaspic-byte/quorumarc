@@ -58,6 +58,22 @@ pub struct SignedFenceReceipt {
 }
 
 impl SignedFenceReceipt {
+    pub(crate) fn from_parts(
+        target: String,
+        outlet: String,
+        challenge: [u8; 16],
+        digest: [u8; 32],
+        signature: [u8; 64],
+    ) -> Self {
+        Self {
+            target,
+            outlet,
+            challenge,
+            digest,
+            signature,
+        }
+    }
+
     #[must_use]
     pub fn target(&self) -> &str {
         &self.target

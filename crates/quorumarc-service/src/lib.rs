@@ -19,6 +19,7 @@ pub mod nftables;
 pub mod node;
 pub mod operations;
 pub mod protocol;
+pub mod redfish;
 pub mod reload;
 pub mod signal;
 pub mod tls;

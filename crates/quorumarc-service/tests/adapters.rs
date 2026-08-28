@@ -468,3 +468,113 @@ fn nftables_adapter_demands_receipt_and_refuses_foreign_rules() {
     assert!(adapter.verify_closed().is_ok());
     assert_eq!(adapter.backend().deletes, 1);
 }
+
+use quorumarc_service::redfish::{
+    LinuxRedfishFenceAdapter, RedfishBackend, RedfishBackendError, RedfishPowerState,
+};
+
+#[derive(Debug, Default)]
+struct FakeRedfishBackend {
+    power: Option<RedfishPowerState>,
+    commands: usize,
+    fail_observe: bool,
+    fail_command: bool,
+}
+
+impl RedfishBackend for FakeRedfishBackend {
+    fn observe(&mut self) -> Result<RedfishPowerState, RedfishBackendError> {
+        if self.fail_observe {
+            return Err(RedfishBackendError::Io);
+        }
+        self.power.ok_or(RedfishBackendError::UnknownSystem)
+    }
+
+    fn power_off(&mut self) -> Result<(), RedfishBackendError> {
+        self.commands += 1;
+        if self.fail_command {
+            return Err(RedfishBackendError::PermissionDenied);
+        }
+        self.power = Some(RedfishPowerState::Off);
+        Ok(())
+    }
+}
+
+#[test]
+fn redfish_fence_requires_independent_off_read_back_and_bound_target() {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let backend = FakeRedfishBackend {
+        power: Some(RedfishPowerState::On),
+        ..FakeRedfishBackend::default()
+    };
+    let mut fence = LinuxRedfishFenceAdapter::new(
+        "node-a",
+        "https://bmc.example/redfish/v1/Systems/1",
+        backend,
+    )
+    .expect("adapter");
+
+    assert_eq!(
+        fence.fence(FenceRequest {
+            target: "node-b",
+            expected_outlet: "https://bmc.example/redfish/v1/Systems/1",
+            challenge: [9; 16],
+        }),
+        Err(AdapterError::WrongTarget)
+    );
+    assert_eq!(fence.backend().commands, 0);
+
+    let evidence = fence
+        .fence(FenceRequest {
+            target: "node-a",
+            expected_outlet: "https://bmc.example/redfish/v1/Systems/1",
+            challenge: [9; 16],
+        })
+        .expect("commanded off");
+    fence.backend_mut().power = Some(RedfishPowerState::On);
+    assert_eq!(
+        fence.signed_receipt(&evidence, &signing_key),
+        Err(AdapterError::ReadBackMismatch)
+    );
+
+    fence.backend_mut().power = Some(RedfishPowerState::Off);
+    let receipt = fence
+        .signed_receipt(&evidence, &signing_key)
+        .expect("independent off");
+    receipt
+        .verify(&signing_key.verifying_key())
+        .expect("verify");
+}
+
+#[test]
+fn redfish_fence_fails_closed_without_https_or_when_observation_is_uncertain() {
+    assert_eq!(
+        LinuxRedfishFenceAdapter::new(
+            "node-a",
+            "http://bmc.example/redfish/v1/Systems/1",
+            FakeRedfishBackend::default(),
+        )
+        .err(),
+        Some(AdapterError::WrongTarget)
+    );
+
+    let backend = FakeRedfishBackend {
+        power: Some(RedfishPowerState::On),
+        fail_observe: true,
+        ..FakeRedfishBackend::default()
+    };
+    let mut fence = LinuxRedfishFenceAdapter::new(
+        "node-a",
+        "https://bmc.example/redfish/v1/Systems/1",
+        backend,
+    )
+    .expect("adapter");
+    assert_eq!(
+        fence.fence(FenceRequest {
+            target: "node-a",
+            expected_outlet: "https://bmc.example/redfish/v1/Systems/1",
+            challenge: [9; 16],
+        }),
+        Err(AdapterError::EffectNotClosed)
+    );
+    assert_eq!(fence.backend().commands, 0);
+}
