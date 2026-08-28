@@ -242,6 +242,46 @@ fn watchdog_detects_half_interval_from_systemd_environment() {
 }
 
 #[test]
+fn watchdog_pings_systemd_abstract_notify_socket_and_never_emits_ready() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+    let name = format!(
+        "quorumarc-notify-{}-{}",
+        std::process::id(),
+        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+    );
+    let addr = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract name");
+    let listener = UnixDatagram::bind_addr(&addr).expect("bind abstract");
+    listener
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("timeout");
+
+    let notify = format!("@{name}");
+    let watchdog = quorumarc_service::watchdog::SystemdWatchdog::from_environment_variables(
+        Some(&notify),
+        Some("400000"),
+    )
+    .expect("env watchdog")
+    .expect("some watchdog");
+    assert!(!watchdog.emitted_ready());
+    assert_eq!(watchdog.interval(), Duration::from_millis(200));
+
+    let shutdown = ShutdownToken::new();
+    let worker_shutdown = shutdown.clone();
+    let handle = thread::spawn(move || watchdog.run_until(&worker_shutdown));
+
+    let mut buf = [0_u8; 128];
+    let (len, _) = listener.recv_from(&mut buf).expect("first ping");
+    let first = std::str::from_utf8(&buf[..len]).expect("utf8");
+    assert_eq!(first.trim(), "WATCHDOG=1");
+    assert!(!first.contains("READY=1"));
+
+    shutdown.request();
+    handle.join().expect("watchdog stop");
+}
+
+#[test]
 fn production_node_refuses_open_effect_adapter() {
     let mut adapter = MockEffectAdapter::closed();
     adapter

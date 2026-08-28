@@ -1,5 +1,6 @@
-use std::os::unix::net::UnixDatagram;
-use std::path::{Path, PathBuf};
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixDatagram};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::signal::ShutdownToken;
@@ -8,7 +9,7 @@ use crate::signal::ShutdownToken;
 #[derive(Debug)]
 pub struct SystemdWatchdog {
     socket: UnixDatagram,
-    path: PathBuf,
+    destination: SocketAddr,
     interval: Duration,
 }
 
@@ -22,15 +23,7 @@ pub enum WatchdogError {
 impl SystemdWatchdog {
     /// Connects an unbound datagram client to an existing notify socket.
     pub fn from_socket_path(path: &Path, interval: Duration) -> Result<Self, WatchdogError> {
-        if interval.is_zero() {
-            return Err(WatchdogError::InvalidInterval);
-        }
-        let socket = UnixDatagram::unbound().map_err(|_error| WatchdogError::SocketUnavailable)?;
-        Ok(Self {
-            socket,
-            path: path.to_path_buf(),
-            interval,
-        })
+        Self::from_notify_socket(path.to_str().unwrap_or_default(), interval)
     }
 
     /// Builds a watchdog from systemd notify variables without claiming READY.
@@ -51,7 +44,21 @@ impl SystemdWatchdog {
         if interval_us == 0 {
             return Err(WatchdogError::InvalidInterval);
         }
-        Self::from_socket_path(Path::new(socket), Duration::from_micros(interval_us)).map(Some)
+        Self::from_notify_socket(socket, Duration::from_micros(interval_us)).map(Some)
+    }
+
+    fn from_notify_socket(socket: &str, interval: Duration) -> Result<Self, WatchdogError> {
+        if interval.is_zero() {
+            return Err(WatchdogError::InvalidInterval);
+        }
+        let destination = notify_destination(socket)?;
+        let datagram =
+            UnixDatagram::unbound().map_err(|_error| WatchdogError::SocketUnavailable)?;
+        Ok(Self {
+            socket: datagram,
+            destination,
+            interval,
+        })
     }
 
     /// Production daemons never send systemd READY=1.
@@ -69,8 +76,19 @@ impl SystemdWatchdog {
     /// Sends `WATCHDOG=1` until shutdown without claiming service readiness.
     pub fn run_until(&self, shutdown: &ShutdownToken) {
         while !shutdown.is_requested() {
-            let _ = self.socket.send_to(b"WATCHDOG=1", &self.path);
+            let _ = self.socket.send_to_addr(b"WATCHDOG=1", &self.destination);
             shutdown.wait_timeout(self.interval);
         }
     }
+}
+
+fn notify_destination(socket: &str) -> Result<SocketAddr, WatchdogError> {
+    if let Some(name) = socket.strip_prefix('@') {
+        if name.is_empty() {
+            return Err(WatchdogError::SocketUnavailable);
+        }
+        return SocketAddr::from_abstract_name(name.as_bytes())
+            .map_err(|_error| WatchdogError::SocketUnavailable);
+    }
+    SocketAddr::from_pathname(Path::new(socket)).map_err(|_error| WatchdogError::SocketUnavailable)
 }
