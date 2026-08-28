@@ -632,6 +632,163 @@ pub fn explore(depth: usize) -> SimulationReport {
     }
 }
 
+/// Result of bounded pseudo-random Monte Carlo scenario exploration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeededSimulationReport {
+    /// Seed used for pseudo-random schedule generation.
+    pub seed: u64,
+    /// Number of distinct scenario paths evaluated.
+    pub scenarios: u64,
+    /// Maximum steps per scenario path.
+    pub max_steps: usize,
+    /// Total delayed events delivered across all scenarios.
+    pub steps_executed: u64,
+    /// Events delivered ahead of an earlier-created delayed event.
+    pub reordered_events: u64,
+    /// Promotions refused by safety preconditions.
+    pub rejected_promotions: u64,
+    /// 64-bit digest of the generated deterministic schedule.
+    pub schedule_digest: u64,
+    /// First violating trace, if any single-writer invariant was broken.
+    pub first_violation: Option<Violation>,
+}
+
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    const fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ScheduledEvent {
+    deliver_at_tick: u8,
+    schedule_seq: u64,
+    action: Action,
+}
+
+/// Runs deterministic pseudo-random Monte Carlo scenarios up to `scenarios` count.
+#[must_use]
+pub fn run_seeded_scenarios(seed: u64, scenarios: u64, max_steps: usize) -> SeededSimulationReport {
+    let mut prng = SplitMix64::new(seed);
+    let mut steps_executed = 0_u64;
+    let mut reordered_events = 0_u64;
+    let mut rejected_promotions = 0_u64;
+    let mut schedule_digest = 0_u64;
+    let mut first_violation = None;
+
+    for _ in 0..scenarios {
+        let mut state = ModelState::default();
+        let mut trace = Vec::with_capacity(max_steps);
+        let mut pending: Vec<ScheduledEvent> = Vec::with_capacity(8);
+        let mut seq = 0_u64;
+
+        for step in 0..max_steps {
+            let choice = (prng.next_u64() % (Action::ALL.len() as u64)) as usize;
+            let action = Action::ALL[choice];
+            schedule_digest = schedule_digest
+                .rotate_left(5)
+                .bitxor(u64::from(choice as u8));
+
+            let delay = match action {
+                Action::PartitionA
+                | Action::PartitionB
+                | Action::HealA
+                | Action::HealB
+                | Action::LagA
+                | Action::LagB
+                | Action::CatchUpA
+                | Action::CatchUpB => (prng.next_u64() % 3) as u8,
+                Action::PromoteA | Action::PromoteB => 0,
+                Action::AdvanceTime => 0,
+                _ => (prng.next_u64() % 2) as u8,
+            };
+
+            seq = seq.wrapping_add(1);
+            let deliver_at_tick = state.now_tick.saturating_add(delay);
+            pending.push(ScheduledEvent {
+                deliver_at_tick,
+                schedule_seq: seq,
+                action,
+            });
+
+            if action == Action::AdvanceTime
+                || pending.len() >= 4
+                || step == max_steps.saturating_sub(1)
+            {
+                pending.sort_by(|a, b| {
+                    b.deliver_at_tick
+                        .cmp(&a.deliver_at_tick)
+                        .then_with(|| b.schedule_seq.cmp(&a.schedule_seq))
+                });
+                for left in 0..pending.len() {
+                    for right in left.saturating_add(1)..pending.len() {
+                        if pending[left].schedule_seq < pending[right].schedule_seq {
+                            reordered_events = reordered_events.saturating_add(1);
+                        }
+                    }
+                }
+                while let Some(event) = pending.pop() {
+                    match apply(&state, event.action) {
+                        Outcome::Applied(next) => {
+                            steps_executed = steps_executed.saturating_add(1);
+                            trace.push(event.action);
+                            let active_writers = next.active_writers();
+                            if active_writers > 1 {
+                                if first_violation.is_none() {
+                                    first_violation = Some(Violation {
+                                        trace: trace.clone(),
+                                        active_writers,
+                                    });
+                                }
+                                break;
+                            }
+                            state = next;
+                        }
+                        Outcome::Rejected(reason) => {
+                            if event.action.candidate().is_some()
+                                && !matches!(reason, Rejection::NoStateChange)
+                            {
+                                rejected_promotions = rejected_promotions.saturating_add(1);
+                            }
+                        }
+                    }
+                }
+            }
+            if first_violation.is_some() {
+                break;
+            }
+        }
+        if first_violation.is_some() {
+            break;
+        }
+    }
+
+    SeededSimulationReport {
+        seed,
+        scenarios,
+        max_steps,
+        steps_executed,
+        reordered_events,
+        rejected_promotions,
+        schedule_digest,
+        first_violation,
+    }
+}
+
+use std::ops::BitXor;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +840,24 @@ mod tests {
             expires_at_tick: 3,
         });
         assert_eq!(state.active_writers(), 2);
+    }
+
+    #[test]
+    fn seeded_scenarios_replay_exactly_and_respect_requested_bound() {
+        let first = run_seeded_scenarios(0x5eed, 10_000, 24);
+        let second = run_seeded_scenarios(0x5eed, 10_000, 24);
+
+        assert_eq!(first, second);
+        assert_eq!(first.scenarios, 10_000);
+        assert!(first.steps_executed <= 240_000);
+        assert_eq!(first.first_violation, None);
+    }
+
+    #[test]
+    fn different_seed_changes_schedule_digest() {
+        let first = run_seeded_scenarios(11, 1_000, 16);
+        let second = run_seeded_scenarios(12, 1_000, 16);
+
+        assert_ne!(first.schedule_digest, second.schedule_digest);
     }
 }
