@@ -54,6 +54,18 @@ pub struct FenceConfig {
     profile: String,
     #[serde(default)]
     read_back: bool,
+    #[serde(default)]
+    redfish: Option<RedfishConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RedfishConfig {
+    system_url: String,
+    ca_cert: PathBuf,
+    auth_config: PathBuf,
+    #[serde(default = "default_redfish_timeout_secs")]
+    timeout_secs: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -67,6 +79,15 @@ pub struct WorkloadConfig {
 pub struct EffectConfig {
     vip: String,
     interface: String,
+    #[serde(default)]
+    nftables: Option<NftablesConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NftablesConfig {
+    table: String,
+    chain: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -211,6 +232,40 @@ impl ProductionConfig {
         }
         if !valid_interface_name(&config.effect.interface) {
             return Err(ConfigError::InvalidValue("effect.interface".to_owned()));
+        }
+        if let Some(nft) = &config.effect.nftables {
+            if !valid_identifier(&nft.table) {
+                return Err(ConfigError::InvalidValue(
+                    "effect.nftables.table".to_owned(),
+                ));
+            }
+            if !valid_identifier(&nft.chain) {
+                return Err(ConfigError::InvalidValue(
+                    "effect.nftables.chain".to_owned(),
+                ));
+            }
+        }
+        if let Some(redfish) = &config.fence.redfish {
+            if !redfish.system_url.starts_with("https://") || redfish.system_url.len() > 256 {
+                return Err(ConfigError::InvalidValue(
+                    "fence.redfish.system_url".to_owned(),
+                ));
+            }
+            if !redfish.ca_cert.is_absolute() {
+                return Err(ConfigError::PathMustBeAbsolute(
+                    "fence.redfish.ca_cert".to_owned(),
+                ));
+            }
+            if !redfish.auth_config.is_absolute() {
+                return Err(ConfigError::PathMustBeAbsolute(
+                    "fence.redfish.auth_config".to_owned(),
+                ));
+            }
+            if !(1..=30).contains(&redfish.timeout_secs) {
+                return Err(ConfigError::InvalidValue(
+                    "fence.redfish.timeout_secs".to_owned(),
+                ));
+            }
         }
         if config.members.len() != 3 {
             return Err(ConfigError::InvalidValue(
@@ -541,6 +596,26 @@ impl ProductionConfig {
         &self.effect.interface
     }
 
+    #[must_use]
+    pub fn effect_nftables(&self) -> Option<(&str, &str)> {
+        self.effect
+            .nftables
+            .as_ref()
+            .map(|nft| (nft.table.as_str(), nft.chain.as_str()))
+    }
+
+    #[must_use]
+    pub fn fence_redfish(&self) -> Option<(&str, &std::path::Path, &std::path::Path, u32)> {
+        self.fence.redfish.as_ref().map(|redfish| {
+            (
+                redfish.system_url.as_str(),
+                redfish.ca_cert.as_path(),
+                redfish.auth_config.as_path(),
+                redfish.timeout_secs,
+            )
+        })
+    }
+
     /// External effects remain closed until later milestones.
     #[must_use]
     pub const fn effect_gate_state(&self) -> &'static str {
@@ -556,6 +631,10 @@ pub struct StoreLock {
 
 fn default_log_level() -> String {
     "info".to_owned()
+}
+
+const fn default_redfish_timeout_secs() -> u32 {
+    5
 }
 
 fn canonical_ip(address: IpAddr) -> IpAddr {

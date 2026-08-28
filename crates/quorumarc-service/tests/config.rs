@@ -437,6 +437,63 @@ fn production_prerequisites_refuse_zero_seed_and_symlink_key() {
     let _ = fs::remove_dir_all(directory);
 }
 
+#[test]
+fn production_config_accepts_native_nftables_and_redfish_sections() {
+    let with_native = format!(
+        "{VALID}\n[effect.nftables]\ntable = \"filter\"\nchain = \"input\"\n\n[fence.redfish]\nsystem_url = \"https://bmc.example.internal/redfish/v1/Systems/Self\"\nca_cert = \"/etc/quorumarc/tls/bmc-ca.crt\"\nauth_config = \"/etc/quorumarc/redfish.auth\"\ntimeout_secs = 10\n"
+    );
+    let config = ProductionConfig::parse(&with_native).expect("valid native config");
+    assert_eq!(config.effect_nftables(), Some(("filter", "input")));
+    let redfish = config.fence_redfish().expect("redfish config");
+    assert_eq!(
+        redfish.0,
+        "https://bmc.example.internal/redfish/v1/Systems/Self"
+    );
+    assert_eq!(
+        redfish.1,
+        std::path::Path::new("/etc/quorumarc/tls/bmc-ca.crt")
+    );
+    assert_eq!(
+        redfish.2,
+        std::path::Path::new("/etc/quorumarc/redfish.auth")
+    );
+    assert_eq!(redfish.3, 10);
+}
+
+#[test]
+fn production_config_rejects_invalid_native_nftables_and_redfish() {
+    let invalid_nft =
+        format!("{VALID}\n[effect.nftables]\ntable = \"bad table\"\nchain = \"input\"\n");
+    assert!(matches!(
+        ProductionConfig::parse(&invalid_nft),
+        Err(ConfigError::InvalidValue(field)) if field == "effect.nftables.table"
+    ));
+
+    let invalid_redfish_http = format!(
+        "{VALID}\n[fence.redfish]\nsystem_url = \"http://bmc.example.internal/redfish/v1/Systems/Self\"\nca_cert = \"/etc/quorumarc/tls/bmc-ca.crt\"\nauth_config = \"/etc/quorumarc/redfish.auth\"\n"
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&invalid_redfish_http),
+        Err(ConfigError::InvalidValue(field)) if field == "fence.redfish.system_url"
+    ));
+
+    let relative_redfish_ca = format!(
+        "{VALID}\n[fence.redfish]\nsystem_url = \"https://bmc.example.internal/redfish/v1/Systems/Self\"\nca_cert = \"etc/quorumarc/tls/bmc-ca.crt\"\nauth_config = \"/etc/quorumarc/redfish.auth\"\n"
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&relative_redfish_ca),
+        Err(ConfigError::PathMustBeAbsolute(field)) if field == "fence.redfish.ca_cert"
+    ));
+
+    let invalid_timeout = format!(
+        "{VALID}\n[fence.redfish]\nsystem_url = \"https://bmc.example.internal/redfish/v1/Systems/Self\"\nca_cert = \"/etc/quorumarc/tls/bmc-ca.crt\"\nauth_config = \"/etc/quorumarc/redfish.auth\"\ntimeout_secs = 0\n"
+    );
+    assert!(matches!(
+        ProductionConfig::parse(&invalid_timeout),
+        Err(ConfigError::InvalidValue(field)) if field == "fence.redfish.timeout_secs"
+    ));
+}
+
 fn isolated_production_config() -> (std::path::PathBuf, String) {
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
