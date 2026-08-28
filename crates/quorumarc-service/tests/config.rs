@@ -114,7 +114,7 @@ fn production_config_requires_absolute_mtls_paths_and_server_name() {
         "etc/quorumarc/tls/node-a.key",
         "etc/quorumarc/tls/ca.crt",
     ] {
-        let invalid = VALID.replace(&format!("/{}", relative), relative);
+        let invalid = VALID.replace(&format!("/{relative}"), relative);
         assert!(matches!(
             ProductionConfig::parse(&invalid),
             Err(ConfigError::PathMustBeAbsolute(_))

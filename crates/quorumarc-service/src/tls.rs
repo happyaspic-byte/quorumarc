@@ -1,10 +1,11 @@
 use std::fs::OpenOptions;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
 use rustix::fs::OFlags;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -71,8 +72,7 @@ pub fn load_mtls_client_config(
 
 fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
     let bytes = read_material(path, false)?;
-    let mut reader = BufReader::new(bytes.as_slice());
-    let certificates = rustls_pemfile::certs(&mut reader)
+    let certificates = CertificateDer::pem_slice_iter(bytes.as_slice())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_error| TlsMaterialError::InvalidCertificate)?;
     if certificates.is_empty() {
@@ -83,10 +83,15 @@ fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsMat
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsMaterialError> {
     let bytes = read_material(path, true)?;
-    let mut reader = BufReader::new(bytes.as_slice());
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|_error| TlsMaterialError::InvalidPrivateKey)?
-        .ok_or(TlsMaterialError::InvalidPrivateKey)
+    let mut keys = PrivateKeyDer::pem_slice_iter(bytes.as_slice());
+    let key = match keys.next() {
+        Some(Ok(key)) => key,
+        _ => return Err(TlsMaterialError::InvalidPrivateKey),
+    };
+    match keys.next() {
+        None => Ok(key),
+        Some(_) => Err(TlsMaterialError::InvalidPrivateKey),
+    }
 }
 
 fn read_material(path: &Path, private: bool) -> Result<Vec<u8>, TlsMaterialError> {

@@ -112,9 +112,9 @@ fn production_tls_file_loader_requires_safe_bounded_material_and_builds_mtls() {
     let client_key_path = directory.join("client-key.pem");
     fs::write(&ca_path, ca).expect("ca");
     fs::write(&server_cert_path, server_cert).expect("server cert");
-    fs::write(&server_key_path, server_key).expect("server key");
+    fs::write(&server_key_path, &server_key).expect("server key");
     fs::write(&client_cert_path, client_cert).expect("client cert");
-    fs::write(&client_key_path, client_key).expect("client key");
+    fs::write(&client_key_path, &client_key).expect("client key");
     fs::set_permissions(&server_key_path, fs::Permissions::from_mode(0o600)).expect("chmod");
     fs::set_permissions(&client_key_path, fs::Permissions::from_mode(0o600)).expect("chmod");
 
@@ -145,6 +145,15 @@ fn production_tls_file_loader_requires_safe_bounded_material_and_builds_mtls() {
         load_mtls_server_config(&oversized, &server_key_path, &ca_path),
         Err(TlsMaterialError::MaterialTooLarge)
     ));
+    let concatenated_key_path = directory.join("concatenated-key.pem");
+    fs::write(&concatenated_key_path, format!("{server_key}{client_key}")).expect("concatenated");
+    fs::set_permissions(&concatenated_key_path, fs::Permissions::from_mode(0o600))
+        .expect("chmod concatenated");
+    assert!(matches!(
+        load_mtls_server_config(&server_cert_path, &concatenated_key_path, &ca_path),
+        Err(TlsMaterialError::InvalidPrivateKey)
+    ));
+
     let _ = fs::remove_dir_all(directory);
 }
 
