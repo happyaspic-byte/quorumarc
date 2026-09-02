@@ -980,4 +980,464 @@ mod tests {
             Err(ProofError::QuorumBindingMismatch)
         );
     }
+
+    #[test]
+    fn invalid_policy_shapes_are_rejected_at_construction() {
+        let valid_candidates = [node("node-a"), node("node-b")];
+        let valid_voters = [node("node-a"), node("node-b"), node("witness")];
+
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                Vec::<NodeId>::new(),
+                valid_voters.clone(),
+                2,
+                Some(node("witness")),
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::NoCandidates)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                [node("node-a")],
+                Vec::<NodeId>::new(),
+                1,
+                None,
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::NoVoters)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                [node("node-a")],
+                [node("node-b")],
+                1,
+                None,
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::CandidateNotVoter)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                valid_candidates.clone(),
+                valid_voters.clone(),
+                0,
+                Some(node("witness")),
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::InvalidQuorumSize)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                valid_candidates.clone(),
+                valid_voters.clone(),
+                1,
+                Some(node("witness")),
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::NonIntersectingQuorum)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                valid_candidates.clone(),
+                valid_voters.clone(),
+                2,
+                Some(node("outsider")),
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::WitnessNotConfigured)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                valid_candidates.clone(),
+                valid_voters.clone(),
+                2,
+                Some(node("node-a")),
+                1,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::WitnessIsCandidate)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                valid_candidates.clone(),
+                valid_voters.clone(),
+                2,
+                Some(node("witness")),
+                0,
+                1,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::ZeroHealthChecks)
+        );
+        assert_eq!(
+            SafetyPolicy::new(
+                workload(),
+                hash(),
+                valid_candidates,
+                valid_voters,
+                2,
+                Some(node("witness")),
+                1,
+                0,
+                1,
+                0,
+                true,
+            )
+            .err(),
+            Some(PolicyError::ZeroTimeBound)
+        );
+    }
+
+    #[test]
+    fn top_level_subject_and_generation_mismatches_fail_closed() {
+        let mut wrong_workload = proof("node-a", 1);
+        let Ok(other_workload) = WorkloadId::new("other") else {
+            std::process::abort();
+        };
+        wrong_workload.workload = other_workload;
+        assert_eq!(
+            validate_promotion(&wrong_workload, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::WorkloadMismatch)
+        );
+
+        let mut wrong_policy = proof("node-a", 1);
+        wrong_policy.policy_hash = PolicyHash::new([8; 32]);
+        assert_eq!(
+            validate_promotion(&wrong_policy, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::PolicyHashMismatch)
+        );
+
+        let mut unknown_candidate = proof("node-a", 1);
+        unknown_candidate.candidate = node("node-c");
+        assert_eq!(
+            validate_promotion(
+                &unknown_candidate,
+                &AuthorityState::initial(),
+                &policy(),
+                NOW
+            ),
+            Err(ProofError::CandidateNotConfigured)
+        );
+
+        let current = AuthorityState {
+            epoch: Epoch(0),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: Some(NOW - 1),
+        };
+        assert_eq!(
+            validate_promotion(&proof("node-a", 1), &current, &policy(), NOW),
+            Err(ProofError::CandidateAlreadyHoldsAuthority)
+        );
+
+        let mut mixed_epoch = proof("node-a", 1);
+        mixed_epoch.health.epoch = Epoch(2);
+        assert_eq!(
+            validate_promotion(&mixed_epoch, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::EpochMismatch)
+        );
+    }
+
+    #[test]
+    fn quorum_requires_known_distinct_voters_candidate_and_witness() {
+        let mut unknown = proof("node-a", 1);
+        unknown.quorum.voters = vec![node("node-a"), node("outsider")];
+        assert_eq!(
+            validate_promotion(&unknown, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::UnknownVoter)
+        );
+
+        let mut too_small = proof("node-a", 1);
+        too_small.quorum.voters = vec![node("node-a")];
+        assert_eq!(
+            validate_promotion(&too_small, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::InsufficientQuorum)
+        );
+
+        let mut candidate_absent = proof("node-a", 1);
+        candidate_absent.quorum.voters = vec![node("node-b"), node("witness")];
+        assert_eq!(
+            validate_promotion(
+                &candidate_absent,
+                &AuthorityState::initial(),
+                &policy(),
+                NOW
+            ),
+            Err(ProofError::CandidateDidNotVote)
+        );
+    }
+
+    #[test]
+    fn fence_receipt_must_bind_an_authorized_exclusion() {
+        let mut invalid_verifier = proof("node-a", 1);
+        invalid_verifier.fence.verifier = node("node-a");
+        assert_eq!(
+            validate_promotion(
+                &invalid_verifier,
+                &AuthorityState::initial(),
+                &policy(),
+                NOW
+            ),
+            Err(ProofError::InvalidFenceVerifier)
+        );
+
+        let mut non_bootstrap = proof("node-a", 1);
+        non_bootstrap.fence.mechanism = FenceMechanism::HardwarePower;
+        assert_eq!(
+            validate_promotion(&non_bootstrap, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::InvalidBootstrap)
+        );
+
+        let current = AuthorityState {
+            epoch: Epoch(1),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: Some(NOW - 200),
+        };
+        let mut bootstrap_again = proof("node-b", 2);
+        bootstrap_again.fence.target = Some(node("node-a"));
+        assert_eq!(
+            validate_promotion(&bootstrap_again, &current, &policy(), NOW),
+            Err(ProofError::BootstrapNotAllowed)
+        );
+
+        let mut wrong_target = proof("node-b", 2);
+        wrong_target.fence.target = Some(node("node-b"));
+        wrong_target.fence.mechanism = FenceMechanism::HardwarePower;
+        assert_eq!(
+            validate_promotion(&wrong_target, &current, &policy(), NOW),
+            Err(ProofError::WrongFenceTarget)
+        );
+    }
+
+    #[test]
+    fn gate_expiry_fence_requires_policy_lease_and_nonoverflowing_guard() {
+        let disabled = SafetyPolicy::new(
+            workload(),
+            hash(),
+            [node("node-a"), node("node-b")],
+            [node("node-a"), node("node-b"), node("witness")],
+            2,
+            Some(node("witness")),
+            3,
+            1_000,
+            2_000,
+            100,
+            false,
+        );
+        let Ok(disabled) = disabled else {
+            std::process::abort();
+        };
+        let mut candidate = proof("node-b", 2);
+        candidate.fence.target = Some(node("node-a"));
+        candidate.fence.mechanism = FenceMechanism::EffectGateExpired;
+        let current = AuthorityState {
+            epoch: Epoch(1),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: Some(NOW - 200),
+        };
+        assert_eq!(
+            validate_promotion(&candidate, &current, &disabled, NOW),
+            Err(ProofError::GateExpiryFenceDisabled)
+        );
+
+        let missing_lease = AuthorityState {
+            epoch: Epoch(1),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: None,
+        };
+        assert_eq!(
+            validate_promotion(&candidate, &missing_lease, &policy(), NOW),
+            Err(ProofError::FenceGuardNotElapsed)
+        );
+
+        let overflowing_guard = AuthorityState {
+            epoch: Epoch(1),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: Some(u64::MAX),
+        };
+        assert_eq!(
+            validate_promotion(&candidate, &overflowing_guard, &policy(), NOW),
+            Err(ProofError::FenceGuardNotElapsed)
+        );
+    }
+
+    #[test]
+    fn authoritative_storage_and_elapsed_gate_fences_are_accepted() {
+        let current = AuthorityState {
+            epoch: Epoch(1),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: Some(NOW - 100),
+        };
+
+        let mut storage = proof("node-b", 2);
+        storage.fence.target = Some(node("node-a"));
+        storage.fence.mechanism = FenceMechanism::StorageReservation;
+        let result = validate_promotion(&storage, &current, &policy(), NOW);
+        let Ok(validated) = result else {
+            std::process::abort();
+        };
+        assert_eq!(validated.fence_class(), FenceClass::StorageReservation);
+
+        let mut expired_gate = proof("node-b", 2);
+        expired_gate.fence.target = Some(node("node-a"));
+        expired_gate.fence.mechanism = FenceMechanism::EffectGateExpired;
+        expired_gate.lease.not_before_ms = NOW;
+        expired_gate.lease.expires_at_ms = NOW + 500;
+        expired_gate.quorum.lease_not_before_ms = NOW;
+        expired_gate.quorum.lease_expires_at_ms = NOW + 500;
+        let result = validate_promotion(&expired_gate, &current, &policy(), NOW);
+        let Ok(validated) = result else {
+            std::process::abort();
+        };
+        assert_eq!(validated.fence_class(), FenceClass::EffectGateExpiry);
+    }
+
+    #[test]
+    fn evidence_age_limit_is_inclusive_but_older_evidence_is_rejected() {
+        let mut exact_boundary = proof("node-a", 1);
+        exact_boundary.state.observed_at_ms = NOW - 1_000;
+        assert!(
+            validate_promotion(&exact_boundary, &AuthorityState::initial(), &policy(), NOW).is_ok()
+        );
+
+        let mut too_old = proof("node-a", 1);
+        too_old.state.observed_at_ms = NOW - 1_001;
+        assert_eq!(
+            validate_promotion(&too_old, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::EvidenceTooOld)
+        );
+    }
+
+    #[test]
+    fn health_attestation_must_match_subject_and_required_checks() {
+        let mut wrong_subject = proof("node-a", 1);
+        wrong_subject.health.node = node("node-b");
+        assert_eq!(
+            validate_promotion(&wrong_subject, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::HealthSubjectMismatch)
+        );
+
+        let mut insufficient = proof("node-a", 1);
+        insufficient.health.passed_checks = 2;
+        assert_eq!(
+            validate_promotion(&insufficient, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::InsufficientHealthChecks)
+        );
+    }
+
+    #[test]
+    fn malformed_lease_bounds_and_subjects_are_rejected() {
+        let mut wrong_subject = proof("node-a", 1);
+        wrong_subject.lease.holder = node("node-b");
+        assert_eq!(
+            validate_promotion(&wrong_subject, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::LeaseSubjectMismatch)
+        );
+
+        let mut reversed = proof("node-a", 1);
+        reversed.lease.not_before_ms = NOW + 100;
+        reversed.lease.expires_at_ms = NOW + 50;
+        reversed.quorum.lease_not_before_ms = NOW + 100;
+        reversed.quorum.lease_expires_at_ms = NOW + 50;
+        assert_eq!(
+            validate_promotion(&reversed, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::InvalidLeaseInterval)
+        );
+
+        let mut empty = proof("node-a", 1);
+        empty.lease.not_before_ms = NOW;
+        empty.lease.expires_at_ms = NOW;
+        empty.quorum.lease_not_before_ms = NOW;
+        empty.quorum.lease_expires_at_ms = NOW;
+        assert_eq!(
+            validate_promotion(&empty, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::InvalidLeaseInterval)
+        );
+
+        let mut too_long = proof("node-a", 1);
+        too_long.lease.not_before_ms = NOW - 5;
+        too_long.lease.expires_at_ms = NOW + 2_000;
+        too_long.quorum.lease_not_before_ms = NOW - 5;
+        too_long.quorum.lease_expires_at_ms = NOW + 2_000;
+        assert_eq!(
+            validate_promotion(&too_long, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::LeaseTooLong)
+        );
+    }
+
+    #[test]
+    fn lease_expires_at_an_exclusive_boundary_and_cannot_precede_fence() {
+        let mut at_expiry = proof("node-a", 1);
+        at_expiry.lease.expires_at_ms = NOW;
+        at_expiry.quorum.lease_expires_at_ms = NOW;
+        assert_eq!(
+            validate_promotion(&at_expiry, &AuthorityState::initial(), &policy(), NOW),
+            Err(ProofError::LeaseNotActive)
+        );
+
+        let current = AuthorityState {
+            epoch: Epoch(1),
+            holder: Some(node("node-a")),
+            lease_expires_at_ms: Some(NOW - 100),
+        };
+        let mut before_safe_time = proof("node-b", 2);
+        before_safe_time.fence.target = Some(node("node-a"));
+        before_safe_time.fence.mechanism = FenceMechanism::EffectGateExpired;
+        assert_eq!(
+            validate_promotion(&before_safe_time, &current, &policy(), NOW),
+            Err(ProofError::LeaseStartsBeforeFence)
+        );
+    }
 }

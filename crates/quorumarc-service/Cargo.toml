@@ -1,0 +1,32 @@
+[package]
+name = "quorumarc-service"
+description = "Production daemon, configuration, and workload foundation for QuorumArc Gate 1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ed25519-dalek = "=2.1.1"
+futures = { version = "=0.3.31", default-features = false, features = ["std"] }
+quorumarc-core = { path = "../quorumarc-core", version = "=0.1.0" }
+quorumarc-runtime = { path = "../quorumarc-runtime", version = "=0.1.0" }
+quorumarc-store = { path = "../quorumarc-store", version = "=0.1.0" }
+quorumarc-wire = { path = "../quorumarc-wire", version = "=0.1.0" }
+rtnetlink = { version = "=0.23.0", default-features = false, features = ["tokio_socket"] }
+rustix = { version = "=1.1.4", features = ["fs", "net", "process", "time"] }
+rustls = { version = "=0.23.37", default-features = false, features = ["ring", "std"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+sha2 = "=0.10.8"
+signal-hook = "=0.3.18"
+tokio = { version = "=1.43.1", default-features = false, features = ["rt", "rt-multi-thread", "net"] }
+toml = "=0.8.23"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rcgen = "=0.13.2"

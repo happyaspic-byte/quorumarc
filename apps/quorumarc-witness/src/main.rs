@@ -1,29 +1,29 @@
+use std::ffi::OsString;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
-const NOT_IMPLEMENTED: u8 = 78;
-
 fn main() -> ExitCode {
-    let command = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| String::from("status"));
+    let arguments = match utf8_arguments(std::env::args_os().skip(1)) {
+        Ok(arguments) => arguments,
+        Err(()) => {
+            let result = writeln!(
+                io::stderr().lock(),
+                "reason=CLI_USAGE_ERROR detail=argument-is-not-valid-UTF-8"
+            );
+            return if result.is_ok() {
+                ExitCode::from(2)
+            } else {
+                ExitCode::from(74)
+            };
+        }
+    };
+    let code = quorumarc_witness::execute(arguments, &mut io::stdout(), &mut io::stderr());
+    ExitCode::from(code)
+}
 
-    match command.as_str() {
-        "status" => {
-            println!("quorumarc-witness gate=0 mode=research voting=disabled");
-            ExitCode::SUCCESS
-        }
-        "vote" | "certify" => {
-            eprintln!("refused: Gate 0 has no durable consensus log, identity, or signing key");
-            ExitCode::from(NOT_IMPLEMENTED)
-        }
-        "--help" | "-h" => {
-            println!("Usage: quorumarc-witness [status|vote]");
-            println!("Gate 0 always refuses votes and certificates.");
-            ExitCode::SUCCESS
-        }
-        unknown => {
-            eprintln!("unknown command: {unknown}");
-            ExitCode::from(2)
-        }
-    }
+fn utf8_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, ()> {
+    arguments
+        .into_iter()
+        .map(|argument| argument.into_string().map_err(|_| ()))
+        .collect()
 }

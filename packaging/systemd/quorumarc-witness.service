@@ -1,0 +1,45 @@
+[Unit]
+Description=QuorumArc independent Witness (non-voting incomplete)
+Documentation=file:///usr/share/doc/quorumarc/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+# Witness must not share a data-host store or controller host.
+
+[Service]
+Type=simple
+User=quorumarc-witness
+Group=quorumarc-witness
+ExecStart=/usr/bin/quorumarc-witness daemon --config /etc/quorumarc-witness/witness.toml
+WorkingDirectory=/var/lib/quorumarc-witness
+RuntimeDirectory=quorumarc-witness
+RuntimeDirectoryMode=0750
+StateDirectory=quorumarc-witness
+StateDirectoryMode=0750
+ConfigurationDirectory=quorumarc-witness
+ConfigurationDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+LimitNOFILE=1024
+TimeoutStopSec=15
+KillSignal=SIGTERM
+Restart=no
+NotifyAccess=main
+WatchdogSec=30s
+
+[Install]
+WantedBy=multi-user.target

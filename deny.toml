@@ -1,0 +1,36 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+private = { ignore = true }
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+
+[[bans.skip]]
+name = "syn"
+version = "=2.0.119"
+reason = "curve25519-dalek-derive still requires syn 2 while serde_derive requires syn 3"
+
+[[bans.skip]]
+name = "windows-sys"
+version = "=0.52.0"
+reason = "ring has not migrated to windows-sys 0.61"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

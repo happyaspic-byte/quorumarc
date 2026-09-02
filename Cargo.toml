@@ -3,14 +3,21 @@ resolver = "3"
 members = [
     "apps/quorumarc-agent",
     "apps/quorumarc-witness",
+    "crates/quorumarc-cluster",
     "crates/quorumarc-core",
+    "crates/quorumarc-lab",
+    "crates/quorumarc-rpo0",
     "crates/quorumarc-sim",
+    "crates/quorumarc-runtime",
+    "crates/quorumarc-service",
+    "crates/quorumarc-store",
+    "crates/quorumarc-wire",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["QuorumArc Contributors"]
 license-file = "LICENSE"
 repository = "https://github.com/happyaspic-byte/quorumarc"

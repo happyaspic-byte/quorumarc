@@ -1,32 +1,25 @@
+use std::io::{self, Write};
 use std::process::ExitCode;
 
-const NOT_IMPLEMENTED: u8 = 78;
-
 fn main() -> ExitCode {
-    let command = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| String::from("status"));
-
-    match command.as_str() {
-        "status" => {
-            println!("quorumarc-agent gate=0 mode=research effect_gate=closed");
-            println!("automatic promotion is intentionally disabled");
-            ExitCode::SUCCESS
-        }
-        "promote" | "activate" => {
-            eprintln!(
-                "refused: Gate 0 has no durable consensus, signed proof, or real fence adapter"
+    let report = quorumarc_agent::execute(std::env::args_os().skip(1));
+    let stdout_result = write_lines(&mut io::stdout().lock(), report.stdout());
+    let stderr_result = write_lines(&mut io::stderr().lock(), report.stderr());
+    match stdout_result.and(stderr_result) {
+        Ok(()) => ExitCode::from(report.exit_code()),
+        Err(_error) => {
+            let _diagnostic_result = writeln!(
+                io::stderr().lock(),
+                "{{\"event\":\"cli-output\",\"status\":\"refused\",\"reason_code\":\"CLI_OUTPUT_IO_ERROR\"}}"
             );
-            ExitCode::from(NOT_IMPLEMENTED)
-        }
-        "--help" | "-h" => {
-            println!("Usage: quorumarc-agent [status|promote]");
-            println!("Gate 0 always refuses promotion and activation.");
-            ExitCode::SUCCESS
-        }
-        unknown => {
-            eprintln!("unknown command: {unknown}");
-            ExitCode::from(2)
+            ExitCode::from(74)
         }
     }
+}
+
+fn write_lines(writer: &mut impl Write, lines: &[String]) -> io::Result<()> {
+    for line in lines {
+        writeln!(writer, "{line}")?;
+    }
+    Ok(())
 }

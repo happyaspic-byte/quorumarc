@@ -1,0 +1,21 @@
+[package]
+name = "quorumarc-store"
+description = "Fail-closed durable authority storage for QuorumArc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["QuorumArc Contributors"]
+license-file = "../../LICENSE"
+repository = "https://github.com/happyaspic-byte/quorumarc"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+

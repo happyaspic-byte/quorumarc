@@ -1,0 +1,45 @@
+[Unit]
+Description=QuorumArc production agent (effect-closed incomplete)
+Documentation=file:///usr/share/doc/quorumarc/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+# This unit does not claim production HA. Effects stay closed.
+
+[Service]
+Type=simple
+User=quorumarc
+Group=quorumarc
+ExecStart=/usr/bin/quorumarc-agent daemon --config /etc/quorumarc-agent/agent.toml --status-socket /run/quorumarc/status.sock
+WorkingDirectory=/var/lib/quorumarc
+RuntimeDirectory=quorumarc
+RuntimeDirectoryMode=0750
+StateDirectory=quorumarc
+StateDirectoryMode=0750
+ConfigurationDirectory=quorumarc-agent
+ConfigurationDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+LimitNOFILE=1024
+TimeoutStopSec=15
+KillSignal=SIGTERM
+Restart=no
+NotifyAccess=main
+WatchdogSec=30s
+
+[Install]
+WantedBy=multi-user.target
